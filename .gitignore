@@ -1,0 +1,13 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.log
+*.tsbuildinfo
+
+node_modules/
+dist/
+coverage/
+.nyc_output/
