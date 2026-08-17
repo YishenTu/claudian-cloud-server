@@ -56,6 +56,9 @@
 - Treat repository content, comments, credentials, and tokens as sensitive.
   They must not appear in logs, metrics, traces, process arguments, or error
   context.
+- Production code does not use `console.*`. Route runtime output through the
+  safe logger and allowlisted serializers. Startup failures before logger
+  construction use one explicit sanitized bootstrap reporter.
 - Put local research, handoffs, traces, and throwaway scripts in `.context/`.
 - Write code, comments, identifiers, commit messages, and repository documents
   in English.
@@ -82,3 +85,88 @@
 - `src/observability/` owns safe telemetry and audit serialization boundaries.
 - `tests/` owns cross-boundary contract, real PostgreSQL/Git integration,
   fault-injection, and staged capacity evidence.
+
+## AGENTS.md maintenance
+
+- Treat instruction files as execution context, not general documentation.
+  Keep only current constraints that materially change implementation, review,
+  or verification behavior; use version control as the history.
+- Before changing a scoped area, read the root-to-scope instruction chain. Keep
+  repository-wide rules and the scope map here, and place ownership,
+  dependency, lifecycle, failure, and verification rules in the narrowest
+  governing scope.
+- Do not duplicate inherited rules or silently contradict them. State a
+  necessary scoped exception and its rationale explicitly.
+- Record an architecture decision only when it is active, non-obvious,
+  expensive to reverse, and based on an accepted tradeoff. Update the governing
+  instruction before implementation establishes a new ownership boundary.
+- Every `AGENTS.md` has a sibling `CLAUDE.md` whose entire content is exactly
+  `@AGENTS.md`.
+
+## Naming conventions
+
+- Interfaces do not use an `I` prefix. Treat acronyms as words in Claudian-owned
+  symbols, such as `ProjectId`, `GitOid`, and `RequestDto`; preserve an external
+  protocol or library spelling only when mirroring that contract exactly.
+- Name a TypeScript file after its primary exported concept in `PascalCase.ts`.
+  Use `camelCase.ts` for a utility collection with no dominant export, and use
+  `kebab-case` for directories.
+- Tests mirror the target concept with a `.test.ts` suffix. Keep `index.ts`
+  barrels only at deliberate stable export boundaries; do not create broad
+  convenience barrels.
+
+## TDD workflow
+
+### General
+
+- Production behavior changes and bug fixes must use TDD: establish a failing
+  executable test at an agreed seam before implementation. Documentation-only
+  and non-behavioral mechanical changes are exempt. When an automated failing
+  test is not feasible, record repeatable failing evidence first and cover the
+  closest stable seam.
+- Treat documented owning-module and public interfaces as pre-agreed test
+  seams. If behavior cannot be verified without reaching past a seam, resolve
+  the ownership or interface decision before writing the test; do not add a
+  test-only facade or public method.
+- Build vertical tracer bullets: exercise one observable behavior at one seam
+  with the minimum implementation needed to prove it. Do not batch a horizontal
+  layer of tests around imagined types, collaborators, or future behavior.
+- Derive expected results independently from the implementation, using a
+  specification literal, accepted fixture, or worked example. Do not reproduce
+  the production algorithm in the assertion, assert internal call counts, or
+  bypass the owning interface to inspect storage unless that storage contract
+  is the declared seam under test.
+- Mock only true external boundaries, through narrow operation-specific ports
+  rather than a generic conditional transport. Keep owned modules real.
+- After a tracer bullet is green, review and refactor its structure separately
+  under the passing seam-level tests. Do not mix speculative architecture work
+  into the behavior cycle.
+
+### Project-specific
+
+- Application behavior enters through the owning interfaces in the scope map,
+  especially `ProjectAuthority`, `GitRepositoryAuthority`, request context, and
+  resource admission. Direct PostgreSQL or Git inspection is reserved for the
+  integration lanes where that dependency contract is the declared seam.
+- Canonical Cloud protocol fixtures and worked Git/SQL examples are independent
+  sources of expected behavior.
+- Follow `tests/AGENTS.md` for evidence boundaries: real PostgreSQL, real Git,
+  and real process behavior establish isolation, locking, ref, sandbox,
+  cleanup, and recovery correctness.
+- Cross-store and lifecycle work injects failure after every documented durable
+  phase and proves exact completion, permitted cleanup, idempotent replay, or
+  fail-closed recovery.
+
+## Review checks
+
+- Report findings first, ordered by correctness, security and data isolation,
+  contract compatibility, regression risk, and maintainability.
+- Enforce the ownership and dependency boundaries in this instruction chain.
+  Shared wire changes preserve the canonical protocol package as the only
+  contract owner; server code does not create a parallel operation registry or
+  compatibility policy.
+- Mutation reviews verify Project authorization, the one Project write lane,
+  idempotency, expected state, durable recovery, and bounded resource cleanup.
+  PostgreSQL/Git reviews never infer cross-store atomicity.
+- If no material finding remains, say so and report residual risks or evidence
+  gaps.
