@@ -6,7 +6,6 @@ import type { ServerConfig } from '../../../src/config/ServerConfig.js';
 import { SafeLogger } from '../../../src/observability/SafeLogger.js';
 
 const config: ServerConfig = Object.freeze({
-  deploymentProfile: 'private-development',
   http: Object.freeze({
     host: '127.0.0.1',
     port: 0,

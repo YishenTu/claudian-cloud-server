@@ -1,18 +1,18 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { createServer } from 'node:net';
 import { describe, it } from 'node:test';
 
 describe('main process', () => {
   it('starts from environment configuration and shuts down on SIGTERM', async () => {
+    const port = await findAvailablePort();
     const child = spawn(process.execPath, ['--import', 'tsx', 'src/main.ts'], {
       cwd: process.cwd(),
       env: {
         ...process.env,
         CLAUDIAN_CLOUD_BIND_HOST: '127.0.0.1',
-        CLAUDIAN_CLOUD_DEPLOYMENT_PROFILE: 'private-development',
-        CLAUDIAN_CLOUD_PORT: '0',
-        CLAUDIAN_CLOUD_SHUTDOWN_TIMEOUT_MS: '1000',
+        CLAUDIAN_CLOUD_PORT: String(port),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -42,6 +42,23 @@ describe('main process', () => {
     }
   });
 });
+
+async function findAvailablePort(): Promise<number> {
+  const server = createServer();
+  server.listen({ host: '127.0.0.1', port: 0 });
+  await once(server, 'listening');
+  const address = server.address();
+  if (address === null || typeof address === 'string') {
+    throw new Error('Test server address unavailable');
+  }
+  await new Promise<void>((resolve, reject) => {
+    server.close(error => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+  return address.port;
+}
 
 async function waitForEvent(lines: readonly string[], event: string): Promise<void> {
   const deadline = Date.now() + 5_000;

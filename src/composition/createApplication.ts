@@ -48,9 +48,7 @@ class CloudApplication implements Application {
     }
 
     this.#state = 'starting';
-    this.#logger.info('server.starting', {
-      profile: this.#config.deploymentProfile,
-    });
+    this.#logger.info('server.starting');
     this.#startPromise = this.#start();
     return this.#startPromise;
   }
@@ -68,7 +66,6 @@ class CloudApplication implements Application {
       this.#state = 'ready';
       this.#logger.info('server.listening', {
         port: address.port,
-        profile: this.#config.deploymentProfile,
       });
       return address;
     } catch (cause: unknown) {

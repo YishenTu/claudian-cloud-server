@@ -6,17 +6,15 @@ User authentication is outside this repository. Deployments must provide their o
 
 ## Development
 
-The scaffold is pinned to Node.js 24.16.0. The `.node-version` file declares the version but does not switch an unmanaged shell automatically. On this macOS workstation, one option is to install `fnm`, activate its zsh integration, and let it read `.node-version`:
+The scaffold is pinned to Node.js 24.16.0. The `.node-version` file declares the version but does not switch an unmanaged shell automatically. Use any Node.js version manager that supports this file. With `fnm` installed, select the project version with:
 
 ```bash
-brew install fnm
-eval "$(fnm env --use-on-cd --shell zsh)"
 fnm install
 fnm use
 node --version
 ```
 
-Add the `eval` line to `~/.zshrc` if you want automatic switching whenever you enter the repository. Once `node --version` reports `v24.16.0`, install and verify with:
+Once `node --version` reports `v24.16.0`, install and verify with:
 
 ```bash
 npm ci
@@ -52,7 +50,7 @@ On the deployment host, keep the runtime environment outside the repository chec
 docker compose -f deploy/compose.yaml up --detach --build
 ```
 
-The deployment deliberately does not select or configure a private-ingress product. The operator owns that boundary and may forward its private endpoint to `127.0.0.1:8787` only after the loopback health checks pass. PostgreSQL and repository storage join the deployment only when their owning implementations and recovery contracts exist.
+The deployment deliberately does not select or configure a private-ingress product. The operator owns that boundary and may forward its private endpoint to the configured loopback port only after the loopback health checks pass. PostgreSQL and repository storage join the deployment only when their owning implementations and recovery contracts exist.
 
 ### Git-backed updates
 
@@ -62,4 +60,4 @@ The deployment host authenticates to the Git remote through operator-owned crede
 deploy/deploy.sh
 ```
 
-The runtime environment defaults to `/etc/claudian-cloud-server/server.env`. Operators may set `CLAUDIAN_DEPLOY_ENV_FILE`, `CLAUDIAN_DEPLOY_IMAGE_REPOSITORY`, `CLAUDIAN_DEPLOY_WAIT_TIMEOUT_SECONDS`, or `CLAUDIAN_DEPLOY_BUILD_NETWORK` without placing those values in the repository. The script refuses dirty checkouts, so only committed source can become a deployment image.
+The runtime environment defaults to `/etc/claudian-cloud-server/server.env`. Operators may set `CLAUDIAN_DEPLOY_ENV_FILE`, `CLAUDIAN_DEPLOY_IMAGE_REPOSITORY`, `CLAUDIAN_DEPLOY_WAIT_TIMEOUT_SECONDS`, or `CLAUDIAN_DEPLOY_BUILD_NETWORK` without placing those values in the repository. Compose defaults to limits of 1.5 CPUs, 1 GiB of memory, and 256 PIDs; set `CLAUDIAN_DEPLOY_CPUS`, `CLAUDIAN_DEPLOY_MEMORY`, or `CLAUDIAN_DEPLOY_PIDS` in the operator environment to match the selected host. The script refuses dirty checkouts, so only committed source can become a deployment image.

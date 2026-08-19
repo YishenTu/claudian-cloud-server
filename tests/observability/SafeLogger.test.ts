@@ -16,7 +16,6 @@ describe('SafeLogger', () => {
       credential: 'private-vps-password',
       path: '/srv/private/project.git',
       port: 8787,
-      profile: 'private-development',
       reason: new Error('raw startup failure'),
     });
 
@@ -26,7 +25,6 @@ describe('SafeLogger', () => {
     assert.deepEqual(JSON.parse(line), {
       context: {
         port: 8787,
-        profile: 'private-development',
       },
       event: 'server.listening',
       level: 'info',

@@ -33,8 +33,9 @@ services:
         - node
         - -e
         - >-
-          fetch('http://127.0.0.1:8787/livez').then((response) =>
-          process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))
+          fetch('http://127.0.0.1:' + process.env.CLAUDIAN_CLOUD_PORT +
+          '/livez').then((response) => process.exit(response.ok ? 0 :
+          1)).catch(() => process.exit(1))
       interval: 10s
       timeout: 3s
       retries: 3

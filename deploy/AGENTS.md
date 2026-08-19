@@ -1,6 +1,6 @@
 # Deployment
 
-- Keep one shared deployment artifact set for the Cloud Server implementation. Deployment profiles are selected through validated external runtime configuration; do not copy deployment files into `private-development`, `self-hosted`, or `managed` variants. Split this scope only when deployment mechanics genuinely differ.
+- Keep one shared deployment artifact set for the Cloud Server implementation. Do not copy deployment files into `private-development`, `self-hosted`, or `managed` variants; split this scope only when deployment mechanics genuinely differ.
 - Keep the operator-selected ingress and its configuration on the host. Deployment artifacts must not configure endpoint access, caller authentication, or Project authorization.
 - The Compose topology uses Linux host networking so a configured loopback listener remains on host loopback. Do not add Compose port publication or broaden the application bind address in deployment artifacts.
 - Runtime environment files live outside the checkout and image. Never copy `.env` files, SSH material, private-ingress state, or deployment credentials into the build context.

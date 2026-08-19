@@ -1,12 +1,9 @@
-export type DeploymentProfile = 'private-development';
-
 export interface HttpConfig {
   readonly host: '127.0.0.1';
   readonly port: number;
 }
 
 export interface ServerConfig {
-  readonly deploymentProfile: DeploymentProfile;
   readonly http: HttpConfig;
   readonly shutdownTimeoutMs: number;
 }
@@ -42,11 +39,10 @@ type ConfigSource = Readonly<Record<string, string | undefined>>;
 
 const CONFIG_PREFIX = 'CLAUDIAN_CLOUD_';
 const TRUSTED_INGRESS_PREFIX = 'CLAUDIAN_CLOUD_TRUSTED_INGRESS_';
+const SHUTDOWN_TIMEOUT_MS = 15_000;
 const CONFIG_FIELDS = new Set([
   'CLAUDIAN_CLOUD_BIND_HOST',
-  'CLAUDIAN_CLOUD_DEPLOYMENT_PROFILE',
   'CLAUDIAN_CLOUD_PORT',
-  'CLAUDIAN_CLOUD_SHUTDOWN_TIMEOUT_MS',
 ]);
 
 function requireValue(source: ConfigSource, field: string): string {
@@ -89,14 +85,6 @@ function rejectUnknownFields(source: ConfigSource): void {
 export function decodeServerConfig(source: ConfigSource): ServerConfig {
   rejectUnknownFields(source);
 
-  const deploymentProfile = requireValue(
-    source,
-    'CLAUDIAN_CLOUD_DEPLOYMENT_PROFILE',
-  );
-  if (deploymentProfile !== 'private-development') {
-    throw new ConfigError('invalid-field', 'CLAUDIAN_CLOUD_DEPLOYMENT_PROFILE');
-  }
-
   const host = requireValue(source, 'CLAUDIAN_CLOUD_BIND_HOST');
   if (host !== '127.0.0.1') {
     throw new ConfigError('profile-conflict', 'CLAUDIAN_CLOUD_BIND_HOST');
@@ -104,17 +92,11 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
 
   const http = Object.freeze({
     host,
-    port: parseInteger(source, 'CLAUDIAN_CLOUD_PORT', 0, 65_535),
+    port: parseInteger(source, 'CLAUDIAN_CLOUD_PORT', 1, 65_535),
   });
 
   return Object.freeze({
-    deploymentProfile,
     http,
-    shutdownTimeoutMs: parseInteger(
-      source,
-      'CLAUDIAN_CLOUD_SHUTDOWN_TIMEOUT_MS',
-      100,
-      120_000,
-    ),
+    shutdownTimeoutMs: SHUTDOWN_TIMEOUT_MS,
   });
 }

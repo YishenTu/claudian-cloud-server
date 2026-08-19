@@ -34,7 +34,7 @@
 ## Scope map
 
 - `src/composition/` owns construction, startup, shutdown, and dependency wiring; it owns no collaboration policy.
-- `src/config/` owns typed configuration and deployment-profile safety.
+- `src/config/` owns typed configuration and runtime safety constraints.
 - `src/server/` owns HTTP, Git Smart HTTP, event, health, and version transport adaptation after trusted ingress.
 - `src/request-context/` binds the trusted ingress actor to immutable server request context; it does not authenticate callers or authorize Projects.
 - `src/project-authority/` owns Project admission, authorization, idempotency, mutation ordering, lifecycle policy, and cross-store recovery.

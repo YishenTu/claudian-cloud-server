@@ -22,7 +22,6 @@ const TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const CONTEXT_RULES: Readonly<Record<string, ContextRule>> = Object.freeze({
   durationMs: 'number',
   port: 'integer',
-  profile: 'token',
   protocolVersion: 'integer',
   reason: 'token',
   signal: 'token',
