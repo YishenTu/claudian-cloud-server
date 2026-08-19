@@ -14,7 +14,7 @@ import { describe, it } from 'node:test';
 
 const deployScript = resolve(
   import.meta.dirname,
-  '../../deploy/private-development/deploy.sh',
+  '../../deploy/deploy.sh',
 );
 
 interface DeploymentFixture {
@@ -48,13 +48,13 @@ async function createFixture(): Promise<DeploymentFixture> {
   git(seed, 'init', '--initial-branch=main');
   git(seed, 'config', 'user.email', 'deployment-test@example.invalid');
   git(seed, 'config', 'user.name', 'Deployment Test');
-  await mkdir(join(seed, 'deploy/private-development'), { recursive: true });
+  await mkdir(join(seed, 'deploy'), { recursive: true });
   await writeFile(
-    join(seed, 'deploy/private-development/compose.yaml'),
+    join(seed, 'deploy/compose.yaml'),
     'services:\n  cloud-server:\n    image: ${CLAUDIAN_CLOUD_IMAGE}\n',
   );
   await writeFile(
-    join(seed, 'deploy/private-development/Dockerfile'),
+    join(seed, 'deploy/Dockerfile'),
     'FROM scratch\n',
   );
   await writeFile(join(seed, 'version.txt'), 'first\n');
@@ -122,7 +122,7 @@ function runDeployment(
   });
 }
 
-describe('private-development deployment', () => {
+describe('deployment', () => {
   it('rejects an uncommitted checkout before fetching or building', async () => {
     const fixture = await createFixture();
     try {

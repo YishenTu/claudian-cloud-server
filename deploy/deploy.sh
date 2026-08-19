@@ -20,8 +20,8 @@ environment_file="${CLAUDIAN_DEPLOY_ENV_FILE:-/etc/claudian-cloud-server/server.
 image_repository="${CLAUDIAN_DEPLOY_IMAGE_REPOSITORY:-claudian-cloud-server}"
 wait_timeout="${CLAUDIAN_DEPLOY_WAIT_TIMEOUT_SECONDS:-30}"
 build_network="${CLAUDIAN_DEPLOY_BUILD_NETWORK:-}"
-compose_file='deploy/private-development/compose.yaml'
-dockerfile='deploy/private-development/Dockerfile'
+compose_file='deploy/compose.yaml'
+dockerfile='deploy/Dockerfile'
 
 [[ -r "$environment_file" ]] || fail 'environment-file-unreadable'
 [[ "$wait_timeout" =~ ^[1-9][0-9]*$ ]] || fail 'invalid-wait-timeout'

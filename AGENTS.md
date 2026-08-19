@@ -43,7 +43,7 @@
 - `src/onboarding/` owns isolated staging and only the onboarding profiles whose authority-transfer contracts have been accepted.
 - `src/resource-admission/` owns global and per-Project resource permits, queues, reservations, and overload behavior.
 - `src/observability/` owns safe telemetry and audit serialization boundaries.
-- `deploy/private-development/` owns the reproducible single-host development deployment shape; it does not own application configuration policy or trusted-ingress behavior.
+- `deploy/` owns the shared container build and reproducible single-host deployment shape; it does not own application profile policy or trusted-ingress behavior.
 - `tests/` owns cross-boundary contract, real PostgreSQL/Git integration, fault-injection, and staged capacity evidence.
 
 ## AGENTS.md maintenance

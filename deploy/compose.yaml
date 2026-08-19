@@ -1,11 +1,11 @@
-name: claudian-cloud-server-private-development
+name: claudian-cloud-server
 
 services:
   cloud-server:
-    image: ${CLAUDIAN_CLOUD_IMAGE:-claudian-cloud-server:private-development}
+    image: ${CLAUDIAN_CLOUD_IMAGE:-claudian-cloud-server:local}
     build:
-      context: ../..
-      dockerfile: deploy/private-development/Dockerfile
+      context: ..
+      dockerfile: deploy/Dockerfile
     network_mode: host
     env_file:
       - path: ${CLAUDIAN_CLOUD_ENV_FILE:-/etc/claudian-cloud-server/server.env}

@@ -10,7 +10,7 @@
   },
   "scripts": {
     "build": "npm run clean && tsc -p tsconfig.build.json",
-    "check:deployment": "CLAUDIAN_CLOUD_ENV_FILE=\"$PWD/.env.example\" docker compose -f deploy/private-development/compose.yaml config --quiet",
+    "check:deployment": "CLAUDIAN_CLOUD_ENV_FILE=\"$PWD/.env.example\" docker compose -f deploy/compose.yaml config --quiet",
     "check:runtime": "tsx scripts/check-runtime.ts",
     "clean": "rm -rf dist",
     "dev": "tsx src/main.ts",
@@ -28,7 +28,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify": "npm run lint && npm run typecheck && npm test && npm run build",
     "verify:application": "npm run lint && npm run typecheck && npm run test:application && npm run build",
-    "verify:deployment": "npm run check:deployment && docker build --file deploy/private-development/Dockerfile --tag claudian-cloud-server:private-development ."
+    "verify:deployment": "npm run check:deployment && docker build --file deploy/Dockerfile --tag claudian-cloud-server:local ."
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

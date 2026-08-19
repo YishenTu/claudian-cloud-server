@@ -12,5 +12,4 @@
 !tests/
 !tests/**
 !deploy/
-!deploy/private-development/
-!deploy/private-development/Dockerfile
+!deploy/Dockerfile
