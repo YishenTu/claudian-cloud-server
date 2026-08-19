@@ -368,7 +368,7 @@ refs/heads/members/<project-member-id>
 - External traffic terminates at an operator-owned TLS reverse proxy for
   supported external deployments.
 - The private development profile binds only to `127.0.0.1` and is reached
-  through the accepted private Tailscale TCP forwarding arrangement.
+  through an operator-owned private forwarding arrangement.
 - Source IP is never an Account or Member identity.
 - Ops does not mount Project repositories and does not query collaboration
   tables directly.
@@ -581,7 +581,7 @@ The first two-device experiment runs under an explicit
 `private-development` profile:
 
 - the server must bind to `127.0.0.1`;
-- Tailscale Serve publishes the accepted private TCP forwarding endpoint;
+- an operator-owned private ingress publishes the accepted forwarding endpoint;
 - startup fails if this profile is combined with a public bind or managed
   external-admission configuration;
 - initial Project and role reports are accepted only through the bounded
@@ -594,7 +594,7 @@ The first two-device experiment runs under an explicit
   other deployment profile.
 
 This is an intentionally insecure actor assertion inside the operator's private
-tailnet. Tailscale and the deployment operator own endpoint access; Cloud Server
+development network. The deployment operator owns endpoint access; Cloud Server
 does not authenticate these development callers. The assertion is deleted or
 disabled by construction before external Alpha.
 
@@ -859,7 +859,7 @@ route constants.
 
 ```text
 Primary host
-+-- TLS/Tailscale entry boundary
++-- operator-owned private entry boundary
 +-- Cloud Server process or container
 +-- PostgreSQL process or container
 +-- persistent bare repository volume
@@ -1346,7 +1346,7 @@ This is the critical path, not a parallel task assignment:
 6. prove clone, fetch, personal-ref push, snapshot, and Project events;
 7. implement Publish/request coordination and exact idempotency;
 8. implement Accept with durable cross-store recovery and fault injection;
-9. prove the two-Mac Tailscale scenario end to end;
+9. prove the two-device private-ingress scenario end to end;
 10. select, make decision-complete, and implement at least one production
     Project creation path; define the trusted-ingress principal contract and
     stable Account/device/Project/membership identity, idempotency, and audit

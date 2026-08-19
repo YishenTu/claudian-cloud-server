@@ -1,0 +1,46 @@
+name: claudian-cloud-server-private-development
+
+services:
+  cloud-server:
+    image: ${CLAUDIAN_CLOUD_IMAGE:-claudian-cloud-server:private-development}
+    build:
+      context: ../..
+      dockerfile: deploy/private-development/Dockerfile
+    network_mode: host
+    env_file:
+      - path: ${CLAUDIAN_CLOUD_ENV_FILE:-/etc/claudian-cloud-server/server.env}
+        required: true
+    environment:
+      NODE_ENV: production
+    init: true
+    read_only: true
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    cpus: ${CLAUDIAN_DEPLOY_CPUS:-1.5}
+    mem_limit: ${CLAUDIAN_DEPLOY_MEMORY:-1g}
+    pids_limit: ${CLAUDIAN_DEPLOY_PIDS:-256}
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 20s
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:8787/livez').then((response) =>
+          process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"

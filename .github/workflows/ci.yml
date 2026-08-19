@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      - run: npm run verify
+
+  deployment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: CLAUDIAN_CLOUD_ENV_FILE="$GITHUB_WORKSPACE/.env.example" docker compose -f deploy/private-development/compose.yaml config --quiet
+      - run: docker build --file deploy/private-development/Dockerfile --tag claudian-cloud-server:private-development .

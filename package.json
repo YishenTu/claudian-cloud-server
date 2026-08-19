@@ -1,0 +1,41 @@
+{
+  "name": "@claudian/cloud-server",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Canonical Cloud authority for Claudian Collab",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "check:deployment": "CLAUDIAN_CLOUD_ENV_FILE=\"$PWD/.env.example\" docker compose -f deploy/private-development/compose.yaml config --quiet",
+    "check:runtime": "tsx scripts/check-runtime.ts",
+    "clean": "rm -rf dist",
+    "dev": "tsx src/main.ts",
+    "lint": "eslint .",
+    "prebuild": "npm run check:runtime",
+    "predev": "npm run check:runtime",
+    "prelint": "npm run check:runtime",
+    "prestart": "npm run check:runtime",
+    "pretest": "npm run check:runtime",
+    "pretypecheck": "npm run check:runtime",
+    "start": "node dist/main.js",
+    "test": "npm run test:application && npm run test:deployment",
+    "test:application": "node --import tsx --test \"tests/config/**/*.test.ts\" \"tests/integration/http/**/*.test.ts\" \"tests/integration/process/**/*.test.ts\" \"tests/observability/**/*.test.ts\"",
+    "test:deployment": "node --import tsx --test \"tests/deployment/**/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "verify": "npm run lint && npm run typecheck && npm test && npm run build",
+    "verify:application": "npm run lint && npm run typecheck && npm run test:application && npm run build",
+    "verify:deployment": "npm run check:deployment && docker build --file deploy/private-development/Dockerfile --tag claudian-cloud-server:private-development ."
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.13.3",
+    "eslint": "10.2.0",
+    "tsx": "4.23.1",
+    "typescript": "6.0.2",
+    "typescript-eslint": "8.58.0"
+  }
+}

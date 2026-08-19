@@ -1,0 +1,16 @@
+**
+!.npmrc
+!eslint.config.js
+!package-lock.json
+!package.json
+!tsconfig.build.json
+!tsconfig.json
+!scripts/
+!scripts/**
+!src/
+!src/**
+!tests/
+!tests/**
+!deploy/
+!deploy/private-development/
+!deploy/private-development/Dockerfile
