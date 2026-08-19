@@ -4,60 +4,38 @@ Claudian Cloud Server is the public, auditable collaboration data plane for Clau
 
 User authentication is outside this repository. Deployments must provide their own trusted ingress and authentication system. Claudian Cloud Server accepts the resulting trusted caller identity and handles Project membership and authorization for admitted requests.
 
-## Development
-
-The scaffold is pinned to Node.js 24.16.0. The `.node-version` file declares the version but does not switch an unmanaged shell automatically. Use any Node.js version manager that supports this file. With `fnm` installed, select the project version with:
-
-```bash
-fnm install
-fnm use
-node --version
-```
-
-Once `node --version` reports `v24.16.0`, install and verify with:
-
-```bash
-npm ci
-npm run verify
-```
-
-The current foundation provides loopback-only private-development startup, safe structured logging, liveness at `/livez`, readiness at `/readyz`, and bounded graceful shutdown. Project APIs, Git transport, persistence, and the protocol-backed version endpoint are not implemented yet.
-
 ## Deployment
 
-For a local process smoke test, copy `.env.example` to `.env.private-development.local` and edit the local copy. Files matching `.env.*` are ignored by Git except for `.env.example`.
+The current Linux deployment builds from source. After configuring Git access on the deployment host, clone the repository, create the runtime environment file, and start the service with Docker Compose:
 
 ```bash
-cp .env.example .env.private-development.local
-npm run build
-node --env-file=.env.private-development.local dist/main.js
+git clone https://github.com/YishenTu/claudian-cloud-server.git
+cd claudian-cloud-server
+sudo install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /etc/claudian-cloud-server
+sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .env.example /etc/claudian-cloud-server/server.env
+sudoedit /etc/claudian-cloud-server/server.env
+docker compose -f deploy/compose.yaml up --detach --build --wait
 ```
 
-The private-development server deliberately binds only to `127.0.0.1`. An operator may publish it through a private ingress without changing the application bind address.
+The application remains reachable only on the configured loopback port.
 
-Application runtime values belong in `.env.private-development.local`. Deployment access, credentials, and private-ingress configuration remain outside this repository.
-
-The Linux deployment uses the pinned image and Compose model in `deploy/`. It uses host networking so the container can preserve a configured loopback bind; it does not publish a Docker port. Validate and build it with:
-
-```bash
-npm run check:deployment
-docker build --file deploy/Dockerfile --tag claudian-cloud-server:local .
-```
-
-On the deployment host, keep the runtime environment outside the repository checkout at `/etc/claudian-cloud-server/server.env`, readable only by the deployment operator. Start the service with:
-
-```bash
-docker compose -f deploy/compose.yaml up --detach --build
-```
-
-The deployment deliberately does not select or configure a private-ingress product. The operator owns that boundary and may forward its private endpoint to the configured loopback port only after the loopback health checks pass. PostgreSQL and repository storage join the deployment only when their owning implementations and recovery contracts exist.
-
-### Git-backed updates
-
-The deployment host authenticates to the Git remote through operator-owned credentials outside this repository. From a clean clone, `deploy/deploy.sh` fetches the remote, resolves `origin/main` or `CLAUDIAN_DEPLOY_REF` to one commit, builds an image tagged with the full commit SHA, and waits for Compose health. If the replacement is unhealthy, it restores the image that was running before the update.
+For later updates, run the deployment script from the clean checkout. By default, it deploys the latest `origin/main`, verifies service health, and rolls back an unhealthy replacement.
 
 ```bash
 deploy/deploy.sh
 ```
 
-The runtime environment defaults to `/etc/claudian-cloud-server/server.env`. Operators may set `CLAUDIAN_DEPLOY_ENV_FILE`, `CLAUDIAN_DEPLOY_IMAGE_REPOSITORY`, `CLAUDIAN_DEPLOY_WAIT_TIMEOUT_SECONDS`, or `CLAUDIAN_DEPLOY_BUILD_NETWORK` without placing those values in the repository. Compose defaults to limits of 1.5 CPUs, 1 GiB of memory, and 256 PIDs; set `CLAUDIAN_DEPLOY_CPUS`, `CLAUDIAN_DEPLOY_MEMORY`, or `CLAUDIAN_DEPLOY_PIDS` in the operator environment to match the selected host. The script refuses dirty checkouts, so only committed source can become a deployment image.
+## Development
+
+Development requires Node.js 24, npm, Docker, and Docker Compose. The exact Node.js version is recorded in `.node-version`.
+
+```bash
+# Install the exact dependencies recorded in package-lock.json.
+npm ci
+# Run lint, type checks, tests, and the production build.
+npm run verify
+```
+
+## License
+
+Licensed under the [MIT License](LICENSE).
