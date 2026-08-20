@@ -8,6 +8,7 @@ COPY .npmrc package-lock.json package.json ./
 COPY vendor /workspace/vendor
 RUN npm ci
 
+COPY .env.example .env.migration.example ./
 COPY eslint.config.js tsconfig.build.json tsconfig.json ./
 COPY scripts ./scripts
 COPY src ./src

@@ -1,4 +1,6 @@
 **
+!.env.example
+!.env.migration.example
 !.npmrc
 !eslint.config.js
 !package-lock.json
