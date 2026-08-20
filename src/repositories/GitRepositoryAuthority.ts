@@ -126,8 +126,12 @@ export class GitRepositoryAuthority {
   async verifyCapability(): Promise<Readonly<{ status: 'supported' }>> {
     this.#assertOpen();
     try {
+      await this.#pathPolicy.verifyRoot();
       await this.#supervisor.verifyVersion();
     } catch (error: unknown) {
+      if (error instanceof RepositoryPlacementError) {
+        throw mapPlacementError(error);
+      }
       if (error instanceof GitProcessError) throw mapProcessError(error);
       throw new GitRepositoryError('git-unavailable');
     }

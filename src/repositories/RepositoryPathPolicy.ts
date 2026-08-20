@@ -66,9 +66,7 @@ export class RepositoryPathPolicy {
   ): Promise<ResolvedRepositoryLocation> {
     await this.revalidate(placement);
 
-    const root = await this.#inspectRoot();
-    if (this.#acceptedRoot === undefined) this.#acceptedRoot = root;
-    else if (!sameRoot(this.#acceptedRoot, root)) rootUnavailable();
+    const root = await this.#acceptRoot();
 
     const repositoryPath = resolve(
       this.#repositoryRoot,
@@ -119,6 +117,17 @@ export class RepositoryPathPolicy {
       throw new RepositoryPlacementError('placement-unavailable');
     }
     if (!current) throw new RepositoryPlacementError('stale-placement');
+  }
+
+  async verifyRoot(): Promise<void> {
+    await this.#acceptRoot();
+  }
+
+  async #acceptRoot(): Promise<RootIdentity> {
+    const root = await this.#inspectRoot();
+    if (this.#acceptedRoot === undefined) this.#acceptedRoot = root;
+    else if (!sameRoot(this.#acceptedRoot, root)) rootUnavailable();
+    return root;
   }
 
   async #inspectRoot(): Promise<RootIdentity> {

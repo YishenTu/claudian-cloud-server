@@ -1,20 +1,19 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { createServer } from 'node:net';
 import { describe, it } from 'node:test';
 
 describe('main process', () => {
-  it('starts from environment configuration and shuts down on SIGTERM', async () => {
-    const port = await findAvailablePort();
+  it('reports an unavailable startup dependency without leaking context', async () => {
+    const credential = 'main-process-secret-sentinel';
     const child = spawn(process.execPath, ['--import', 'tsx', 'src/main.ts'], {
       cwd: process.cwd(),
       env: {
         ...process.env,
         CLAUDIAN_CLOUD_BIND_HOST: '127.0.0.1',
         CLAUDIAN_CLOUD_GIT_EXECUTABLE: '/usr/bin/git',
-        CLAUDIAN_CLOUD_PORT: String(port),
-        CLAUDIAN_CLOUD_POSTGRES_URL: 'postgresql://runtime:test@127.0.0.1/cloud-test',
+        CLAUDIAN_CLOUD_PORT: '49152',
+        CLAUDIAN_CLOUD_POSTGRES_URL: `postgresql://runtime:${credential}@127.0.0.1:1/cloud-test`,
         CLAUDIAN_CLOUD_REPOSITORY_ROOT: '/tmp/claudian-cloud-test-repositories',
         CLAUDIAN_CLOUD_STORAGE_NODE_ID: 'test-node',
       },
@@ -27,51 +26,20 @@ describe('main process', () => {
     child.stdout.on('data', chunk => stdout.push(String(chunk)));
     child.stderr.on('data', chunk => stderr.push(String(chunk)));
 
-    try {
-      await waitForEvent(stdout, 'server.listening');
-      child.kill('SIGTERM');
-      const [exitCode, signal] = await once(child, 'exit') as [number | null, NodeJS.Signals | null];
+    const [exitCode, signal] = await once(child, 'exit') as [number | null, NodeJS.Signals | null];
 
-      assert.equal(exitCode, 0);
-      assert.equal(signal, null);
-      assert.equal(stderr.join(''), '');
-      assert.deepEqual(parseEvents(stdout), [
-        'server.starting',
-        'server.listening',
-        'server.stopping',
-        'server.stopped',
-      ]);
-    } finally {
-      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-    }
+    assert.equal(exitCode, 1);
+    assert.equal(signal, null);
+    assert.equal(stderr.join(''), '');
+    const output = stdout.join('');
+    assert.deepEqual(parseEvents(stdout), [
+      'server.starting',
+      'server.startup-failed',
+    ]);
+    assert.doesNotMatch(output, new RegExp(credential));
+    assert.doesNotMatch(output, /postgresql:|ECONNREFUSED|127\.0\.0\.1/);
   });
 });
-
-async function findAvailablePort(): Promise<number> {
-  const server = createServer();
-  server.listen({ host: '127.0.0.1', port: 0 });
-  await once(server, 'listening');
-  const address = server.address();
-  if (address === null || typeof address === 'string') {
-    throw new Error('Test server address unavailable');
-  }
-  await new Promise<void>((resolve, reject) => {
-    server.close(error => {
-      if (error) reject(error);
-      else resolve();
-    });
-  });
-  return address.port;
-}
-
-async function waitForEvent(lines: readonly string[], event: string): Promise<void> {
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    if (parseEvents(lines).includes(event)) return;
-    await new Promise(resolve => setTimeout(resolve, 10));
-  }
-  throw new Error(`Timed out waiting for ${event}`);
-}
 
 function parseEvents(chunks: readonly string[]): string[] {
   return chunks.join('')

@@ -363,6 +363,39 @@ describe('GitRepositoryAuthority', () => {
     }
   });
 
+  it('rejects an unavailable repository root before starting Git', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'claudian-missing-root-'));
+    const repositoryRoot = join(parent, 'missing');
+    const marker = join(parent, 'spawned.marker');
+    const executable = await writeExecutable(
+      parent,
+      'fake-git',
+      `printf spawned > '${marker}'\nprintf 'git version 2.39.0\\n'`,
+    );
+    const resourceAdmission = admission();
+    const authority = new GitRepositoryAuthority({
+      gitExecutable: executable,
+      operationTimeoutMs: 2_000,
+      outputMaxBytes: 4_096,
+      placementValidator: new CurrentPlacementValidator(),
+      repositoryRoot,
+      resourceAdmission,
+      storageNodeId: 'node-a',
+    });
+    try {
+      await expectGitError(
+        authority.verifyCapability(),
+        'repository-unavailable',
+        [parent],
+      );
+      await assert.rejects(access(marker), { code: 'ENOENT' });
+    } finally {
+      await authority.close();
+      await resourceAdmission.close();
+      await rm(parent, { force: true, recursive: true });
+    }
+  });
+
   it('bounds duration and reaps a child that ignores termination', async () => {
     const fixture = await createFakeAuthority({
       executableBody: marker => (
