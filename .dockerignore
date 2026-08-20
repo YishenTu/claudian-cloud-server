@@ -1,4 +1,6 @@
 **
+!.env.example
+!.env.migration.example
 !.npmrc
 !eslint.config.js
 !package-lock.json
@@ -11,5 +13,7 @@
 !src/**
 !tests/
 !tests/**
+!vendor/
+!vendor/*.tgz
 !deploy/
 !deploy/Dockerfile

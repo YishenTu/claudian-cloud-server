@@ -5,8 +5,10 @@ FROM ${NODE_IMAGE} AS build
 WORKDIR /workspace
 
 COPY .npmrc package-lock.json package.json ./
+COPY vendor /workspace/vendor
 RUN npm ci
 
+COPY .env.example .env.migration.example ./
 COPY eslint.config.js tsconfig.build.json tsconfig.json ./
 COPY scripts ./scripts
 COPY src ./src
@@ -19,6 +21,7 @@ FROM ${NODE_IMAGE} AS production-dependencies
 WORKDIR /app
 
 COPY .npmrc package-lock.json package.json ./
+COPY vendor /app/vendor
 RUN npm ci --omit=dev && mkdir -p node_modules && npm cache clean --force
 
 FROM ${NODE_IMAGE} AS runtime

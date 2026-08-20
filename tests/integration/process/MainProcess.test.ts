@@ -12,7 +12,11 @@ describe('main process', () => {
       env: {
         ...process.env,
         CLAUDIAN_CLOUD_BIND_HOST: '127.0.0.1',
+        CLAUDIAN_CLOUD_GIT_EXECUTABLE: '/usr/bin/git',
         CLAUDIAN_CLOUD_PORT: String(port),
+        CLAUDIAN_CLOUD_POSTGRES_URL: 'postgresql://runtime:test@127.0.0.1/cloud-test',
+        CLAUDIAN_CLOUD_REPOSITORY_ROOT: '/tmp/claudian-cloud-test-repositories',
+        CLAUDIAN_CLOUD_STORAGE_NODE_ID: 'test-node',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
