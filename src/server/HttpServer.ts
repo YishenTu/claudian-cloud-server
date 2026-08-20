@@ -42,11 +42,18 @@ export class HttpServer {
     }
 
     this.#startPromise = new Promise<HttpServerAddress>((resolve, reject) => {
+      const onClose = (): void => {
+        this.#server.off('error', onError);
+        this.#server.off('listening', onListening);
+        reject(new Error('http-server-closed'));
+      };
       const onError = (error: Error): void => {
+        this.#server.off('close', onClose);
         this.#server.off('listening', onListening);
         reject(error);
       };
       const onListening = (): void => {
+        this.#server.off('close', onClose);
         this.#server.off('error', onError);
         const address = this.#server.address();
         if (address === null || typeof address === 'string') {
@@ -60,6 +67,7 @@ export class HttpServer {
         resolve(this.#address);
       };
 
+      this.#server.once('close', onClose);
       this.#server.once('error', onError);
       this.#server.once('listening', onListening);
       this.#server.listen({
@@ -78,7 +86,7 @@ export class HttpServer {
   }
 
   async #close(timeoutMs: number): Promise<void> {
-    if (!this.#server.listening) return;
+    if (this.#startPromise === undefined && !this.#server.listening) return;
 
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -89,7 +97,12 @@ export class HttpServer {
       this.#server.close((error) => {
         clearTimeout(timeout);
         this.#address = undefined;
-        if (error) reject(error);
+        if (
+          error
+          && (error as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING'
+        ) {
+          reject(error);
+        }
         else resolve();
       });
     });

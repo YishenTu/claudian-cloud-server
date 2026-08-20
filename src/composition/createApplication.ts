@@ -29,7 +29,6 @@ export class ApplicationError extends Error {
 
 export interface Application {
   close(): Promise<void>;
-  isReady(): boolean;
   start(): Promise<HttpServerAddress>;
 }
 
@@ -124,16 +123,16 @@ class CloudApplication implements Application {
     });
     this.#httpServer = new HttpServer({
       config: options.config.http,
-      isReady: () => this.isReady(),
+      isReady: () => this.#state === 'ready',
     });
   }
 
   start(): Promise<HttpServerAddress> {
-    if (this.#address !== undefined) return Promise.resolve(this.#address);
-    if (this.#startPromise !== undefined) return this.#startPromise;
     if (this.#state === 'stopped' || this.#state === 'stopping') {
       return Promise.reject(new ApplicationError('closed'));
     }
+    if (this.#address !== undefined) return Promise.resolve(this.#address);
+    if (this.#startPromise !== undefined) return this.#startPromise;
 
     this.#state = 'starting';
     this.#logger.info('server.starting');
@@ -151,10 +150,6 @@ class CloudApplication implements Application {
     this.#logger.info('server.stopping', { state: 'draining' });
     this.#closePromise = this.#close();
     return this.#closePromise;
-  }
-
-  isReady(): boolean {
-    return this.#state === 'ready';
   }
 
   async #start(): Promise<HttpServerAddress> {

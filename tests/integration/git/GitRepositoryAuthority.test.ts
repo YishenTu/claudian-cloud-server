@@ -436,6 +436,48 @@ describe('GitRepositoryAuthority', () => {
     }
   });
 
+  it('aborts and reaps the bare-repository inspection child', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'claudian-bare-check-abort-'));
+    const marker = join(root, 'process.marker');
+    const executable = join(root, 'fake-git');
+    await writeFile(
+      executable,
+      `#!/bin/sh
+printf '%s' "$$" > '${marker}'
+trap '' TERM
+while :; do sleep 1; done
+`,
+    );
+    await chmod(executable, 0o755);
+    const repository = placement('repository');
+    await mkdir(join(root, repository.repositoryStorageKey));
+    const resourceAdmission = admission();
+    const authority = new GitRepositoryAuthority({
+      gitExecutable: executable,
+      operationTimeoutMs: 2_000,
+      outputMaxBytes: 4_096,
+      placementValidator: new CurrentPlacementValidator(),
+      repositoryRoot: root,
+      resourceAdmission,
+      storageNodeId: 'node-a',
+    });
+    const cancellation = new AbortController();
+    try {
+      const verification = authority.verifyIntegrity(repository, {
+        signal: cancellation.signal,
+      });
+      await waitForFile(marker);
+      cancellation.abort();
+      await expectGitError(verification, 'cancelled');
+      await assertProcessGone(marker);
+    } finally {
+      cancellation.abort();
+      await authority.close();
+      await resourceAdmission.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
   it('reaps helper descendants in the owned Git process group', async () => {
     const fixture = await createFakeAuthority({
       executableBody: marker => `trap '' TERM

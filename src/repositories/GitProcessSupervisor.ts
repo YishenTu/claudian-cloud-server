@@ -101,13 +101,16 @@ export class GitProcessSupervisor {
     }).then(() => undefined);
   }
 
-  async verifyBareRepository(repositoryPath: string): Promise<void> {
+  async verifyBareRepository(
+    repositoryPath: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const output = await this.#runProcess({
       arguments: ['rev-parse', '--is-bare-repository'],
       captureOutput: true,
       cwd: repositoryPath,
       failureCode: 'repository-corrupt',
-      signal: undefined,
+      signal,
     });
     if (output.trim() !== 'true') {
       throw new GitProcessError('repository-corrupt');

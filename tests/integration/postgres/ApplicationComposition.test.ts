@@ -169,7 +169,6 @@ describe('application composition', { concurrency: false }, () => {
       });
 
       await assert.rejects(application.start(), /application\.error\.startup-failed/);
-      assert.equal(application.isReady(), false);
       await application.close();
       await application.close();
 
@@ -212,7 +211,6 @@ describe('application composition', { concurrency: false }, () => {
     });
     try {
       await assert.rejects(application.start(), /application\.error\.startup-failed/);
-      assert.equal(application.isReady(), false);
       await application.close();
       assert.equal(await cloudConnectionCount(database.adminUrl), 0);
       assert.match(JSON.stringify(events(lines)), /http-listen-failed/);
@@ -248,7 +246,6 @@ describe('application composition', { concurrency: false }, () => {
       });
 
       await assert.rejects(application.start(), /application\.error\.startup-failed/);
-      assert.equal(application.isReady(), false);
       await application.close();
 
       await assert.rejects(access(marker), { code: 'ENOENT' });
@@ -283,12 +280,20 @@ printf 'git version 2.39.0\\n'`,
     });
     try {
       const starting = application.start();
+      let startupSettled = false;
+      void starting.then(
+        () => {
+          startupSettled = true;
+        },
+        () => {
+          startupSettled = true;
+        },
+      );
       await waitForFile(marker);
-      assert.equal(application.isReady(), false);
+      assert.equal(startupSettled, false);
 
       await writeFile(release, 'release');
       const address = await starting;
-      assert.equal(application.isReady(), true);
       const response = await fetch(
         `http://${address.host}:${String(address.port)}/readyz`,
       );
@@ -297,7 +302,6 @@ printf 'git version 2.39.0\\n'`,
 
       await application.close();
       await application.close();
-      assert.equal(application.isReady(), false);
       assert.equal(await cloudConnectionCount(database.adminUrl), 0);
       assert.deepEqual(
         events(lines).map(value => value.event),
@@ -340,12 +344,15 @@ while :; do sleep 1; done`,
 
       const startedAt = Date.now();
       const closing = application.close();
+      await assert.rejects(
+        application.start(),
+        /application\.error\.closed/,
+      );
       await assert.rejects(starting, /application\.error\.startup-failed/);
       await closing;
 
       assert.equal(Date.now() - startedAt < 1_000, true);
       await waitForProcessExit(pid);
-      assert.equal(application.isReady(), false);
       assert.equal(await cloudConnectionCount(database.adminUrl), 0);
     } finally {
       if (pid !== undefined) {
@@ -402,8 +409,12 @@ while :; do sleep 1; done`,
     try {
       const version = await execFileAsync(GIT_EXECUTABLE, ['--version']);
       assert.match(version.stdout, /^git version /);
-      await application.start();
-      assert.equal(application.isReady(), true);
+      const address = await application.start();
+      const ready = await fetch(
+        `http://${address.host}:${String(address.port)}/readyz`,
+      );
+      assert.equal(ready.status, 200);
+      assert.deepEqual(await ready.json(), { status: 'ready' });
     } finally {
       await application.close();
     }
