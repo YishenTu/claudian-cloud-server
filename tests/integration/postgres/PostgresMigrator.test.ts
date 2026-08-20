@@ -381,7 +381,7 @@ describe('PostgresMigrator', () => {
       await verifyMigrationFailureState(database);
       await verifyMigrationHistory(database);
       await verifySchemaContract(database);
-    }, {});
+    });
   });
 
   it('sanitizes connection failures', async () => {

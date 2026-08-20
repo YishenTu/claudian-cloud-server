@@ -50,7 +50,7 @@ describe('migration process', () => {
         stderr: '',
         stdout: '',
       });
-    }, {});
+    });
   });
 
   it('reports dependency failure without connection or credential context', async () => {

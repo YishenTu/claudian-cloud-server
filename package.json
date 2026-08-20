@@ -30,9 +30,12 @@
     "test:git": "node --import tsx --test --test-concurrency=1 \"tests/integration/git/**/*.test.ts\"",
     "test:postgres": "node --import tsx --test --test-concurrency=1 \"tests/integration/postgres/**/*.test.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "verify": "npm run lint && npm run typecheck && npm test && npm run build",
+    "verify": "npm run verify:fast && npm run verify:postgres && npm run verify:git",
     "verify:application": "npm run lint && npm run typecheck && npm run test:application && npm run build",
-    "verify:deployment": "npm run check:deployment && docker build --file deploy/Dockerfile --tag claudian-cloud-server:local ."
+    "verify:deployment": "npm run check:deployment && docker build --file deploy/Dockerfile --tag claudian-cloud-server:local . && tsx scripts/verify-runtime-image.ts",
+    "verify:fast": "npm run lint && npm run typecheck && npm run test:contract && npm run test:application && npm run test:deployment && npm run build",
+    "verify:git": "npm run test:git",
+    "verify:postgres": "npm run test:postgres"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

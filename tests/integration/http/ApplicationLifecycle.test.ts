@@ -29,9 +29,17 @@ describe('application lifecycle', () => {
     assert.equal(available.status, 200);
     assert.deepEqual(await available.json(), { status: 'ready' });
 
-    const missing = await fetch(`${origin}/projects/private-sentinel`);
-    assert.equal(missing.status, 404);
-    assert.deepEqual(await missing.json(), { status: 'not-found' });
+    for (const path of [
+      '/control/private-sentinel',
+      '/events/private-sentinel',
+      '/git/private-sentinel',
+      '/projects/private-sentinel',
+      '/versionz',
+    ]) {
+      const missing = await fetch(`${origin}${path}`);
+      assert.equal(missing.status, 404);
+      assert.deepEqual(await missing.json(), { status: 'not-found' });
+    }
 
     await server.close(1_000);
     await server.close(1_000);

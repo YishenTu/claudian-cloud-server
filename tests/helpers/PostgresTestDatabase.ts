@@ -60,7 +60,30 @@ function requiredExternalUrl(source: EnvironmentSource, field: string): string |
   return value;
 }
 
-function externalDatabase(source: EnvironmentSource): PostgresTestDatabase | undefined {
+function urlForDatabase(connectionString: string, database: string): string {
+  const url = new URL(connectionString);
+  url.pathname = `/${database}`;
+  return url.toString();
+}
+
+async function dropExternalDatabase(
+  adminUrl: string,
+  database: string,
+): Promise<void> {
+  const client = new Client({
+    connectionString: urlForDatabase(adminUrl, 'postgres'),
+  });
+  try {
+    await client.connect();
+    await client.query(`DROP DATABASE ${quoteIdentifier(database)} WITH (FORCE)`);
+  } finally {
+    await client.end();
+  }
+}
+
+async function externalDatabase(
+  source: EnvironmentSource,
+): Promise<PostgresTestDatabase | undefined> {
   const adminUrl = requiredExternalUrl(source, 'CLAUDIAN_TEST_POSTGRES_ADMIN_URL');
   const migrationUrl = requiredExternalUrl(source, 'CLAUDIAN_TEST_POSTGRES_MIGRATION_URL');
   const runtimeUrl = requiredExternalUrl(source, 'CLAUDIAN_TEST_POSTGRES_RUNTIME_URL');
@@ -69,12 +92,57 @@ function externalDatabase(source: EnvironmentSource): PostgresTestDatabase | und
   if (adminUrl === undefined || migrationUrl === undefined || runtimeUrl === undefined) {
     throw new Error('postgres-test-database-config-incomplete');
   }
+
+  if (
+    new URL(adminUrl).username !== ADMIN_ROLE
+    || new URL(migrationUrl).username !== MIGRATION_ROLE
+    || new URL(runtimeUrl).username !== RUNTIME_ROLE
+  ) {
+    throw new Error('postgres-test-database-config-invalid');
+  }
+
+  const database = `cloud_test_${randomToken(8)}`;
+  const adminClient = new Client({
+    connectionString: urlForDatabase(adminUrl, 'postgres'),
+  });
+  let created = false;
+  try {
+    await adminClient.connect();
+    await adminClient.query(
+      `CREATE DATABASE ${quoteIdentifier(database)} OWNER ${quoteIdentifier(MIGRATION_ROLE)}`,
+    );
+    created = true;
+    await adminClient.query(
+      `REVOKE ALL ON DATABASE ${quoteIdentifier(database)} FROM PUBLIC`,
+    );
+    await adminClient.query(
+      `GRANT CONNECT ON DATABASE ${quoteIdentifier(database)} TO ${quoteIdentifier(MIGRATION_ROLE)}, ${quoteIdentifier(RUNTIME_ROLE)}`,
+    );
+  } catch {
+    if (created) {
+      try {
+        await dropExternalDatabase(adminUrl, database);
+      } catch {
+        throw new Error('postgres-test-database-cleanup-failed');
+      }
+    }
+    throw new Error('postgres-test-database-external-failed');
+  } finally {
+    await adminClient.end();
+  }
+
+  let closePromise: Promise<void> | undefined;
   return Object.freeze({
-    adminUrl,
-    close: () => Promise.resolve(),
-    migrationUrl,
+    adminUrl: urlForDatabase(adminUrl, database),
+    close: () => {
+      closePromise ??= dropExternalDatabase(adminUrl, database).catch(() => {
+        throw new Error('postgres-test-database-cleanup-failed');
+      });
+      return closePromise;
+    },
+    migrationUrl: urlForDatabase(migrationUrl, database),
     mode: 'external' as const,
-    runtimeUrl,
+    runtimeUrl: urlForDatabase(runtimeUrl, database),
   });
 }
 
@@ -273,7 +341,7 @@ async function startContainerDatabase(): Promise<PostgresTestDatabase> {
 export async function acquirePostgresTestDatabase(
   source: EnvironmentSource = process.env,
 ): Promise<PostgresTestDatabase> {
-  return externalDatabase(source) ?? startContainerDatabase();
+  return (await externalDatabase(source)) ?? startContainerDatabase();
 }
 
 export async function withPostgresTestDatabase<T>(

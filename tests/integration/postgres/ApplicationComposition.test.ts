@@ -143,7 +143,7 @@ describe('application composition', { concurrency: false }, () => {
   let repositoryRoot: string;
 
   before(async () => {
-    database = await acquirePostgresTestDatabase({});
+    database = await acquirePostgresTestDatabase();
     await new PostgresMigrator({
       connectionString: database.migrationUrl,
     }).apply();
@@ -156,7 +156,7 @@ describe('application composition', { concurrency: false }, () => {
   });
 
   it('fails closed on an incompatible schema and releases every pool', async () => {
-    const emptyDatabase = await acquirePostgresTestDatabase({});
+    const emptyDatabase = await acquirePostgresTestDatabase();
     const root = await mkdtemp(join(tmpdir(), 'claudian-app-empty-schema-'));
     const lines: string[] = [];
     try {

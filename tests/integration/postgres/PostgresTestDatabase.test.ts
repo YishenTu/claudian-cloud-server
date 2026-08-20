@@ -39,20 +39,45 @@ async function serverMajor(connectionString: string): Promise<number> {
 }
 
 describe('PostgresTestDatabase', () => {
-  it('starts PostgreSQL 18 locally and reuses explicit CI service URLs', async () => {
-    const database = await acquirePostgresTestDatabase({});
+  it('uses PostgreSQL 18 and isolates every explicit-service acquisition', async () => {
+    const database = await acquirePostgresTestDatabase();
     try {
-      assert.equal(database.mode, 'container');
       assert.equal(await serverMajor(database.migrationUrl), 18);
       const containersBefore = await managedContainers();
 
-      const external = await acquirePostgresTestDatabase({
+      const first = await acquirePostgresTestDatabase({
         CLAUDIAN_TEST_POSTGRES_ADMIN_URL: database.adminUrl,
         CLAUDIAN_TEST_POSTGRES_MIGRATION_URL: database.migrationUrl,
         CLAUDIAN_TEST_POSTGRES_RUNTIME_URL: database.runtimeUrl,
       });
-      assert.equal(external.mode, 'external');
-      await external.close();
+      const second = await acquirePostgresTestDatabase({
+        CLAUDIAN_TEST_POSTGRES_ADMIN_URL: database.adminUrl,
+        CLAUDIAN_TEST_POSTGRES_MIGRATION_URL: database.migrationUrl,
+        CLAUDIAN_TEST_POSTGRES_RUNTIME_URL: database.runtimeUrl,
+      });
+      try {
+        assert.equal(first.mode, 'external');
+        assert.equal(second.mode, 'external');
+        assert.notEqual(first.adminUrl, database.adminUrl);
+        assert.notEqual(second.adminUrl, database.adminUrl);
+        assert.notEqual(first.adminUrl, second.adminUrl);
+
+        const firstClient = new Client({ connectionString: first.migrationUrl });
+        const secondClient = new Client({ connectionString: second.migrationUrl });
+        try {
+          await firstClient.connect();
+          await firstClient.query('CREATE TABLE isolated_marker (value integer)');
+          await secondClient.connect();
+          const result = await secondClient.query<{ readonly relation: string | null }>(
+            "SELECT to_regclass('public.isolated_marker')::text AS relation",
+          );
+          assert.equal(result.rows[0]?.relation, null);
+        } finally {
+          await Promise.allSettled([firstClient.end(), secondClient.end()]);
+        }
+      } finally {
+        await Promise.allSettled([first.close(), second.close()]);
+      }
 
       assert.deepEqual(await managedContainers(), containersBefore);
       assert.equal(await serverMajor(database.runtimeUrl), 18);
@@ -68,7 +93,7 @@ describe('PostgresTestDatabase', () => {
       withPostgresTestDatabase(async () => {
         await Promise.resolve();
         throw new Error('expected-test-failure');
-      }, {}),
+      }),
       /expected-test-failure/,
     );
 

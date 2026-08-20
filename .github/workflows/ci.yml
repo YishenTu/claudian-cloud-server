@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  verify:
+  fast:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,11 +19,64 @@ jobs:
           node-version-file: .node-version
           cache: npm
       - run: npm ci
-      - run: npm run verify
+      - run: npm run verify:fast
+
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres@sha256:7d2695c3aa88e792e8b3b233e7e4adb296a20412c6c0ca361e3edaaacfada108
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_PASSWORD: ci-admin-password
+          POSTGRES_USER: claudian_test_admin
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username claudian_test_admin --dbname postgres"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+    env:
+      CLAUDIAN_TEST_POSTGRES_ADMIN_URL: postgresql://claudian_test_admin:ci-admin-password@127.0.0.1:5432/postgres
+      CLAUDIAN_TEST_POSTGRES_MIGRATION_URL: postgresql://claudian_cloud_migration:ci-migration-password@127.0.0.1:5432/postgres
+      CLAUDIAN_TEST_POSTGRES_RUNTIME_URL: postgresql://claudian_cloud_runtime:ci-runtime-password@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      - name: Provision isolated test roles
+        run: |
+          docker exec -i "${{ job.services.postgres.id }}" \
+            psql --set ON_ERROR_STOP=on \
+            --username claudian_test_admin \
+            --dbname postgres <<'SQL'
+          CREATE ROLE claudian_cloud_migration LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD 'ci-migration-password';
+          CREATE ROLE claudian_cloud_runtime LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS PASSWORD 'ci-runtime-password';
+          SQL
+      - run: npm run verify:postgres
+
+  git:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      - run: npm run verify:git
 
   deployment:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: CLAUDIAN_CLOUD_ENV_FILE="$GITHUB_WORKSPACE/.env.example" docker compose -f deploy/compose.yaml config --quiet
-      - run: docker build --file deploy/Dockerfile --tag claudian-cloud-server:local .
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      - run: npm run verify:deployment
