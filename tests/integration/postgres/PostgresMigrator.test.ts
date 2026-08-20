@@ -181,6 +181,92 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       { forced: true, relation: 'repository_placements', row_security: true },
     ]);
 
+    const ownership = await migrationClient.query<{
+      readonly owner: string;
+      readonly relation: string;
+    }>(
+      `SELECT c.relname AS relation, pg_get_userbyid(c.relowner) AS owner
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'claudian_cloud'
+          AND c.relkind = 'r'
+        ORDER BY c.relname`,
+    );
+    assert.deepEqual(ownership.rows, [
+      { owner: 'claudian_cloud_migration', relation: 'project_memberships' },
+      { owner: 'claudian_cloud_migration', relation: 'projects' },
+      { owner: 'claudian_cloud_migration', relation: 'repository_placements' },
+      { owner: 'claudian_cloud_migration', relation: 'schema_migrations' },
+    ]);
+
+    const schemaPrivileges = await migrationClient.query<{
+      readonly can_create: boolean;
+      readonly can_use: boolean;
+      readonly owner: string;
+    }>(
+      `SELECT pg_get_userbyid(n.nspowner) AS owner,
+              has_schema_privilege(
+                'claudian_cloud_runtime', n.oid, 'USAGE'
+              ) AS can_use,
+              has_schema_privilege(
+                'claudian_cloud_runtime', n.oid, 'CREATE'
+              ) AS can_create
+         FROM pg_namespace n
+        WHERE n.nspname = 'claudian_cloud'`,
+    );
+    assert.deepEqual(schemaPrivileges.rows, [{
+      can_create: false,
+      can_use: true,
+      owner: 'claudian_cloud_migration',
+    }]);
+
+    const tablePrivileges = await migrationClient.query<{
+      readonly privilege: string;
+      readonly relation: string;
+    }>(
+      `SELECT table_name AS relation, privilege_type AS privilege
+         FROM information_schema.table_privileges
+        WHERE table_schema = 'claudian_cloud'
+          AND grantee = 'claudian_cloud_runtime'
+        ORDER BY table_name, privilege_type`,
+    );
+    assert.deepEqual(tablePrivileges.rows, [
+      { privilege: 'DELETE', relation: 'project_memberships' },
+      { privilege: 'INSERT', relation: 'project_memberships' },
+      { privilege: 'SELECT', relation: 'project_memberships' },
+      { privilege: 'UPDATE', relation: 'project_memberships' },
+      { privilege: 'DELETE', relation: 'projects' },
+      { privilege: 'INSERT', relation: 'projects' },
+      { privilege: 'SELECT', relation: 'projects' },
+      { privilege: 'UPDATE', relation: 'projects' },
+      { privilege: 'DELETE', relation: 'repository_placements' },
+      { privilege: 'INSERT', relation: 'repository_placements' },
+      { privilege: 'SELECT', relation: 'repository_placements' },
+      { privilege: 'UPDATE', relation: 'repository_placements' },
+      { privilege: 'SELECT', relation: 'schema_migrations' },
+    ]);
+
+    const policies = await migrationClient.query<{
+      readonly policy_name: string;
+      readonly relation: string;
+    }>(
+      `SELECT tablename AS relation, policyname AS policy_name
+         FROM pg_policies
+        WHERE schemaname = 'claudian_cloud'
+        ORDER BY tablename`,
+    );
+    assert.deepEqual(policies.rows, [
+      {
+        policy_name: 'project_memberships_project_scope',
+        relation: 'project_memberships',
+      },
+      { policy_name: 'projects_project_scope', relation: 'projects' },
+      {
+        policy_name: 'repository_placements_project_scope',
+        relation: 'repository_placements',
+      },
+    ]);
+
     for (const projectId of ['project-a', 'project-b']) {
       await migrationClient.query('BEGIN');
       await migrationClient.query(

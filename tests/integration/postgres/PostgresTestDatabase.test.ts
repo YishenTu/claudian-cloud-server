@@ -16,6 +16,7 @@ const execFileAsync = promisify(execFile);
 async function managedContainers(): Promise<readonly string[]> {
   const result = await execFileAsync('docker', [
     'ps',
+    '--all',
     '--filter',
     `label=${POSTGRES_TEST_CONTAINER_LABEL}`,
     '--format',

@@ -222,6 +222,30 @@ describe('PostgresCoordination', () => {
         );
         assert.equal(unrelated?.projectId, 'project-b');
 
+        const secondOwner = new PostgresCoordination({
+          ordinaryPoolMax: 1,
+          pinnedPoolMax: 1,
+          projectLockTimeoutMs: 75,
+          reservedPoolMax: 1,
+          runtimeConnectionString: database.runtimeUrl,
+        });
+        try {
+          await expectCoordinationError(
+            secondOwner.withProjectScope(
+              'project-a',
+              async () => Promise.resolve(),
+            ),
+            'busy',
+          );
+          const secondOwnerProgress = await secondOwner.withProjectScope(
+            'project-b',
+            scope => scope.getRepositoryPlacement(),
+          );
+          assert.equal(secondOwnerProgress?.projectId, 'project-b');
+        } finally {
+          await secondOwner.close();
+        }
+
         const waitingCancellation = new AbortController();
         const cancelledLease = coordination.acquireProjectLease('project-a', {
           signal: waitingCancellation.signal,
