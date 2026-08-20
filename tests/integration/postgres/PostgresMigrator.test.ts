@@ -12,7 +12,7 @@ import {
   withPostgresTestDatabase,
 } from '../../helpers/PostgresTestDatabase.js';
 
-const FOUNDATION_CHECKSUM = '5b1c3cdc18645b6aed689ba2e93b28a747e8b357d4a678652abab2a82ab4d342';
+const FOUNDATION_CHECKSUM = '5e883d93536b2569f3655cc9f3982c4ad7e8e3daf7871500dc5d4f471e8504bb';
 
 async function execute(connectionString: string, sql: string): Promise<void> {
   const client = new Client({ connectionString });
@@ -289,6 +289,24 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
 
     await migrationClient.query('BEGIN');
     await migrationClient.query(
+      "SELECT set_config('claudian_cloud.project_id', 'future.project', true)",
+    );
+    await migrationClient.query(
+      `INSERT INTO claudian_cloud.projects (project_id, created_at)
+       VALUES ('future.project', clock_timestamp())`,
+    );
+    await migrationClient.query(
+      `INSERT INTO claudian_cloud.project_memberships (
+         project_id, member_id, role, status, revision, created_at, updated_at
+       ) VALUES (
+         'future.project', 'future.member', 'member', 'active', 1,
+         clock_timestamp(), clock_timestamp()
+       )`,
+    );
+    await migrationClient.query('ROLLBACK');
+
+    await migrationClient.query('BEGIN');
+    await migrationClient.query(
       "SELECT set_config('claudian_cloud.project_id', 'project-a', true)",
     );
     await assert.rejects(
@@ -299,6 +317,21 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
          ) VALUES ('project-a', 'node-a', 'storage-a', 0, true, clock_timestamp(), clock_timestamp())`,
       ),
       /repository_placements_generation/,
+    );
+    await migrationClient.query('ROLLBACK');
+
+    await migrationClient.query('BEGIN');
+    await migrationClient.query(
+      "SELECT set_config('claudian_cloud.project_id', 'project-a', true)",
+    );
+    await assert.rejects(
+      migrationClient.query(
+        `INSERT INTO claudian_cloud.repository_placements (
+           project_id, storage_node_id, repository_storage_key, generation,
+           active, created_at, updated_at
+         ) VALUES ('project-a', 'node-a', 'Storage_A', 1, true, clock_timestamp(), clock_timestamp())`,
+      ),
+      /repository_placements_storage_key_format/,
     );
     await migrationClient.query('ROLLBACK');
 
@@ -333,16 +366,13 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
     await migrationClient.query(
       "SELECT set_config('claudian_cloud.project_id', 'project-b', true)",
     );
-    await assert.rejects(
-      migrationClient.query(
-        `INSERT INTO claudian_cloud.repository_placements (
-           project_id, storage_node_id, repository_storage_key, generation,
-           active, created_at, updated_at
-         ) VALUES ('project-b', 'node-a', 'shared-storage', 1, true, clock_timestamp(), clock_timestamp())`,
-      ),
-      /repository_placements_storage_location/,
+    await migrationClient.query(
+      `INSERT INTO claudian_cloud.repository_placements (
+         project_id, storage_node_id, repository_storage_key, generation,
+         active, created_at, updated_at
+       ) VALUES ('project-b', 'node-a', 'shared-storage', 1, true, clock_timestamp(), clock_timestamp())`,
     );
-    await migrationClient.query('ROLLBACK');
+    await migrationClient.query('COMMIT');
   } finally {
     await migrationClient.end();
   }

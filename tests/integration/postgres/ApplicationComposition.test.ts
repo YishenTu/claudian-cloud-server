@@ -101,6 +101,15 @@ async function cloudConnectionCount(adminUrl: string): Promise<number> {
   }
 }
 
+async function waitForNoCloudConnections(adminUrl: string): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    if (await cloudConnectionCount(adminUrl) === 0) return;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error('application-test-postgres-connection-survived');
+}
+
 async function writeExecutable(
   root: string,
   name: string,
@@ -136,6 +145,46 @@ async function waitForProcessExit(pid: number): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 10));
   }
   throw new Error('application-test-process-survived');
+}
+
+async function waitForBlockedSchemaQuery(client: Client): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    await client.query('SELECT pg_stat_clear_snapshot()');
+    const result = await client.query<{
+      readonly application_name: string;
+      readonly state: string;
+      readonly wait_event_type: string | null;
+    }>(
+      `SELECT application_name, state, wait_event_type
+         FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND application_name = 'claudian-cloud-reserved'`,
+    );
+    if (result.rows.some(row => row.wait_event_type === 'Lock')) return;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error('application-test-schema-query-not-blocked');
+}
+
+async function settleBeforeTest(
+  operation: Promise<unknown>,
+  timeoutMs: number,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('application-test-shutdown-timeout')),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 describe('application composition', { concurrency: false }, () => {
@@ -364,6 +413,58 @@ while :; do sleep 1; done`,
       }
       await application.close();
       await rm(executableRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('terminates a blocked startup schema query within the shutdown budget', async () => {
+    const blocker = new Client({ connectionString: database.adminUrl });
+    const lines: string[] = [];
+    const baseConfig = config({
+      postgresUrl: database.runtimeUrl,
+      repositoryRoot,
+    });
+    const application = createApplication({
+      config: Object.freeze({
+        ...baseConfig,
+        postgres: Object.freeze({
+          ...baseConfig.postgres,
+          projectLockTimeoutMs: 60_000,
+        }),
+        shutdownTimeoutMs: 500,
+      }),
+      logger: logger(lines),
+    });
+    let closing: Promise<void> | undefined;
+    try {
+      await blocker.connect();
+      await blocker.query('BEGIN');
+      await blocker.query(
+        'LOCK TABLE claudian_cloud.schema_migrations IN ACCESS EXCLUSIVE MODE',
+      );
+
+      const starting = application.start();
+      const startupFailure = assert.rejects(
+        starting,
+        /application\.error\.startup-failed/,
+      );
+      await waitForBlockedSchemaQuery(blocker);
+
+      const startedAt = Date.now();
+      closing = application.close();
+      await settleBeforeTest(closing, 1_000);
+      await startupFailure;
+
+      assert.equal(Date.now() - startedAt < 1_000, true);
+      await waitForNoCloudConnections(database.adminUrl);
+      assert.deepEqual(
+        events(lines).map(value => value.event),
+        ['server.starting', 'server.stopping', 'server.stopped'],
+      );
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined);
+      await blocker.end().catch(() => undefined);
+      await closing?.catch(() => undefined);
+      await application.close().catch(() => undefined);
     }
   });
 

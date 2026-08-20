@@ -93,7 +93,13 @@ export class GitProcessSupervisor {
     signal?: AbortSignal,
   ): Promise<void> {
     return this.#runProcess({
-      arguments: ['fsck', '--full', '--strict', '--no-progress'],
+      arguments: [
+        'fsck',
+        '--full',
+        '--strict',
+        '--no-dangling',
+        '--no-progress',
+      ],
       captureOutput: false,
       cwd: repositoryPath,
       failureCode: 'repository-corrupt',

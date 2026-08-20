@@ -36,10 +36,10 @@ async function run(): Promise<void> {
   }
 
   const application = createApplication({ config, logger });
-  let shutdownStarted = false;
+  const shutdownState = { started: false };
   const shutdown = (_signal: NodeJS.Signals): void => {
-    if (shutdownStarted) return;
-    shutdownStarted = true;
+    if (shutdownState.started) return;
+    shutdownState.started = true;
     void application.close()
       .then(() => {
         process.exitCode = 0;
@@ -55,12 +55,13 @@ async function run(): Promise<void> {
   try {
     await application.start();
   } catch {
+    let closeFailed = false;
     try {
       await application.close();
     } catch {
-      // Startup already emitted the one safe failure event.
+      closeFailed = true;
     }
-    process.exitCode = 1;
+    process.exitCode = shutdownState.started && !closeFailed ? 0 : 1;
   }
 }
 

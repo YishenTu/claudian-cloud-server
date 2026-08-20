@@ -111,6 +111,7 @@ class CloudApplication implements Application {
       projectLockTimeoutMs: options.config.postgres.projectLockTimeoutMs,
       reservedPoolMax: options.config.postgres.reservedPoolMax,
       runtimeConnectionString: options.config.postgres.url,
+      shutdownTimeoutMs: options.config.shutdownTimeoutMs,
     });
     this.#repositoryAuthority = new GitRepositoryAuthority({
       gitExecutable: options.config.repository.gitExecutable,

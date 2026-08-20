@@ -8,6 +8,7 @@ import {
 } from './GitProcessSupervisor.js';
 import { RepositoryPathPolicy } from './RepositoryPathPolicy.js';
 import {
+  createRepositoryPlacementLease,
   RepositoryPlacementError,
   type RepositoryPlacementLease,
   type RepositoryPlacementValidator,
@@ -143,11 +144,20 @@ export class GitRepositoryAuthority {
     options: VerifyRepositoryIntegrityOptions = {},
   ): Promise<RepositoryIntegrityResult> {
     if (this.#closed) throw new GitRepositoryError('closed');
+    let placementSnapshot: RepositoryPlacementLease;
+    try {
+      placementSnapshot = createRepositoryPlacementLease(placement);
+    } catch (error: unknown) {
+      if (error instanceof RepositoryPlacementError) {
+        throw mapPlacementError(error);
+      }
+      throw new GitRepositoryError('placement-rejected');
+    }
     let permit;
     try {
       permit = await this.#resourceAdmission.acquireGitChild({
         classification: 'read',
-        projectId: placement.projectId,
+        projectId: placementSnapshot.projectId,
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       });
     } catch (error: unknown) {
@@ -162,8 +172,8 @@ export class GitRepositoryAuthority {
       }
       let resolved;
       try {
-        resolved = await this.#pathPolicy.resolveExisting(placement);
-        await this.#pathPolicy.revalidate(placement);
+        resolved = await this.#pathPolicy.resolveExisting(placementSnapshot);
+        await this.#pathPolicy.revalidate(placementSnapshot);
       } catch (error: unknown) {
         if (error instanceof RepositoryPlacementError) {
           throw mapPlacementError(error);
@@ -175,13 +185,16 @@ export class GitRepositoryAuthority {
           resolved.repositoryPath,
           options.signal,
         );
-        resolved = await this.#pathPolicy.resolveExisting(placement);
-        await this.#pathPolicy.revalidate(placement);
+        resolved = await this.#pathPolicy.resolveExisting(placementSnapshot);
+        await this.#pathPolicy.revalidate(placementSnapshot);
         await this.#supervisor.runIntegrityCheck(
           resolved.repositoryPath,
           options.signal,
         );
       } catch (error: unknown) {
+        if (error instanceof RepositoryPlacementError) {
+          throw mapPlacementError(error);
+        }
         if (error instanceof GitProcessError) throw mapProcessError(error);
         throw new GitRepositoryError('process-failed');
       }

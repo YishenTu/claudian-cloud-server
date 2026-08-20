@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   writeFile,
 } from 'node:fs/promises';
@@ -36,15 +37,17 @@ class CurrentPlacementValidator implements RepositoryPlacementValidator {
 }
 
 class SequencedPlacementValidator implements RepositoryPlacementValidator {
-  readonly #results: boolean[];
+  readonly #results: (boolean | Error)[];
 
-  constructor(results: readonly boolean[]) {
+  constructor(results: readonly (boolean | Error)[]) {
     this.#results = [...results];
   }
 
   async isCurrent(_placement: RepositoryPlacementLease): Promise<boolean> {
     await Promise.resolve();
-    return this.#results.shift() ?? false;
+    const result = this.#results.shift() ?? false;
+    if (result instanceof Error) throw result;
+    return result;
   }
 }
 
@@ -59,6 +62,17 @@ function placement(
     repositoryStorageKey,
     storageNodeId: 'node-a',
   });
+}
+
+function repositoryPath(
+  root: string,
+  accepted: RepositoryPlacementLease,
+): string {
+  return join(
+    root,
+    Buffer.from(accepted.projectId, 'utf8').toString('hex'),
+    accepted.repositoryStorageKey,
+  );
 }
 
 function admission(): ResourceAdmission {
@@ -197,7 +211,7 @@ async function createFakeAuthority(options: {
     options.executableBody(marker),
   );
   const repository = placement('repository');
-  await mkdir(join(root, repository.repositoryStorageKey));
+  await mkdir(repositoryPath(root, repository), { recursive: true });
   const resourceAdmission = admission();
   const authority = new GitRepositoryAuthority({
     gitExecutable: executable,
@@ -241,7 +255,7 @@ describe('GitRepositoryAuthority', () => {
       await execFileAsync(GIT_EXECUTABLE, [
         'init',
         '--bare',
-        join(root, accepted.repositoryStorageKey),
+        repositoryPath(root, accepted),
       ]);
 
       assert.deepEqual(await authority.verifyCapability(), {
@@ -252,7 +266,7 @@ describe('GitRepositoryAuthority', () => {
       });
 
       const corrupt = placement('corrupt_bare');
-      const corruptPath = join(root, corrupt.repositoryStorageKey);
+      const corruptPath = repositoryPath(root, corrupt);
       await execFileAsync(GIT_EXECUTABLE, ['init', '--bare', corruptPath]);
       await mkdir(join(corruptPath, 'objects/aa'));
       await writeFile(
@@ -277,13 +291,54 @@ describe('GitRepositoryAuthority', () => {
       const nonBare = placement('non_bare');
       await execFileAsync(GIT_EXECUTABLE, [
         'init',
-        join(root, nonBare.repositoryStorageKey),
+        repositoryPath(root, nonBare),
       ]);
       await expectGitError(
         authority.verifyIntegrity(nonBare),
         'repository-corrupt',
         [root],
       );
+    } finally {
+      await authority.close();
+      await resourceAdmission.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it('accepts valid unreachable objects without charging diagnostic output', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'claudian-git-unreachable-'));
+    const accepted = placement('valid_unreachable');
+    const acceptedRepositoryPath = repositoryPath(root, accepted);
+    const blobPath = join(root, 'unreachable-blob');
+    const resourceAdmission = admission();
+    const authority = new GitRepositoryAuthority({
+      gitExecutable: GIT_EXECUTABLE,
+      operationTimeoutMs: 2_000,
+      outputMaxBytes: 1_024,
+      placementValidator: new CurrentPlacementValidator(),
+      repositoryRoot: root,
+      resourceAdmission,
+      storageNodeId: 'node-a',
+    });
+    try {
+      await execFileAsync(GIT_EXECUTABLE, [
+        'init',
+        '--bare',
+        acceptedRepositoryPath,
+      ]);
+      for (let index = 0; index < 40; index += 1) {
+        await writeFile(blobPath, `valid-unreachable-object-${String(index)}`);
+        await execFileAsync(GIT_EXECUTABLE, [
+          `--git-dir=${acceptedRepositoryPath}`,
+          'hash-object',
+          '-w',
+          blobPath,
+        ]);
+      }
+
+      assert.deepEqual(await authority.verifyIntegrity(accepted), {
+        status: 'valid',
+      });
     } finally {
       await authority.close();
       await resourceAdmission.close();
@@ -300,7 +355,7 @@ describe('GitRepositoryAuthority', () => {
       `printf spawned > '${marker}'`,
     );
     const accepted = placement('repository');
-    await mkdir(join(root, accepted.repositoryStorageKey));
+    await mkdir(repositoryPath(root, accepted), { recursive: true });
     const resourceAdmission = admission();
     const authority = new GitRepositoryAuthority({
       gitExecutable: executable,
@@ -326,6 +381,115 @@ describe('GitRepositoryAuthority', () => {
         'placement-rejected',
       );
       await assert.rejects(access(marker), { code: 'ENOENT' });
+    } finally {
+      await authority.close();
+      await resourceAdmission.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it('preserves placement errors at the fence before integrity checking', async () => {
+    for (const [lastValidation, expectedCode] of [
+      [false, 'placement-rejected'],
+      [new Error('private-placement-dependency'), 'placement-unavailable'],
+    ] as const) {
+      const root = await mkdtemp(join(tmpdir(), 'claudian-second-fence-'));
+      const marker = join(root, 'fsck.marker');
+      const executable = await writeExecutable(
+        root,
+        'fake-git',
+        `printf fsck > '${marker}'`,
+      );
+      const accepted = placement('repository');
+      await mkdir(repositoryPath(root, accepted), { recursive: true });
+      const resourceAdmission = admission();
+      const authority = new GitRepositoryAuthority({
+        gitExecutable: executable,
+        operationTimeoutMs: 2_000,
+        outputMaxBytes: 4_096,
+        placementValidator: new SequencedPlacementValidator([
+          true,
+          true,
+          true,
+          lastValidation,
+        ]),
+        repositoryRoot: root,
+        resourceAdmission,
+        storageNodeId: 'node-a',
+      });
+      try {
+        await expectGitError(
+          authority.verifyIntegrity(accepted),
+          expectedCode,
+          ['private-placement-dependency'],
+        );
+        await assert.rejects(access(marker), { code: 'ENOENT' });
+      } finally {
+        await authority.close();
+        await resourceAdmission.close();
+        await rm(root, { force: true, recursive: true });
+      }
+    }
+  });
+
+  it('binds admission and execution to one owned placement snapshot', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'claudian-placement-snapshot-'));
+    const marker = join(root, 'repository.marker');
+    const executable = await writeExecutable(
+      root,
+      'fake-git',
+      `pwd > '${marker}'`,
+    );
+    const original = placement('repository_a', 'project-a');
+    const replacement = createRepositoryPlacementLease({
+      active: true,
+      generation: 2,
+      projectId: 'project-b',
+      repositoryStorageKey: 'repository_b',
+      storageNodeId: 'node-b',
+    });
+    await mkdir(repositoryPath(root, original), { recursive: true });
+    await mkdir(repositoryPath(root, replacement), { recursive: true });
+    const borrowed = { ...original };
+    const observed: RepositoryPlacementLease[] = [];
+    const resourceAdmission = admission();
+    const authority = new GitRepositoryAuthority({
+      gitExecutable: executable,
+      operationTimeoutMs: 2_000,
+      outputMaxBytes: 4_096,
+      placementValidator: {
+        isCurrent: async candidate => {
+          observed.push({ ...candidate });
+          await Promise.resolve();
+          return true;
+        },
+      },
+      repositoryRoot: root,
+      resourceAdmission,
+      storageNodeId: 'node-a',
+    });
+    try {
+      const verification = authority.verifyIntegrity(borrowed);
+      borrowed.generation = replacement.generation;
+      borrowed.projectId = replacement.projectId;
+      borrowed.repositoryStorageKey = replacement.repositoryStorageKey;
+      borrowed.storageNodeId = replacement.storageNodeId;
+
+      assert.deepEqual(await verification, { status: 'valid' });
+      assert.equal(
+        (await readFile(marker, 'utf8')).trim(),
+        await realpath(repositoryPath(root, original)),
+      );
+      assert.equal(observed.length > 0, true);
+      assert.equal(
+        observed.every(candidate => (
+          candidate.generation === original.generation
+          && candidate.projectId === original.projectId
+          && candidate.repositoryStorageKey === original.repositoryStorageKey
+          && candidate.storageNodeId === original.storageNodeId
+        )),
+        true,
+      );
     } finally {
       await authority.close();
       await resourceAdmission.close();
@@ -450,7 +614,7 @@ while :; do sleep 1; done
     );
     await chmod(executable, 0o755);
     const repository = placement('repository');
-    await mkdir(join(root, repository.repositoryStorageKey));
+    await mkdir(repositoryPath(root, repository), { recursive: true });
     const resourceAdmission = admission();
     const authority = new GitRepositoryAuthority({
       gitExecutable: executable,
@@ -541,7 +705,7 @@ wait`,
   it('sanitizes spawn errors and unexpected process signals', async () => {
     const root = await mkdtemp(join(tmpdir(), 'claudian-missing-git-'));
     const accepted = placement('repository');
-    await mkdir(join(root, accepted.repositoryStorageKey));
+    await mkdir(repositoryPath(root, accepted), { recursive: true });
     const resourceAdmission = admission();
     const authority = new GitRepositoryAuthority({
       gitExecutable: join(root, 'missing-git'),
@@ -605,7 +769,7 @@ wait`,
           'GIT_TERMINAL_PROMPT=0',
           'LC_ALL=C',
           'PRIVATE_INHERITED=unset',
-          'ARGS=fsck --full --strict --no-progress',
+          'ARGS=fsck --full --strict --no-dangling --no-progress',
           '',
         ].join('\n'),
       );
@@ -634,8 +798,8 @@ esac`,
     );
     const projectA = placement('slow_a');
     const projectB = placement('fast_b', 'project-b');
-    await mkdir(join(root, projectA.repositoryStorageKey));
-    await mkdir(join(root, projectB.repositoryStorageKey));
+    await mkdir(repositoryPath(root, projectA), { recursive: true });
+    await mkdir(repositoryPath(root, projectB), { recursive: true });
     const resourceAdmission = admission();
     const authority = new GitRepositoryAuthority({
       gitExecutable: executable,

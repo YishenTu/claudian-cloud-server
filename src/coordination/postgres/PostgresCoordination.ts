@@ -21,6 +21,7 @@ export interface PostgresCoordinationOptions {
   readonly projectLockTimeoutMs: number;
   readonly reservedPoolMax: number;
   readonly runtimeConnectionString: string;
+  readonly shutdownTimeoutMs: number;
 }
 
 export interface AcquireProjectLeaseOptions {
@@ -73,6 +74,87 @@ const RUNTIME_ROLE = 'claudian_cloud_runtime';
 
 function dependencyFailure(): CoordinationError {
   return new CoordinationError('dependency-failed');
+}
+
+function handleIdlePoolError(_error: Error): void {
+  // pg removes the failed idle client; the next operation reconnects or fails safely.
+}
+
+class CheckedOutPoolClient {
+  readonly client: PoolClient;
+  readonly #onRelease: () => void;
+  #broken = false;
+  #released = false;
+
+  constructor(client: PoolClient, onRelease: () => void) {
+    this.client = client;
+    this.#onRelease = onRelease;
+    this.client.on('error', this.#handleClientError);
+  }
+
+  isBroken(): boolean {
+    return this.#broken;
+  }
+
+  release(destroy = false): void {
+    if (this.#released) return;
+    this.#released = true;
+    this.#onRelease();
+    const shouldDestroy = destroy || this.#broken;
+    if (shouldDestroy) this.client.connection.stream.destroy();
+    try {
+      this.client.release(shouldDestroy);
+    } finally {
+      this.client.removeListener('error', this.#handleClientError);
+    }
+  }
+
+  readonly markBroken = (): void => {
+    this.#broken = true;
+  };
+
+  readonly #handleClientError = (_error: Error): void => {
+    this.#broken = true;
+  };
+}
+
+class CheckedOutPoolClients {
+  readonly #clients = new Set<CheckedOutPoolClient>();
+  #closed = false;
+
+  get closed(): boolean {
+    return this.#closed;
+  }
+
+  adopt(client: PoolClient): CheckedOutPoolClient {
+    const checkedOut = new CheckedOutPoolClient(client, () => {
+      this.#clients.delete(checkedOut);
+    });
+    if (this.#closed) {
+      try {
+        checkedOut.release(true);
+      } catch {
+        // The closed owner cannot return this client to a pool.
+      }
+      throw new CoordinationError('closed');
+    }
+    this.#clients.add(checkedOut);
+    return checkedOut;
+  }
+
+  close(): boolean {
+    if (this.#closed) return true;
+    this.#closed = true;
+    let succeeded = true;
+    for (const client of [...this.#clients]) {
+      try {
+        client.release(true);
+      } catch {
+        succeeded = false;
+      }
+    }
+    return succeeded;
+  }
 }
 
 function ensureProjectId(projectId: CollabProjectId): bigint {
@@ -151,12 +233,13 @@ async function checkout(
   pool: Pool,
   deadline: number,
   signal: AbortSignal | undefined,
-): Promise<PoolClient> {
+  checkedOutClients: CheckedOutPoolClients,
+): Promise<CheckedOutPoolClient> {
   if (signal?.aborted === true) throw new CoordinationError('cancelled');
   const remaining = deadline - Date.now();
   if (remaining <= 0) throw new CoordinationError('busy');
 
-  return new Promise<PoolClient>((resolve, reject) => {
+  return new Promise<CheckedOutPoolClient>((resolve, reject) => {
     let settled = false;
     const finish = (operation: () => void): void => {
       if (settled) return;
@@ -177,13 +260,30 @@ async function checkout(
 
     void pool.connect().then(
       client => {
-        if (settled) {
-          client.release();
+        let checkedOut: CheckedOutPoolClient;
+        try {
+          checkedOut = checkedOutClients.adopt(client);
+        } catch (error: unknown) {
+          finish(() => reject(
+            error instanceof Error ? error : dependencyFailure(),
+          ));
           return;
         }
-        finish(() => resolve(client));
+        if (settled) {
+          try {
+            checkedOut.release();
+          } catch {
+            // The original timeout or cancellation remains authoritative.
+          }
+          return;
+        }
+        finish(() => resolve(checkedOut));
       },
-      () => finish(() => reject(dependencyFailure())),
+      () => finish(() => reject(
+        checkedOutClients.closed
+          ? new CoordinationError('closed')
+          : dependencyFailure(),
+      )),
     );
     if (signal?.aborted === true) onAbort();
   });
@@ -331,24 +431,24 @@ async function runProjectTransaction<T>(
 }
 
 class PostgresPinnedProjectLease implements PinnedProjectLease {
+  readonly #checkedOutClient: CheckedOutPoolClient;
   readonly #client: PoolClient;
   readonly #lockKey: bigint;
   readonly #projectId: CollabProjectId;
   #activeOperation: Promise<void> | undefined;
-  #broken = false;
   #closePromise: Promise<void> | undefined;
   #closed = false;
   #transactionActive = false;
 
   constructor(
-    client: PoolClient,
+    checkedOutClient: CheckedOutPoolClient,
     projectId: CollabProjectId,
     lockKey: bigint,
   ) {
-    this.#client = client;
+    this.#checkedOutClient = checkedOutClient;
+    this.#client = checkedOutClient.client;
     this.#projectId = projectId;
     this.#lockKey = lockKey;
-    this.#client.on('error', this.#handleClientError);
   }
 
   close(): Promise<void> {
@@ -363,7 +463,7 @@ class PostgresPinnedProjectLease implements PinnedProjectLease {
     operation: (scope: ProjectScope) => Promise<T>,
   ): Promise<T> {
     if (this.#closed) throw new CoordinationError('closed');
-    if (this.#broken) throw dependencyFailure();
+    if (this.#checkedOutClient.isBroken()) throw dependencyFailure();
     if (this.#transactionActive) throw new CoordinationError('lease-busy');
     this.#transactionActive = true;
     const transaction = runProjectTransaction(
@@ -373,7 +473,7 @@ class PostgresPinnedProjectLease implements PinnedProjectLease {
       {
         deadline: Number.POSITIVE_INFINITY,
         lockKey: undefined,
-        markBroken: this.#markBroken,
+        markBroken: this.#checkedOutClient.markBroken,
         signal: undefined,
       },
     );
@@ -389,43 +489,35 @@ class PostgresPinnedProjectLease implements PinnedProjectLease {
     }
   }
 
-  readonly #handleClientError = (): void => {
-    this.#broken = true;
-  };
-
-  readonly #markBroken = (): void => {
-    this.#broken = true;
-  };
-
   async #finishClose(): Promise<void> {
     await this.#activeOperation;
     let releasedCleanly = false;
     try {
-      if (this.#broken) throw dependencyFailure();
+      if (this.#checkedOutClient.isBroken()) throw dependencyFailure();
       const rows = await safeQuery<{ readonly unlocked: boolean }>(
         this.#client,
         'SELECT pg_advisory_unlock($1::bigint) AS unlocked',
         [this.#lockKey.toString()],
-        this.#markBroken,
+        this.#checkedOutClient.markBroken,
       );
       if (rows[0]?.unlocked !== true) {
-        this.#broken = true;
+        this.#checkedOutClient.markBroken();
         throw dependencyFailure();
       }
       releasedCleanly = true;
     } finally {
-      this.#client.removeListener('error', this.#handleClientError);
       try {
-        this.#client.release(!releasedCleanly);
+        this.#checkedOutClient.release(!releasedCleanly);
       } catch {
-        this.#broken = true;
+        this.#checkedOutClient.markBroken();
       }
     }
-    if (this.#broken) throw dependencyFailure();
+    if (this.#checkedOutClient.isBroken()) throw dependencyFailure();
   }
 }
 
 export class PostgresCoordination implements RepositoryPlacementValidator {
+  readonly #checkedOutClients = new CheckedOutPoolClients();
   readonly #ordinaryPool: Pool;
   readonly #pinnedPool: Pool;
   readonly #projectLockTimeoutMs: number;
@@ -435,29 +527,36 @@ export class PostgresCoordination implements RepositoryPlacementValidator {
 
   constructor(options: PostgresCoordinationOptions) {
     this.#projectLockTimeoutMs = options.projectLockTimeoutMs;
+    const dependencyTimeoutMs = Math.min(
+      options.projectLockTimeoutMs,
+      Math.max(1, Math.floor(options.shutdownTimeoutMs / 2)),
+    );
     const common = {
       allowExitOnIdle: true,
       connectionString: options.runtimeConnectionString,
-      connectionTimeoutMillis: options.projectLockTimeoutMs,
+      connectionTimeoutMillis: dependencyTimeoutMs,
       idleTimeoutMillis: 30_000,
-      query_timeout: options.projectLockTimeoutMs,
-      statement_timeout: options.projectLockTimeoutMs,
+      query_timeout: dependencyTimeoutMs,
+      statement_timeout: dependencyTimeoutMs,
     } as const;
     this.#ordinaryPool = new Pool({
       ...common,
       application_name: 'claudian-cloud-ordinary',
       max: options.ordinaryPoolMax,
     });
+    this.#ordinaryPool.on('error', handleIdlePoolError);
     this.#pinnedPool = new Pool({
       ...common,
       application_name: 'claudian-cloud-pinned',
       max: options.pinnedPoolMax,
     });
+    this.#pinnedPool.on('error', handleIdlePoolError);
     this.#reservedPool = new Pool({
       ...common,
       application_name: 'claudian-cloud-reserved',
       max: options.reservedPoolMax,
     });
+    this.#reservedPool.on('error', handleIdlePoolError);
   }
 
   acquireProjectLease(
@@ -472,12 +571,16 @@ export class PostgresCoordination implements RepositoryPlacementValidator {
   close(): Promise<void> {
     if (this.#closePromise === undefined) {
       this.#closed = true;
+      const clientsClosed = this.#checkedOutClients.close();
       this.#closePromise = Promise.allSettled([
         this.#ordinaryPool.end(),
         this.#pinnedPool.end(),
         this.#reservedPool.end(),
       ]).then(results => {
-        if (results.some(result => result.status === 'rejected')) {
+        if (
+          !clientsClosed
+          || results.some(result => result.status === 'rejected')
+        ) {
           throw dependencyFailure();
         }
       });
@@ -501,17 +604,19 @@ export class PostgresCoordination implements RepositoryPlacementValidator {
   async verifySchemaCompatibility(): Promise<void> {
     this.#assertOpen();
     const deadline = Date.now() + this.#projectLockTimeoutMs;
-    const client = await checkout(this.#reservedPool, deadline, undefined);
-    let broken = false;
-    const markBroken = (): void => {
-      broken = true;
-    };
+    const checkedOut = await checkout(
+      this.#reservedPool,
+      deadline,
+      undefined,
+      this.#checkedOutClients,
+    );
+    const client = checkedOut.client;
     try {
       const role = await safeQuery<{ readonly role_name: string }>(
         client,
         'SELECT current_user AS role_name',
         [],
-        markBroken,
+        checkedOut.markBroken,
       );
       if (role[0]?.role_name !== RUNTIME_ROLE) {
         throw new CoordinationError('schema-incompatible');
@@ -520,7 +625,7 @@ export class PostgresCoordination implements RepositoryPlacementValidator {
         client,
         "SELECT to_regclass('claudian_cloud.schema_migrations')::text AS relation",
         [],
-        markBroken,
+        checkedOut.markBroken,
       );
       if (relation[0]?.relation === null) {
         throw new CoordinationError('schema-incompatible');
@@ -531,7 +636,7 @@ export class PostgresCoordination implements RepositoryPlacementValidator {
            FROM claudian_cloud.schema_migrations
           ORDER BY version`,
         [],
-        markBroken,
+        checkedOut.markBroken,
       );
       if (
         rows.length !== 1
@@ -543,7 +648,7 @@ export class PostgresCoordination implements RepositoryPlacementValidator {
         throw new CoordinationError('schema-incompatible');
       }
     } finally {
-      client.release(broken);
+      checkedOut.release();
     }
   }
 
@@ -555,20 +660,22 @@ export class PostgresCoordination implements RepositoryPlacementValidator {
     this.#assertOpen();
     const lockKey = ensureProjectId(projectId);
     const deadline = Date.now() + this.#projectLockTimeoutMs;
-    const client = await checkout(this.#ordinaryPool, deadline, options.signal);
-    let broken = false;
-    const markBroken = (): void => {
-      broken = true;
-    };
+    const checkedOut = await checkout(
+      this.#ordinaryPool,
+      deadline,
+      options.signal,
+      this.#checkedOutClients,
+    );
+    const client = checkedOut.client;
     try {
       return await runProjectTransaction(client, projectId, operation, {
         deadline,
         lockKey,
-        markBroken,
+        markBroken: checkedOut.markBroken,
         signal: options.signal,
       });
     } finally {
-      client.release(broken);
+      checkedOut.release();
     }
   }
 
@@ -582,12 +689,14 @@ export class PostgresCoordination implements RepositoryPlacementValidator {
     signal: AbortSignal | undefined,
   ): Promise<PinnedProjectLease> {
     const deadline = Date.now() + this.#projectLockTimeoutMs;
-    const client = await checkout(this.#pinnedPool, deadline, signal);
+    const checkedOut = await checkout(
+      this.#pinnedPool,
+      deadline,
+      signal,
+      this.#checkedOutClients,
+    );
+    const client = checkedOut.client;
     let acquired = false;
-    let broken = false;
-    const markBroken = (): void => {
-      broken = true;
-    };
     try {
       await acquireAdvisoryLock(
         client,
@@ -595,12 +704,12 @@ export class PostgresCoordination implements RepositoryPlacementValidator {
         false,
         deadline,
         signal,
-        markBroken,
+        checkedOut.markBroken,
       );
       acquired = true;
       if (signal?.aborted === true) throw new CoordinationError('cancelled');
       if (this.#closed) throw new CoordinationError('closed');
-      return new PostgresPinnedProjectLease(client, projectId, lockKey);
+      return new PostgresPinnedProjectLease(checkedOut, projectId, lockKey);
     } catch (error: unknown) {
       if (acquired) {
         try {
@@ -608,12 +717,12 @@ export class PostgresCoordination implements RepositoryPlacementValidator {
             'SELECT pg_advisory_unlock($1::bigint) AS unlocked',
             [lockKey.toString()],
           );
-          if (result.rows[0]?.unlocked !== true) broken = true;
+          if (result.rows[0]?.unlocked !== true) checkedOut.markBroken();
         } catch {
-          broken = true;
+          checkedOut.markBroken();
         }
       }
-      client.release(broken);
+      checkedOut.release();
       throw error;
     }
   }
@@ -625,20 +734,22 @@ export class PostgresCoordination implements RepositoryPlacementValidator {
     this.#assertOpen();
     ensureProjectId(projectId);
     const deadline = Date.now() + this.#projectLockTimeoutMs;
-    const client = await checkout(this.#ordinaryPool, deadline, undefined);
-    let broken = false;
-    const markBroken = (): void => {
-      broken = true;
-    };
+    const checkedOut = await checkout(
+      this.#ordinaryPool,
+      deadline,
+      undefined,
+      this.#checkedOutClients,
+    );
+    const client = checkedOut.client;
     try {
       return await runProjectTransaction(client, projectId, operation, {
         deadline,
         lockKey: undefined,
-        markBroken,
+        markBroken: checkedOut.markBroken,
         signal: undefined,
       });
     } finally {
-      client.release(broken);
+      checkedOut.release();
     }
   }
 }
