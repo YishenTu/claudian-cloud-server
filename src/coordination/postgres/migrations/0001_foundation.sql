@@ -43,6 +43,8 @@ CREATE TABLE claudian_cloud.repository_placements (
   CONSTRAINT repository_placements_project
     FOREIGN KEY (project_id)
     REFERENCES claudian_cloud.projects(project_id),
+  CONSTRAINT repository_placements_storage_location
+    UNIQUE (storage_node_id, repository_storage_key),
   CONSTRAINT repository_placements_storage_node_id_format
     CHECK (storage_node_id ~ '^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$'),
   CONSTRAINT repository_placements_storage_key_format
