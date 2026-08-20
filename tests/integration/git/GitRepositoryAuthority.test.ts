@@ -48,11 +48,14 @@ class SequencedPlacementValidator implements RepositoryPlacementValidator {
   }
 }
 
-function placement(repositoryStorageKey: string): RepositoryPlacementLease {
+function placement(
+  repositoryStorageKey: string,
+  projectId = 'project-a',
+): RepositoryPlacementLease {
   return createRepositoryPlacementLease({
     active: true,
     generation: 1,
-    projectId: 'project-a',
+    projectId,
     repositoryStorageKey,
     storageNodeId: 'node-a',
   });
@@ -135,6 +138,33 @@ async function assertProcessGone(marker: string): Promise<void> {
       && error.code === 'ESRCH'
     ),
   );
+}
+
+async function processIds(marker: string): Promise<readonly number[]> {
+  return (await readFile(marker, 'utf8'))
+    .trim()
+    .split(/\s+/)
+    .map(value => Number(value));
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function forceProcessCleanup(pids: readonly number[]): void {
+  for (const pid of pids) {
+    if (!Number.isSafeInteger(pid) || pid <= 0) continue;
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // The process has already been reaped.
+    }
+  }
 }
 
 async function settleWithin(operation: Promise<unknown>): Promise<void> {
@@ -373,6 +403,31 @@ describe('GitRepositoryAuthority', () => {
     }
   });
 
+  it('reaps helper descendants in the owned Git process group', async () => {
+    const fixture = await createFakeAuthority({
+      executableBody: marker => `trap '' TERM
+sh -c 'trap "" TERM; sleep 5' &
+printf '%s %s' "$$" "$!" > '${marker}'
+wait`,
+      operationTimeoutMs: 30,
+    });
+    let pids: readonly number[] = [];
+    try {
+      const startedAt = Date.now();
+      await expectGitError(
+        fixture.authority.verifyIntegrity(fixture.repository),
+        'timeout',
+      );
+      assert.equal(Date.now() - startedAt < 2_000, true);
+      pids = await processIds(fixture.marker);
+      assert.equal(pids.length, 2);
+      assert.equal(pids.some(processExists), false);
+    } finally {
+      forceProcessCleanup(pids);
+      await closeFakeAuthority(fixture);
+    }
+  });
+
   it('bounds unsafe output and sanitizes child failures', async () => {
     const output = await createFakeAuthority({
       executableBody: marker => (
@@ -482,6 +537,65 @@ describe('GitRepositoryAuthority', () => {
     } finally {
       delete process.env.PRIVATE_INHERITED_SENTINEL;
       await closeFakeAuthority(fixture);
+    }
+  });
+
+  it('preserves unrelated Project progress under integrated saturation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'claudian-git-saturation-'));
+    const marker = join(root, 'slow.marker');
+    const executable = await writeExecutable(
+      root,
+      'fake-git',
+      `case "$PWD" in
+  */slow_a)
+    printf '%s' "$$" > '${marker}'
+    trap '' TERM
+    while :; do :; done
+    ;;
+  *)
+    exit 0
+    ;;
+esac`,
+    );
+    const projectA = placement('slow_a');
+    const projectB = placement('fast_b', 'project-b');
+    await mkdir(join(root, projectA.repositoryStorageKey));
+    await mkdir(join(root, projectB.repositoryStorageKey));
+    const resourceAdmission = admission();
+    const authority = new GitRepositoryAuthority({
+      gitExecutable: executable,
+      operationTimeoutMs: 2_000,
+      outputMaxBytes: 4_096,
+      placementValidator: new CurrentPlacementValidator(),
+      repositoryRoot: root,
+      resourceAdmission,
+      storageNodeId: 'node-a',
+    });
+    const activeCancellation = new AbortController();
+    const queuedCancellation = new AbortController();
+    try {
+      const activeA = authority.verifyIntegrity(projectA, {
+        signal: activeCancellation.signal,
+      });
+      await waitForFile(marker);
+      const queuedA = authority.verifyIntegrity(projectA, {
+        signal: queuedCancellation.signal,
+      });
+
+      assert.deepEqual(await authority.verifyIntegrity(projectB), {
+        status: 'valid',
+      });
+      queuedCancellation.abort();
+      await expectGitError(queuedA, 'cancelled');
+      activeCancellation.abort();
+      await expectGitError(activeA, 'cancelled');
+      await assertProcessGone(marker);
+    } finally {
+      activeCancellation.abort();
+      queuedCancellation.abort();
+      await authority.close();
+      await settleWithin(resourceAdmission.close());
+      await rm(root, { force: true, recursive: true });
     }
   });
 

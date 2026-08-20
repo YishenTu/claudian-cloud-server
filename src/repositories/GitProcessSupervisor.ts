@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import process from 'node:process';
 
 export type GitProcessErrorCode =
   | 'cancelled'
@@ -48,6 +49,18 @@ const GIT_ENVIRONMENT = Object.freeze({
   PATH: '/usr/bin:/bin',
   SSH_ASKPASS: '/bin/false',
 });
+
+function signalProcessGroup(
+  child: ChildProcessWithoutNullStreams,
+  signal: NodeJS.Signals,
+): void {
+  if (child.pid === undefined) return;
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    child.kill(signal);
+  }
+}
 
 export class GitProcessSupervisor {
   readonly #gitExecutable: string;
@@ -141,6 +154,7 @@ export class GitProcessSupervisor {
         [...options.arguments],
         {
           ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+          detached: true,
           env: GIT_ENVIRONMENT,
           stdio: ['pipe', 'pipe', 'pipe'],
         },
@@ -183,9 +197,9 @@ export class GitProcessSupervisor {
     const terminate = (code: GitProcessErrorCode): void => {
       if (settled || terminationCode !== undefined) return;
       terminationCode = code;
-      child.kill('SIGTERM');
+      signalProcessGroup(child, 'SIGTERM');
       terminationTimer = setTimeout(() => {
-        if (!settled) child.kill('SIGKILL');
+        if (!settled) signalProcessGroup(child, 'SIGKILL');
       }, TERMINATION_GRACE_MS);
       terminationTimer.unref();
     };
