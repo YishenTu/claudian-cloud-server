@@ -6,9 +6,30 @@ import type { ServerConfig } from '../../../src/config/ServerConfig.js';
 import { SafeLogger } from '../../../src/observability/SafeLogger.js';
 
 const config: ServerConfig = Object.freeze({
+  gitAdmission: Object.freeze({
+    maxChildren: 2,
+    maxChildrenPerProject: 1,
+    queueMax: 6,
+    queueMaxPerProject: 4,
+    queueTimeoutMs: 10_000,
+  }),
   http: Object.freeze({
     host: '127.0.0.1',
     port: 0,
+  }),
+  postgres: Object.freeze({
+    ordinaryPoolMax: 8,
+    pinnedPoolMax: 2,
+    projectLockTimeoutMs: 2_000,
+    reservedPoolMax: 2,
+    url: 'postgresql://runtime:test@127.0.0.1/cloud-test',
+  }),
+  repository: Object.freeze({
+    gitExecutable: '/usr/bin/git',
+    operationTimeoutMs: 300_000,
+    outputMaxBytes: 1_048_576,
+    root: '/tmp/claudian-cloud-test-repositories',
+    storageNodeId: 'test-node',
   }),
   shutdownTimeoutMs: 1_000,
 });

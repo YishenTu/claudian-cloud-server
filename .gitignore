@@ -3,6 +3,7 @@
 .env
 .env.*
 !.env.example
+!.env.migration.example
 *.key
 *.pem
 *.log
