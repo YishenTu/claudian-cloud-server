@@ -4,6 +4,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -114,6 +115,7 @@ describe('repository placement', () => {
 
   it('resolves only a current contained repository on the local node', async () => {
     const root = await mkdtemp(join(tmpdir(), 'claudian-repositories-'));
+    const replacedRoot = `${root}-replaced`;
     try {
       const accepted = placement();
       const validator = new InMemoryPlacementValidator(accepted);
@@ -143,7 +145,7 @@ describe('repository placement', () => {
       );
 
       validator.replace(accepted);
-      await rm(root, { recursive: true });
+      await rename(root, replacedRoot);
       await mkdir(root);
       await execFileAsync('/usr/bin/git', ['init', '--bare', repositoryPath]);
       await expectPlacementError(
@@ -152,6 +154,7 @@ describe('repository placement', () => {
       );
     } finally {
       await rm(root, { force: true, recursive: true });
+      await rm(replacedRoot, { force: true, recursive: true });
     }
   });
 
