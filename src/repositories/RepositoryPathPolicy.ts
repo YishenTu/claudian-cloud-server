@@ -64,18 +64,7 @@ export class RepositoryPathPolicy {
   async resolveExisting(
     placement: RepositoryPlacementLease,
   ): Promise<ResolvedRepositoryLocation> {
-    assertRepositoryPlacementLease(placement);
-    if (placement.storageNodeId !== this.#storageNodeId) {
-      throw new RepositoryPlacementError('wrong-storage-node');
-    }
-
-    let current: boolean;
-    try {
-      current = await this.#placementValidator.isCurrent(placement);
-    } catch {
-      throw new RepositoryPlacementError('placement-unavailable');
-    }
-    if (!current) throw new RepositoryPlacementError('stale-placement');
+    await this.revalidate(placement);
 
     const root = await this.#inspectRoot();
     if (this.#acceptedRoot === undefined) this.#acceptedRoot = root;
@@ -116,6 +105,20 @@ export class RepositoryPathPolicy {
       placement,
       repositoryPath,
     });
+  }
+
+  async revalidate(placement: RepositoryPlacementLease): Promise<void> {
+    assertRepositoryPlacementLease(placement);
+    if (placement.storageNodeId !== this.#storageNodeId) {
+      throw new RepositoryPlacementError('wrong-storage-node');
+    }
+    let current: boolean;
+    try {
+      current = await this.#placementValidator.isCurrent(placement);
+    } catch {
+      throw new RepositoryPlacementError('placement-unavailable');
+    }
+    if (!current) throw new RepositoryPlacementError('stale-placement');
   }
 
   async #inspectRoot(): Promise<RootIdentity> {
