@@ -340,7 +340,7 @@ describe('PostgresCoordination', () => {
       } finally {
         await coordination.close().catch(() => undefined);
       }
-    }, {});
+    });
   });
 
   it('fails schema and dependency checks without raw connection context', async () => {
