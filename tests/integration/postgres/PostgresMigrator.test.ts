@@ -12,7 +12,7 @@ import {
   withPostgresTestDatabase,
 } from '../../helpers/PostgresTestDatabase.js';
 
-const FOUNDATION_CHECKSUM = '895f241bb48e4d7f99e55061118739585c42f0bfb90f30e6068198ac1e9efda2';
+const FOUNDATION_CHECKSUM = '9938e8206d911ef7d410e63bbd3bba3f4b699ed4bd9c9f1b7f13ae1d9252fdbe';
 
 async function execute(connectionString: string, sql: string): Promise<void> {
   const client = new Client({ connectionString });
@@ -297,6 +297,21 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
            project_id, storage_node_id, repository_storage_key, generation,
            active, created_at, updated_at
          ) VALUES ('project-a', 'node-a', 'storage-a', 0, true, clock_timestamp(), clock_timestamp())`,
+      ),
+      /repository_placements_generation/,
+    );
+    await migrationClient.query('ROLLBACK');
+
+    await migrationClient.query('BEGIN');
+    await migrationClient.query(
+      "SELECT set_config('claudian_cloud.project_id', 'project-a', true)",
+    );
+    await assert.rejects(
+      migrationClient.query(
+        `INSERT INTO claudian_cloud.repository_placements (
+           project_id, storage_node_id, repository_storage_key, generation,
+           active, created_at, updated_at
+         ) VALUES ('project-a', 'node-a', 'storage-a', 9007199254740992, true, clock_timestamp(), clock_timestamp())`,
       ),
       /repository_placements_generation/,
     );

@@ -171,7 +171,10 @@ export class GitRepositoryAuthority {
         throw new GitRepositoryError('repository-unavailable');
       }
       try {
-        await this.#supervisor.verifyBareRepository(resolved.repositoryPath);
+        await this.#supervisor.verifyBareRepository(
+          resolved.repositoryPath,
+          options.signal,
+        );
         resolved = await this.#pathPolicy.resolveExisting(placement);
         await this.#pathPolicy.revalidate(placement);
         await this.#supervisor.runIntegrityCheck(

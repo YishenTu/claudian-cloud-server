@@ -48,7 +48,7 @@ CREATE TABLE claudian_cloud.repository_placements (
   CONSTRAINT repository_placements_storage_key_format
     CHECK (repository_storage_key ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'),
   CONSTRAINT repository_placements_generation
-    CHECK (generation > 0),
+    CHECK (generation BETWEEN 1 AND 9007199254740991),
   CONSTRAINT repository_placements_timestamps
     CHECK (updated_at >= created_at)
 );
