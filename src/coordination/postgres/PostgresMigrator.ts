@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises';
 
 import { Client } from 'pg';
 
+import { FOUNDATION_SCHEMA } from './PostgresSchema.js';
+
 export type PostgresMigrationErrorCode =
   | 'migration-failed'
   | 'migration-role-mismatch'
@@ -62,9 +64,10 @@ const MIGRATION_LOCK_KEY = 1;
 
 const MIGRATION_RESOURCES = Object.freeze([
   Object.freeze({
-    name: 'foundation',
+    checksum: FOUNDATION_SCHEMA.checksum,
+    name: FOUNDATION_SCHEMA.name,
     resource: new URL('./migrations/0001_foundation.sql', import.meta.url),
-    version: 1,
+    version: FOUNDATION_SCHEMA.version,
   }),
 ]);
 
@@ -96,8 +99,12 @@ GRANT SELECT ON claudian_cloud.schema_migrations TO claudian_cloud_runtime;
 async function loadMigrations(): Promise<readonly MigrationDefinition[]> {
   const migrations = await Promise.all(MIGRATION_RESOURCES.map(async resource => {
     const sql = await readFile(resource.resource, 'utf8');
+    const checksum = createHash('sha256').update(sql, 'utf8').digest('hex');
+    if (checksum !== resource.checksum) {
+      fail('schema-drift', resource.version);
+    }
     return Object.freeze({
-      checksum: createHash('sha256').update(sql, 'utf8').digest('hex'),
+      checksum,
       name: resource.name,
       sql,
       version: resource.version,
