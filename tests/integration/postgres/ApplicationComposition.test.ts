@@ -1,0 +1,411 @@
+import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { once } from 'node:events';
+import {
+  access,
+  chmod,
+  mkdtemp,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { createServer } from 'node:net';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+import {
+  after,
+  before,
+  describe,
+  it,
+} from 'node:test';
+
+import { Client } from 'pg';
+
+import { createApplication } from '../../../src/composition/createApplication.js';
+import type { ServerConfig } from '../../../src/config/ServerConfig.js';
+import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { SafeLogger } from '../../../src/observability/SafeLogger.js';
+import {
+  acquirePostgresTestDatabase,
+  type PostgresTestDatabase,
+} from '../../helpers/PostgresTestDatabase.js';
+
+const execFileAsync = promisify(execFile);
+const GIT_EXECUTABLE = '/usr/bin/git';
+
+interface LoggedEvent {
+  readonly context: Readonly<Record<string, unknown>>;
+  readonly event: string;
+}
+
+function config(options: {
+  readonly gitExecutable?: string;
+  readonly httpPort?: number;
+  readonly postgresUrl: string;
+  readonly repositoryRoot: string;
+}): ServerConfig {
+  return Object.freeze({
+    gitAdmission: Object.freeze({
+      maxChildren: 2,
+      maxChildrenPerProject: 1,
+      queueMax: 6,
+      queueMaxPerProject: 4,
+      queueTimeoutMs: 1_000,
+    }),
+    http: Object.freeze({
+      host: '127.0.0.1' as const,
+      port: options.httpPort ?? 0,
+    }),
+    postgres: Object.freeze({
+      ordinaryPoolMax: 2,
+      pinnedPoolMax: 1,
+      projectLockTimeoutMs: 1_000,
+      reservedPoolMax: 1,
+      url: options.postgresUrl,
+    }),
+    repository: Object.freeze({
+      gitExecutable: options.gitExecutable ?? GIT_EXECUTABLE,
+      operationTimeoutMs: 2_000,
+      outputMaxBytes: 64 * 1_024,
+      root: options.repositoryRoot,
+      storageNodeId: 'test-node',
+    }),
+    shutdownTimeoutMs: 1_000,
+  });
+}
+
+function logger(lines: string[]): SafeLogger {
+  return new SafeLogger({
+    now: () => new Date('2026-08-21T00:00:00.000Z'),
+    write: line => lines.push(line),
+  });
+}
+
+function events(lines: readonly string[]): readonly LoggedEvent[] {
+  return lines.map(line => JSON.parse(line) as LoggedEvent);
+}
+
+async function cloudConnectionCount(adminUrl: string): Promise<number> {
+  const client = new Client({ connectionString: adminUrl });
+  try {
+    await client.connect();
+    const result = await client.query<{ readonly count: string }>(
+      `SELECT count(*)::text AS count
+         FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND application_name LIKE 'claudian-cloud-%'`,
+    );
+    return Number(result.rows[0]?.count);
+  } finally {
+    await client.end();
+  }
+}
+
+async function writeExecutable(
+  root: string,
+  name: string,
+  body: string,
+): Promise<string> {
+  const executable = join(root, name);
+  await writeFile(executable, `#!/bin/sh\n${body}\n`);
+  await chmod(executable, 0o755);
+  return executable;
+}
+
+async function waitForFile(path: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      await access(path);
+      return;
+    } catch {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+  throw new Error('application-test-file-timeout');
+}
+
+async function waitForProcessExit(pid: number): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error('application-test-process-survived');
+}
+
+describe('application composition', { concurrency: false }, () => {
+  let database: PostgresTestDatabase;
+  let repositoryRoot: string;
+
+  before(async () => {
+    database = await acquirePostgresTestDatabase({});
+    await new PostgresMigrator({
+      connectionString: database.migrationUrl,
+    }).apply();
+    repositoryRoot = await mkdtemp(join(tmpdir(), 'claudian-app-repositories-'));
+  });
+
+  after(async () => {
+    await rm(repositoryRoot, { force: true, recursive: true });
+    await database.close();
+  });
+
+  it('fails closed on an incompatible schema and releases every pool', async () => {
+    const emptyDatabase = await acquirePostgresTestDatabase({});
+    const root = await mkdtemp(join(tmpdir(), 'claudian-app-empty-schema-'));
+    const lines: string[] = [];
+    try {
+      const application = createApplication({
+        config: config({
+          postgresUrl: emptyDatabase.runtimeUrl,
+          repositoryRoot: root,
+        }),
+        logger: logger(lines),
+      });
+
+      await assert.rejects(application.start(), /application\.error\.startup-failed/);
+      assert.equal(application.isReady(), false);
+      await application.close();
+      await application.close();
+
+      assert.equal(await cloudConnectionCount(emptyDatabase.adminUrl), 0);
+      assert.deepEqual(events(lines).map(value => ({
+        context: value.context,
+        event: value.event,
+      })), [
+        {
+          context: {},
+          event: 'server.starting',
+        },
+        {
+          context: { reason: 'schema-incompatible' },
+          event: 'server.startup-failed',
+        },
+      ]);
+    } finally {
+      await rm(root, { force: true, recursive: true });
+      await emptyDatabase.close();
+    }
+  });
+
+  it('closes every initialized owner when HTTP admission cannot start', async () => {
+    const occupied = createServer();
+    occupied.listen({ host: '127.0.0.1', port: 0 });
+    await once(occupied, 'listening');
+    const address = occupied.address();
+    if (address === null || typeof address === 'string') {
+      throw new Error('application-test-listener-unavailable');
+    }
+    const lines: string[] = [];
+    const application = createApplication({
+      config: config({
+        httpPort: address.port,
+        postgresUrl: database.runtimeUrl,
+        repositoryRoot,
+      }),
+      logger: logger(lines),
+    });
+    try {
+      await assert.rejects(application.start(), /application\.error\.startup-failed/);
+      assert.equal(application.isReady(), false);
+      await application.close();
+      assert.equal(await cloudConnectionCount(database.adminUrl), 0);
+      assert.match(JSON.stringify(events(lines)), /http-listen-failed/);
+    } finally {
+      await application.close();
+      await new Promise<void>((resolve, reject) => {
+        occupied.close(error => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+    }
+  });
+
+  it('rejects an invalid repository root before Git and sanitizes the failure', async () => {
+    const executableRoot = await mkdtemp(join(tmpdir(), 'claudian-app-root-check-'));
+    const marker = join(executableRoot, 'spawned.marker');
+    const executable = await writeExecutable(
+      executableRoot,
+      'fake-git',
+      `printf spawned > '${marker}'\nprintf 'git version 2.39.0\\n'`,
+    );
+    const missingRoot = join(executableRoot, 'missing-repositories');
+    const lines: string[] = [];
+    try {
+      const application = createApplication({
+        config: config({
+          gitExecutable: executable,
+          postgresUrl: database.runtimeUrl,
+          repositoryRoot: missingRoot,
+        }),
+        logger: logger(lines),
+      });
+
+      await assert.rejects(application.start(), /application\.error\.startup-failed/);
+      assert.equal(application.isReady(), false);
+      await application.close();
+
+      await assert.rejects(access(marker), { code: 'ENOENT' });
+      assert.equal(await cloudConnectionCount(database.adminUrl), 0);
+      const encoded = JSON.stringify(events(lines));
+      assert.match(encoded, /repository-unavailable/);
+      assert.doesNotMatch(encoded, new RegExp(executableRoot));
+    } finally {
+      await rm(executableRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('keeps readiness false until PostgreSQL, root, and Git checks pass', async () => {
+    const executableRoot = await mkdtemp(join(tmpdir(), 'claudian-app-delayed-git-'));
+    const marker = join(executableRoot, 'started.marker');
+    const release = join(executableRoot, 'release.marker');
+    const executable = await writeExecutable(
+      executableRoot,
+      'fake-git',
+      `printf started > '${marker}'
+while [ ! -f '${release}' ]; do sleep 0.01; done
+printf 'git version 2.39.0\\n'`,
+    );
+    const lines: string[] = [];
+    const application = createApplication({
+      config: config({
+        gitExecutable: executable,
+        postgresUrl: database.runtimeUrl,
+        repositoryRoot,
+      }),
+      logger: logger(lines),
+    });
+    try {
+      const starting = application.start();
+      await waitForFile(marker);
+      assert.equal(application.isReady(), false);
+
+      await writeFile(release, 'release');
+      const address = await starting;
+      assert.equal(application.isReady(), true);
+      const response = await fetch(
+        `http://${address.host}:${String(address.port)}/readyz`,
+      );
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { status: 'ready' });
+
+      await application.close();
+      await application.close();
+      assert.equal(application.isReady(), false);
+      assert.equal(await cloudConnectionCount(database.adminUrl), 0);
+      assert.deepEqual(
+        events(lines).map(value => value.event),
+        [
+          'server.starting',
+          'server.listening',
+          'server.stopping',
+          'server.stopped',
+        ],
+      );
+    } finally {
+      await application.close();
+      await rm(executableRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('terminates an active startup Git child within the shutdown budget', async () => {
+    const executableRoot = await mkdtemp(join(tmpdir(), 'claudian-app-closing-git-'));
+    const marker = join(executableRoot, 'pid.marker');
+    const executable = await writeExecutable(
+      executableRoot,
+      'fake-git',
+      `printf '%s' "$$" > '${marker}'
+trap '' TERM
+while :; do sleep 1; done`,
+    );
+    const application = createApplication({
+      config: config({
+        gitExecutable: executable,
+        postgresUrl: database.runtimeUrl,
+        repositoryRoot,
+      }),
+      logger: logger([]),
+    });
+    let pid: number | undefined;
+    try {
+      const starting = application.start();
+      await waitForFile(marker);
+      pid = Number(await import('node:fs/promises').then(fs => fs.readFile(marker, 'utf8')));
+
+      const startedAt = Date.now();
+      const closing = application.close();
+      await assert.rejects(starting, /application\.error\.startup-failed/);
+      await closing;
+
+      assert.equal(Date.now() - startedAt < 1_000, true);
+      await waitForProcessExit(pid);
+      assert.equal(application.isReady(), false);
+      assert.equal(await cloudConnectionCount(database.adminUrl), 0);
+    } finally {
+      if (pid !== undefined) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // The Git process is expected to be absent.
+        }
+      }
+      await application.close();
+      await rm(executableRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('rejects unsupported Git without exposing dependency output', async () => {
+    const executableRoot = await mkdtemp(join(tmpdir(), 'claudian-app-unsupported-git-'));
+    const executable = await writeExecutable(
+      executableRoot,
+      'fake-git',
+      'printf "git version 2.38.5 private-version-sentinel\\n"',
+    );
+    const lines: string[] = [];
+    try {
+      const application = createApplication({
+        config: config({
+          gitExecutable: executable,
+          postgresUrl: database.runtimeUrl,
+          repositoryRoot,
+        }),
+        logger: logger(lines),
+      });
+
+      await assert.rejects(application.start(), /application\.error\.startup-failed/);
+      await application.close();
+
+      const encoded = JSON.stringify(events(lines));
+      assert.match(encoded, /unsupported-git/);
+      assert.doesNotMatch(encoded, /2\.38\.5|private-version-sentinel/);
+      assert.doesNotMatch(encoded, new RegExp(executableRoot));
+      assert.equal(await cloudConnectionCount(database.adminUrl), 0);
+    } finally {
+      await rm(executableRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('starts with the real Git executable after all checks', async () => {
+    const application = createApplication({
+      config: config({
+        postgresUrl: database.runtimeUrl,
+        repositoryRoot,
+      }),
+      logger: logger([]),
+    });
+    try {
+      const version = await execFileAsync(GIT_EXECUTABLE, ['--version']);
+      assert.match(version.stdout, /^git version /);
+      await application.start();
+      assert.equal(application.isReady(), true);
+    } finally {
+      await application.close();
+    }
+  });
+});

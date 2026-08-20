@@ -55,6 +55,11 @@ async function run(): Promise<void> {
   try {
     await application.start();
   } catch {
+    try {
+      await application.close();
+    } catch {
+      // Startup already emitted the one safe failure event.
+    }
     process.exitCode = 1;
   }
 }

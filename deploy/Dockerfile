@@ -1,4 +1,5 @@
 ARG NODE_IMAGE=node:24.16.0-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203
+ARG GIT_PACKAGE_VERSION=1:2.39.5-0+deb12u3
 
 FROM ${NODE_IMAGE} AS build
 
@@ -26,7 +27,13 @@ RUN npm ci --omit=dev && mkdir -p node_modules && npm cache clean --force
 
 FROM ${NODE_IMAGE} AS runtime
 
+ARG GIT_PACKAGE_VERSION
+
 LABEL org.opencontainers.image.source="https://github.com/YishenTu/claudian-cloud-server"
+
+RUN apt-get update \
+  && apt-get install --yes --no-install-recommends git=${GIT_PACKAGE_VERSION} \
+  && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production
 WORKDIR /app

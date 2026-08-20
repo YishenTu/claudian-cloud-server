@@ -33,4 +33,24 @@ describe('Docker dependency context', () => {
       /FROM .* AS build[\s\S]*COPY \.env\.example \.env\.migration\.example \.\//,
     );
   });
+
+  it('installs Git in the shared runtime before dropping privileges', async () => {
+    const dockerfile = await readFile(
+      resolve(repositoryRoot, 'deploy/Dockerfile'),
+      'utf8',
+    );
+
+    assert.match(
+      dockerfile,
+      /ARG GIT_PACKAGE_VERSION=1:2\.39\.5-0\+deb12u3/,
+    );
+    assert.match(
+      dockerfile,
+      /FROM .* AS runtime[\s\S]*apt-get install[^\n]*git=\$\{GIT_PACKAGE_VERSION\}[\s\S]*USER 10001:10001/,
+    );
+    assert.doesNotMatch(
+      dockerfile,
+      /USER 10001:10001[\s\S]*apt-get install/,
+    );
+  });
 });
