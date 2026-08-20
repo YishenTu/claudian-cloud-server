@@ -1,5 +1,5 @@
 export const FOUNDATION_SCHEMA = Object.freeze({
-  checksum: '9938e8206d911ef7d410e63bbd3bba3f4b699ed4bd9c9f1b7f13ae1d9252fdbe',
+  checksum: '5b1c3cdc18645b6aed689ba2e93b28a747e8b357d4a678652abab2a82ab4d342',
   name: 'foundation',
   version: 1,
 });

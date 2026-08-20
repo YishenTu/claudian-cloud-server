@@ -12,7 +12,7 @@ import {
   withPostgresTestDatabase,
 } from '../../helpers/PostgresTestDatabase.js';
 
-const FOUNDATION_CHECKSUM = '9938e8206d911ef7d410e63bbd3bba3f4b699ed4bd9c9f1b7f13ae1d9252fdbe';
+const FOUNDATION_CHECKSUM = '5b1c3cdc18645b6aed689ba2e93b28a747e8b357d4a678652abab2a82ab4d342';
 
 async function execute(connectionString: string, sql: string): Promise<void> {
   const client = new Client({ connectionString });
@@ -314,6 +314,33 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
          ) VALUES ('project-a', 'node-a', 'storage-a', 9007199254740992, true, clock_timestamp(), clock_timestamp())`,
       ),
       /repository_placements_generation/,
+    );
+    await migrationClient.query('ROLLBACK');
+
+    await migrationClient.query('BEGIN');
+    await migrationClient.query(
+      "SELECT set_config('claudian_cloud.project_id', 'project-a', true)",
+    );
+    await migrationClient.query(
+      `INSERT INTO claudian_cloud.repository_placements (
+         project_id, storage_node_id, repository_storage_key, generation,
+         active, created_at, updated_at
+       ) VALUES ('project-a', 'node-a', 'shared-storage', 1, true, clock_timestamp(), clock_timestamp())`,
+    );
+    await migrationClient.query('COMMIT');
+
+    await migrationClient.query('BEGIN');
+    await migrationClient.query(
+      "SELECT set_config('claudian_cloud.project_id', 'project-b', true)",
+    );
+    await assert.rejects(
+      migrationClient.query(
+        `INSERT INTO claudian_cloud.repository_placements (
+           project_id, storage_node_id, repository_storage_key, generation,
+           active, created_at, updated_at
+         ) VALUES ('project-b', 'node-a', 'shared-storage', 1, true, clock_timestamp(), clock_timestamp())`,
+      ),
+      /repository_placements_storage_location/,
     );
     await migrationClient.query('ROLLBACK');
   } finally {
