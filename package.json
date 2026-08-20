@@ -24,7 +24,7 @@
     "pretypecheck": "npm run check:runtime",
     "start": "node dist/main.js",
     "test": "npm run test:contract && npm run test:application && npm run test:postgres && npm run test:deployment",
-    "test:application": "node --import tsx --test \"tests/config/**/*.test.ts\" \"tests/integration/http/**/*.test.ts\" \"tests/integration/process/**/*.test.ts\" \"tests/observability/**/*.test.ts\"",
+    "test:application": "node --import tsx --test \"tests/config/**/*.test.ts\" \"tests/integration/http/**/*.test.ts\" \"tests/integration/process/**/*.test.ts\" \"tests/observability/**/*.test.ts\" \"tests/resource-admission/**/*.test.ts\"",
     "test:contract": "node --import tsx --test \"tests/contract/**/*.test.ts\"",
     "test:deployment": "node --import tsx --test \"tests/deployment/**/*.test.ts\"",
     "test:postgres": "node --import tsx --test --test-concurrency=1 \"tests/integration/postgres/**/*.test.ts\"",
