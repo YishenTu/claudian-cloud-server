@@ -91,14 +91,24 @@ async function docker(arguments_: readonly string[]): Promise<string> {
 }
 
 async function stopContainer(containerName: string): Promise<void> {
-  try {
-    await execFileAsync('docker', ['stop', '--time', '1', containerName], {
-      encoding: 'utf8',
-      maxBuffer: 1024 * 1024,
-    });
-  } catch {
-    // The container may already have stopped and removed itself.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      await docker(['rm', '--force', '--volumes', containerName]);
+    } catch {
+      // A crashed --rm container may already be absent.
+    }
+    const remaining = await docker([
+      'ps',
+      '--all',
+      '--filter',
+      `label=${POSTGRES_TEST_CONTAINER_LABEL}`,
+      '--format',
+      '{{.Names}}',
+    ]);
+    if (!remaining.split('\n').includes(containerName)) return;
+    await new Promise(resolve => setTimeout(resolve, 50));
   }
+  throw new Error('postgres-test-database-cleanup-failed');
 }
 
 async function publishedPort(containerName: string): Promise<number> {
@@ -244,8 +254,18 @@ async function startContainerDatabase(): Promise<PostgresTestDatabase> {
       runtimeUrl: databaseUrl(RUNTIME_ROLE, runtimePassword, port, database),
     });
   } catch {
-    if (containerStarted) await stopContainer(containerName);
+    let cleanupFailed = false;
+    if (containerStarted) {
+      try {
+        await stopContainer(containerName);
+      } catch {
+        cleanupFailed = true;
+      }
+    }
     await rm(temporaryRoot, { force: true, recursive: true });
+    if (cleanupFailed) {
+      throw new Error('postgres-test-database-cleanup-failed');
+    }
     throw new Error('postgres-test-database-start-failed');
   }
 }
