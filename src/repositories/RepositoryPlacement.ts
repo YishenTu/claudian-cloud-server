@@ -52,7 +52,7 @@ export interface RepositoryPlacementValidator {
 }
 
 const STORAGE_NODE_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
-const STORAGE_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const STORAGE_KEY_PATTERN = /^[a-z0-9][a-z0-9_-]{0,127}$/;
 
 export function createRepositoryPlacementLease(
   input: RepositoryPlacementInput,

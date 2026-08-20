@@ -4,7 +4,10 @@ import { describe, it } from 'node:test';
 import { Client } from 'pg';
 
 import { CoordinationError } from '../../../src/coordination/CoordinationError.js';
-import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
+import {
+  type PinnedProjectLease,
+  PostgresCoordination,
+} from '../../../src/coordination/postgres/PostgresCoordination.js';
 import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
 import { createRepositoryPlacementLease } from '../../../src/repositories/RepositoryPlacement.js';
 import {
@@ -128,6 +131,111 @@ async function terminatePinnedRuntimeConnection(
   }
 }
 
+async function terminateOrdinaryCheckedOutConnection(
+  database: PostgresTestDatabase,
+): Promise<void> {
+  const client = new Client({ connectionString: database.adminUrl });
+  try {
+    await client.connect();
+    const result = await client.query<{ readonly terminated: boolean }>(
+      `SELECT pg_terminate_backend(pid) AS terminated
+         FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND application_name = 'claudian-cloud-ordinary'
+          AND state = 'idle in transaction'`,
+    );
+    assert.deepEqual(result.rows, [{ terminated: true }]);
+  } finally {
+    await client.end();
+  }
+}
+
+async function terminateIdlePoolConnections(
+  database: PostgresTestDatabase,
+): Promise<void> {
+  const client = new Client({ connectionString: database.adminUrl });
+  try {
+    await client.connect();
+    const result = await client.query<{
+      readonly application_name: string;
+      readonly terminated: boolean;
+    }>(
+      `SELECT application_name,
+              pg_terminate_backend(pid) AS terminated
+         FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND application_name IN (
+            'claudian-cloud-ordinary',
+            'claudian-cloud-pinned',
+            'claudian-cloud-reserved'
+          )
+          AND state = 'idle'
+        ORDER BY application_name`,
+    );
+    assert.deepEqual(result.rows, [
+      { application_name: 'claudian-cloud-ordinary', terminated: true },
+      { application_name: 'claudian-cloud-pinned', terminated: true },
+      { application_name: 'claudian-cloud-reserved', terminated: true },
+    ]);
+  } finally {
+    await client.end();
+  }
+}
+
+async function waitForBlockedPoolConnections(client: Client): Promise<void> {
+  const expected = [
+    'claudian-cloud-ordinary',
+    'claudian-cloud-pinned',
+    'claudian-cloud-reserved',
+  ];
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    await client.query('SELECT pg_stat_clear_snapshot()');
+    const result = await client.query<{ readonly application_name: string }>(
+      `SELECT application_name
+         FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND application_name = ANY($1::text[])
+          AND wait_event_type = 'Lock'
+        ORDER BY application_name`,
+      [expected],
+    );
+    if (
+      result.rows.map(row => row.application_name).join(',')
+      === expected.join(',')
+    ) {
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error('postgres-test-pool-queries-not-blocked');
+}
+
+async function cloudConnectionCount(adminUrl: string): Promise<number> {
+  const client = new Client({ connectionString: adminUrl });
+  try {
+    await client.connect();
+    const result = await client.query<{ readonly count: string }>(
+      `SELECT count(*)::text AS count
+         FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND application_name LIKE 'claudian-cloud-%'`,
+    );
+    return Number(result.rows[0]?.count);
+  } finally {
+    await client.end();
+  }
+}
+
+async function waitForNoCloudConnections(adminUrl: string): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    if (await cloudConnectionCount(adminUrl) === 0) return;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error('postgres-test-cloud-connection-survived');
+}
+
 async function replaceMigrationChecksum(
   database: PostgresTestDatabase,
   checksum: string,
@@ -170,6 +278,7 @@ describe('PostgresCoordination', () => {
         projectLockTimeoutMs: 75,
         reservedPoolMax: 1,
         runtimeConnectionString: database.runtimeUrl,
+        shutdownTimeoutMs: 1_000,
       });
       try {
         await coordination.verifySchemaCompatibility();
@@ -228,6 +337,7 @@ describe('PostgresCoordination', () => {
           projectLockTimeoutMs: 75,
           reservedPoolMax: 1,
           runtimeConnectionString: database.runtimeUrl,
+          shutdownTimeoutMs: 1_000,
         });
         try {
           await expectCoordinationError(
@@ -310,7 +420,7 @@ describe('PostgresCoordination', () => {
         );
         await replaceMigrationChecksum(
           database,
-          '5b1c3cdc18645b6aed689ba2e93b28a747e8b357d4a678652abab2a82ab4d342',
+          '5e883d93536b2569f3655cc9f3982c4ad7e8e3daf7871500dc5d4f471e8504bb',
         );
         await coordination.verifySchemaCompatibility();
 
@@ -320,6 +430,7 @@ describe('PostgresCoordination', () => {
           projectLockTimeoutMs: 75,
           reservedPoolMax: 1,
           runtimeConnectionString: database.adminUrl,
+          shutdownTimeoutMs: 1_000,
         });
         try {
           await expectCoordinationError(
@@ -343,6 +454,172 @@ describe('PostgresCoordination', () => {
     });
   });
 
+  it('recovers every pool after an idle client connection fails', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({
+        connectionString: database.migrationUrl,
+      }).apply();
+      await seedProject(database, {
+        projectId: 'project-a',
+        repositoryStorageKey: 'storage_a',
+        role: 'manager',
+      });
+      const coordination = new PostgresCoordination({
+        ordinaryPoolMax: 1,
+        pinnedPoolMax: 1,
+        projectLockTimeoutMs: 1_000,
+        reservedPoolMax: 1,
+        runtimeConnectionString: database.runtimeUrl,
+        shutdownTimeoutMs: 2_000,
+      });
+      try {
+        await coordination.verifySchemaCompatibility();
+        await coordination.withProjectScope(
+          'project-a',
+          scope => scope.getRepositoryPlacement(),
+        );
+        const firstLease = await coordination.acquireProjectLease('project-a');
+        await firstLease.close();
+
+        await terminateIdlePoolConnections(database);
+        await waitForNoCloudConnections(database.adminUrl);
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        await coordination.verifySchemaCompatibility();
+        const placement = await coordination.withProjectScope(
+          'project-a',
+          scope => scope.getRepositoryPlacement(),
+        );
+        assert.equal(placement?.projectId, 'project-a');
+        const recoveredLease = await coordination.acquireProjectLease('project-a');
+        await recoveredLease.close();
+      } finally {
+        await coordination.close();
+      }
+    });
+  });
+
+  it('contains connection loss for an ordinary checked-out client', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({
+        connectionString: database.migrationUrl,
+      }).apply();
+      await seedProject(database, {
+        projectId: 'project-a',
+        repositoryStorageKey: 'storage_a',
+        role: 'manager',
+      });
+      const coordination = new PostgresCoordination({
+        ordinaryPoolMax: 1,
+        pinnedPoolMax: 1,
+        projectLockTimeoutMs: 1_000,
+        reservedPoolMax: 1,
+        runtimeConnectionString: database.runtimeUrl,
+        shutdownTimeoutMs: 2_000,
+      });
+      const callbackEntered = deferred();
+      const releaseCallback = deferred();
+      let uncaughtClientErrors = 0;
+      const onUncaughtException = (): void => {
+        uncaughtClientErrors += 1;
+      };
+      process.on('uncaughtException', onUncaughtException);
+      try {
+        const operation = coordination.withProjectScope(
+          'project-a',
+          async scope => {
+            await scope.getRepositoryPlacement();
+            callbackEntered.resolve();
+            await releaseCallback.promise;
+            return scope.getRepositoryPlacement();
+          },
+        );
+        await callbackEntered.promise;
+        await terminateOrdinaryCheckedOutConnection(database);
+        await new Promise(resolve => setTimeout(resolve, 50));
+        releaseCallback.resolve();
+
+        await expectCoordinationError(operation, 'dependency-failed');
+        await coordination.close();
+        await waitForNoCloudConnections(database.adminUrl);
+        assert.equal(uncaughtClientErrors, 0);
+      } finally {
+        process.removeListener('uncaughtException', onUncaughtException);
+        releaseCallback.resolve();
+        await coordination.close().catch(() => undefined);
+      }
+    });
+  });
+
+  it('revokes active clients from every pool during bounded close', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({
+        connectionString: database.migrationUrl,
+      }).apply();
+      await seedProject(database, {
+        projectId: 'project-a',
+        repositoryStorageKey: 'storage_a',
+        role: 'manager',
+      });
+      await seedProject(database, {
+        projectId: 'project-b',
+        repositoryStorageKey: 'storage_b',
+        role: 'member',
+      });
+      const coordination = new PostgresCoordination({
+        ordinaryPoolMax: 1,
+        pinnedPoolMax: 1,
+        projectLockTimeoutMs: 5_000,
+        reservedPoolMax: 1,
+        runtimeConnectionString: database.runtimeUrl,
+        shutdownTimeoutMs: 500,
+      });
+      const blocker = new Client({ connectionString: database.adminUrl });
+      let pinnedLease: PinnedProjectLease | undefined;
+      try {
+        pinnedLease = await coordination.acquireProjectLease('project-a');
+        await blocker.connect();
+        await blocker.query('BEGIN');
+        await blocker.query(
+          `LOCK TABLE claudian_cloud.repository_placements,
+                      claudian_cloud.schema_migrations
+             IN ACCESS EXCLUSIVE MODE`,
+        );
+
+        const ordinary = coordination.withProjectScope(
+          'project-b',
+          scope => scope.getRepositoryPlacement(),
+        );
+        const pinned = pinnedLease.withProjectScope(
+          scope => scope.getRepositoryPlacement(),
+        );
+        const reserved = coordination.verifySchemaCompatibility();
+        const failures = [
+          expectCoordinationError(ordinary, 'dependency-failed'),
+          expectCoordinationError(pinned, 'dependency-failed'),
+          expectCoordinationError(reserved, 'dependency-failed'),
+        ];
+        await waitForBlockedPoolConnections(blocker);
+
+        const startedAt = Date.now();
+        await coordination.close();
+        await Promise.all(failures);
+        await waitForNoCloudConnections(database.adminUrl);
+
+        assert.equal(Date.now() - startedAt < 1_000, true);
+        await expectCoordinationError(
+          pinnedLease.close(),
+          'dependency-failed',
+        );
+      } finally {
+        await blocker.query('ROLLBACK').catch(() => undefined);
+        await blocker.end().catch(() => undefined);
+        await pinnedLease?.close().catch(() => undefined);
+        await coordination.close().catch(() => undefined);
+      }
+    });
+  });
+
   it('fails schema and dependency checks without raw connection context', async () => {
     const credential = 'coordination-private-sentinel';
     const coordination = new PostgresCoordination({
@@ -351,6 +628,7 @@ describe('PostgresCoordination', () => {
       projectLockTimeoutMs: 25,
       reservedPoolMax: 1,
       runtimeConnectionString: `postgresql://runtime:${credential}@127.0.0.1:1/cloud`,
+      shutdownTimeoutMs: 1_000,
     });
     try {
       await expectCoordinationError(

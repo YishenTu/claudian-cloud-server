@@ -1,8 +1,8 @@
 CREATE TABLE claudian_cloud.projects (
   project_id varchar(64) PRIMARY KEY,
   created_at timestamptz NOT NULL,
-  CONSTRAINT projects_project_id_format
-    CHECK (project_id ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
+  CONSTRAINT projects_project_id_present
+    CHECK (project_id <> '')
 );
 
 CREATE TABLE claudian_cloud.project_memberships (
@@ -17,8 +17,8 @@ CREATE TABLE claudian_cloud.project_memberships (
   CONSTRAINT project_memberships_project
     FOREIGN KEY (project_id)
     REFERENCES claudian_cloud.projects(project_id),
-  CONSTRAINT project_memberships_member_id_format
-    CHECK (member_id ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$'),
+  CONSTRAINT project_memberships_member_id_present
+    CHECK (member_id <> ''),
   CONSTRAINT project_memberships_role
     CHECK (role IN ('manager', 'member')),
   CONSTRAINT project_memberships_status
@@ -43,12 +43,10 @@ CREATE TABLE claudian_cloud.repository_placements (
   CONSTRAINT repository_placements_project
     FOREIGN KEY (project_id)
     REFERENCES claudian_cloud.projects(project_id),
-  CONSTRAINT repository_placements_storage_location
-    UNIQUE (storage_node_id, repository_storage_key),
   CONSTRAINT repository_placements_storage_node_id_format
     CHECK (storage_node_id ~ '^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$'),
   CONSTRAINT repository_placements_storage_key_format
-    CHECK (repository_storage_key ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'),
+    CHECK (repository_storage_key ~ '^[a-z0-9][a-z0-9_-]{0,127}$'),
   CONSTRAINT repository_placements_generation
     CHECK (generation BETWEEN 1 AND 9007199254740991),
   CONSTRAINT repository_placements_timestamps

@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import { constants } from 'node:fs';
 import { access, lstat, realpath } from 'node:fs/promises';
 import { isAbsolute, normalize, relative, resolve, sep } from 'node:path';
@@ -68,21 +69,41 @@ export class RepositoryPathPolicy {
 
     const root = await this.#acceptRoot();
 
-    const repositoryPath = resolve(
+    const projectNamespacePath = resolve(
       this.#repositoryRoot,
+      Buffer.from(placement.projectId, 'utf8').toString('hex'),
+    );
+    const repositoryPath = resolve(
+      projectNamespacePath,
       placement.repositoryStorageKey,
     );
     if (
-      normalize(repositoryPath) !== repositoryPath
-      || !isContained(this.#repositoryRoot, repositoryPath)
+      normalize(projectNamespacePath) !== projectNamespacePath
+      || !isContained(this.#repositoryRoot, projectNamespacePath)
+      || normalize(repositoryPath) !== repositoryPath
+      || !isContained(projectNamespacePath, repositoryPath)
     ) {
       pathInvalid();
     }
 
+    let projectNamespaceRealPath: string;
     let repositoryRealPath: string;
     try {
-      const entry = await lstat(repositoryPath);
-      if (!entry.isDirectory() || entry.isSymbolicLink()) pathInvalid();
+      const projectNamespaceEntry = await lstat(projectNamespacePath);
+      if (
+        !projectNamespaceEntry.isDirectory()
+        || projectNamespaceEntry.isSymbolicLink()
+      ) {
+        pathInvalid();
+      }
+      projectNamespaceRealPath = await realpath(projectNamespacePath);
+      const repositoryEntry = await lstat(repositoryPath);
+      if (
+        !repositoryEntry.isDirectory()
+        || repositoryEntry.isSymbolicLink()
+      ) {
+        pathInvalid();
+      }
       repositoryRealPath = await realpath(repositoryPath);
     } catch (error: unknown) {
       if (error instanceof RepositoryPlacementError) throw error;
@@ -95,7 +116,12 @@ export class RepositoryPathPolicy {
       pathInvalid();
     }
 
-    if (!isContained(root.realPath, repositoryRealPath)) pathInvalid();
+    if (
+      !isContained(root.realPath, projectNamespaceRealPath)
+      || !isContained(projectNamespaceRealPath, repositoryRealPath)
+    ) {
+      pathInvalid();
+    }
     const verifiedRoot = await this.#inspectRoot();
     if (!sameRoot(root, verifiedRoot)) rootUnavailable();
 

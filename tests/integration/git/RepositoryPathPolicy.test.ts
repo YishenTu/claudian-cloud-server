@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   rename,
@@ -66,6 +67,23 @@ function placement(
   });
 }
 
+function projectNamespacePath(
+  root: string,
+  accepted: RepositoryPlacementLease,
+): string {
+  return join(root, Buffer.from(accepted.projectId, 'utf8').toString('hex'));
+}
+
+function repositoryPath(
+  root: string,
+  accepted: RepositoryPlacementLease,
+): string {
+  return join(
+    projectNamespacePath(root, accepted),
+    accepted.repositoryStorageKey,
+  );
+}
+
 async function expectPlacementError(
   operation: Promise<unknown> | (() => unknown),
   code: RepositoryPlacementError['code'],
@@ -102,6 +120,7 @@ describe('repository placement', () => {
       [{ repositoryStorageKey: '../repository' }, 'invalid-placement'],
       [{ repositoryStorageKey: '/absolute' }, 'invalid-placement'],
       [{ repositoryStorageKey: 'key.with-dot' }, 'invalid-placement'],
+      [{ repositoryStorageKey: 'Storage_A' }, 'invalid-placement'],
       [{ generation: 0 }, 'invalid-placement'],
       [{ generation: Number.MAX_SAFE_INTEGER + 1 }, 'invalid-placement'],
       [{ active: false }, 'inactive-placement'],
@@ -110,6 +129,42 @@ describe('repository placement', () => {
         () => placement(input),
         code,
       );
+    }
+  });
+
+  it('rejects a case-variant key that aliases on a case-insensitive filesystem', async t => {
+    const root = await mkdtemp(join(tmpdir(), 'claudian-case-alias-'));
+    const lowercasePath = join(root, 'storage_a');
+    const uppercasePath = join(root, 'Storage_A');
+    try {
+      await mkdir(lowercasePath);
+      let lowercase;
+      let uppercase;
+      try {
+        [lowercase, uppercase] = await Promise.all([
+          lstat(lowercasePath, { bigint: true }),
+          lstat(uppercasePath, { bigint: true }),
+        ]);
+      } catch (error: unknown) {
+        if (
+          typeof error === 'object'
+          && error !== null
+          && 'code' in error
+          && error.code === 'ENOENT'
+        ) {
+          t.skip('filesystem is case-sensitive');
+          return;
+        }
+        throw error;
+      }
+      assert.equal(lowercase.dev, uppercase.dev);
+      assert.equal(lowercase.ino, uppercase.ino);
+      await expectPlacementError(
+        () => placement({ repositoryStorageKey: 'Storage_A' }),
+        'invalid-placement',
+      );
+    } finally {
+      await rm(root, { force: true, recursive: true });
     }
   });
 
@@ -124,11 +179,18 @@ describe('repository placement', () => {
         repositoryRoot: root,
         storageNodeId: 'node-a',
       });
-      const repositoryPath = join(root, accepted.repositoryStorageKey);
-      await execFileAsync('/usr/bin/git', ['init', '--bare', repositoryPath]);
+      const acceptedRepositoryPath = repositoryPath(root, accepted);
+      await execFileAsync('/usr/bin/git', [
+        'init',
+        '--bare',
+        acceptedRepositoryPath,
+      ]);
 
       const resolved = await policy.resolveExisting(accepted);
-      assert.equal(resolved.repositoryPath, repositoryPath);
+      assert.equal(
+        resolved.repositoryPath,
+        join(root, '70726f6a6563742d61', 'opaque_storage_key_a'),
+      );
       assert.equal(resolved.placement, accepted);
       assert.equal(Object.isFrozen(resolved), true);
 
@@ -147,7 +209,11 @@ describe('repository placement', () => {
       validator.replace(accepted);
       await rename(root, replacedRoot);
       await mkdir(root);
-      await execFileAsync('/usr/bin/git', ['init', '--bare', repositoryPath]);
+      await execFileAsync('/usr/bin/git', [
+        'init',
+        '--bare',
+        acceptedRepositoryPath,
+      ]);
       await expectPlacementError(
         policy.resolveExisting(accepted),
         'repository-root-unavailable',
@@ -207,8 +273,9 @@ describe('repository placement', () => {
         'repository-not-found',
       );
 
-      const repositoryPath = join(root, accepted.repositoryStorageKey);
-      await writeFile(repositoryPath, 'not-a-directory');
+      const acceptedRepositoryPath = repositoryPath(root, accepted);
+      await mkdir(projectNamespacePath(root, accepted));
+      await writeFile(acceptedRepositoryPath, 'not-a-directory');
       await expectPlacementError(
         new RepositoryPathPolicy({
           placementValidator: validator,
@@ -217,9 +284,9 @@ describe('repository placement', () => {
         }).resolveExisting(accepted),
         'repository-path-invalid',
       );
-      await rm(repositoryPath);
+      await rm(acceptedRepositoryPath);
 
-      await symlink(outside, repositoryPath);
+      await symlink(outside, acceptedRepositoryPath);
       await expectPlacementError(
         new RepositoryPathPolicy({
           placementValidator: validator,
@@ -228,9 +295,9 @@ describe('repository placement', () => {
         }).resolveExisting(accepted),
         'repository-path-invalid',
       );
-      await rm(repositoryPath);
+      await rm(acceptedRepositoryPath);
 
-      await mkdir(repositoryPath);
+      await mkdir(acceptedRepositoryPath);
       await chmod(root, 0o000);
       await expectPlacementError(
         new RepositoryPathPolicy({
@@ -245,6 +312,44 @@ describe('repository placement', () => {
       await chmod(root, 0o700).catch(() => undefined);
       await rm(fixtureRoot, { force: true, recursive: true });
       await rm(outside, { force: true, recursive: true });
+    }
+  });
+
+  it('isolates the same storage key in distinct Project namespaces', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'claudian-project-paths-'));
+    const projectA = placement({ repositoryStorageKey: 'shared_storage' });
+    const projectB = placement({
+      projectId: 'project-b',
+      repositoryStorageKey: 'shared_storage',
+    });
+    const policy = new RepositoryPathPolicy({
+      placementValidator: {
+        isCurrent: async () => Promise.resolve(true),
+      },
+      repositoryRoot: root,
+      storageNodeId: 'node-a',
+    });
+    try {
+      await Promise.all([
+        mkdir(repositoryPath(root, projectA), { recursive: true }),
+        mkdir(repositoryPath(root, projectB), { recursive: true }),
+      ]);
+      const [resolvedA, resolvedB] = await Promise.all([
+        policy.resolveExisting(projectA),
+        policy.resolveExisting(projectB),
+      ]);
+
+      assert.equal(
+        resolvedA.repositoryPath,
+        join(root, '70726f6a6563742d61', 'shared_storage'),
+      );
+      assert.equal(
+        resolvedB.repositoryPath,
+        join(root, '70726f6a6563742d62', 'shared_storage'),
+      );
+      assert.notEqual(resolvedA.repositoryPath, resolvedB.repositoryPath);
+    } finally {
+      await rm(root, { force: true, recursive: true });
     }
   });
 

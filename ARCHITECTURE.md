@@ -315,6 +315,8 @@ RepositoryPlacement
 +-- state
 ```
 
+Repository storage keys are unique only within a Project. The local repository layout is `<root>/<project-namespace>/<storage-key>`, where `project-namespace` is the lowercase hexadecimal encoding of the canonical Project ID's UTF-8 bytes. This reversible encoding preserves case-sensitive Project identity on case-insensitive filesystems, uses only portable path characters, and keeps Project-owned placement constraints local without allowing two Projects with the same opaque key to resolve to one repository.
+
 Every repository execution is bound to an immutable placement lease containing
 `{projectId, storageNodeId, repositoryStorageKey, generation}` resolved during
 Project admission. `GitRepositoryAuthority` validates the lease against current
