@@ -3,7 +3,10 @@ import { readFile } from 'node:fs/promises';
 
 import { Client } from 'pg';
 
-import { FOUNDATION_SCHEMA } from './PostgresSchema.js';
+import {
+  DEVELOPMENT_BOOTSTRAP_SCHEMA,
+  FOUNDATION_SCHEMA,
+} from './PostgresSchema.js';
 
 export type PostgresMigrationErrorCode =
   | 'migration-failed'
@@ -68,6 +71,15 @@ const MIGRATION_RESOURCES = Object.freeze([
     name: FOUNDATION_SCHEMA.name,
     resource: new URL('./migrations/0001_foundation.sql', import.meta.url),
     version: FOUNDATION_SCHEMA.version,
+  }),
+  Object.freeze({
+    checksum: DEVELOPMENT_BOOTSTRAP_SCHEMA.checksum,
+    name: DEVELOPMENT_BOOTSTRAP_SCHEMA.name,
+    resource: new URL(
+      './migrations/0002_development_bootstrap.sql',
+      import.meta.url,
+    ),
+    version: DEVELOPMENT_BOOTSTRAP_SCHEMA.version,
   }),
 ]);
 

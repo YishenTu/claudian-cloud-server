@@ -17,6 +17,7 @@ fi
 
 deployment_ref="${CLAUDIAN_DEPLOY_REF:-origin/main}"
 environment_file="${CLAUDIAN_DEPLOY_ENV_FILE:-/etc/claudian-cloud-server/server.env}"
+postgres_environment_file="${CLAUDIAN_DEPLOY_POSTGRES_ENV_FILE:-/etc/claudian-cloud-server/postgres.env}"
 image_repository="${CLAUDIAN_DEPLOY_IMAGE_REPOSITORY:-claudian-cloud-server}"
 wait_timeout="${CLAUDIAN_DEPLOY_WAIT_TIMEOUT_SECONDS:-30}"
 build_network="${CLAUDIAN_DEPLOY_BUILD_NETWORK:-}"
@@ -24,6 +25,8 @@ compose_file='deploy/compose.yaml'
 dockerfile='deploy/Dockerfile'
 
 [[ -r "$environment_file" ]] || fail 'environment-file-unreadable'
+[[ -r "$postgres_environment_file" ]] || \
+  fail 'postgres-environment-file-unreadable'
 [[ "$wait_timeout" =~ ^[1-9][0-9]*$ ]] || fail 'invalid-wait-timeout'
 
 git fetch --prune origin
@@ -40,11 +43,13 @@ fi
 build+=(--file "$dockerfile" --tag "$image" .)
 
 CLAUDIAN_CLOUD_ENV_FILE="$environment_file" \
+CLAUDIAN_CLOUD_POSTGRES_ENV_FILE="$postgres_environment_file" \
 CLAUDIAN_CLOUD_IMAGE="$image" \
   "${compose[@]}" config --quiet
 
 container_id="$({
   CLAUDIAN_CLOUD_ENV_FILE="$environment_file" \
+  CLAUDIAN_CLOUD_POSTGRES_ENV_FILE="$postgres_environment_file" \
   CLAUDIAN_CLOUD_IMAGE="$image" \
     "${compose[@]}" ps --quiet cloud-server
 } 2>/dev/null || true)"
@@ -58,6 +63,7 @@ printf 'deployment.building revision=%s image=%s\n' "$revision" "$image"
 
 set +e
 CLAUDIAN_CLOUD_ENV_FILE="$environment_file" \
+CLAUDIAN_CLOUD_POSTGRES_ENV_FILE="$postgres_environment_file" \
 CLAUDIAN_CLOUD_IMAGE="$image" \
   "${compose[@]}" up \
     --detach \
@@ -79,6 +85,7 @@ fi
 
 printf 'deployment.rolling-back image=%s\n' "$previous_image" >&2
 if ! CLAUDIAN_CLOUD_ENV_FILE="$environment_file" \
+  CLAUDIAN_CLOUD_POSTGRES_ENV_FILE="$postgres_environment_file" \
   CLAUDIAN_CLOUD_IMAGE="$previous_image" \
   "${compose[@]}" up \
     --detach \

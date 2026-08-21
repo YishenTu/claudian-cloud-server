@@ -117,7 +117,8 @@ async function verifyRuntimeImage(): Promise<void> {
         'CLAUDIAN_CLOUD_GIT_EXECUTABLE=/usr/bin/git',
         `CLAUDIAN_CLOUD_PORT=${String(port)}`,
         `CLAUDIAN_CLOUD_POSTGRES_URL=${database.runtimeUrl}`,
-        'CLAUDIAN_CLOUD_REPOSITORY_ROOT=/repositories',
+        'CLAUDIAN_CLOUD_REPOSITORY_ROOT=/var/lib/claudian-cloud/repositories',
+        'CLAUDIAN_CLOUD_STAGING_ROOT=/var/lib/claudian-cloud/staging',
         'CLAUDIAN_CLOUD_STORAGE_NODE_ID=image-test-node',
         '',
       ].join('\n'),
@@ -132,12 +133,14 @@ async function verifyRuntimeImage(): Promise<void> {
       '--user',
       '0:0',
       '--mount',
-      `source=${volumeName},target=/repositories`,
+      `source=${volumeName},target=/var/lib/claudian-cloud`,
       '--entrypoint',
-      '/bin/chown',
+      '/bin/sh',
       IMAGE,
-      '10001:10001',
-      '/repositories',
+      '-c',
+      'mkdir -p /var/lib/claudian-cloud/repositories /var/lib/claudian-cloud/staging && chmod 0700 /var/lib/claudian-cloud && chown -R 10001:10001 /var/lib/claudian-cloud && umask 077 && printf "%s\\n" "$1" > /var/lib/claudian-cloud/.authority-volume-id && chown 10001:10001 /var/lib/claudian-cloud/.authority-volume-id',
+      'runtime-image-bootstrap',
+      database.authorityVolumeId,
     ]);
 
     child = spawn('docker', [
@@ -159,7 +162,7 @@ async function verifyRuntimeImage(): Promise<void> {
       '--env-file',
       environmentFile,
       '--mount',
-      `source=${volumeName},target=/repositories`,
+      `source=${volumeName},target=/var/lib/claudian-cloud`,
       IMAGE,
     ], {
       stdio: ['ignore', 'pipe', 'pipe'],

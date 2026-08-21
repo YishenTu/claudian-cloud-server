@@ -11,12 +11,14 @@
 - One canonical `ProjectLockKey` implementation owns advisory-key derivation. No repository or caller hashes or casts Project IDs independently.
 - Database-only mutations use a transaction-scoped advisory lock. Cross-store workflows use the same key as a session-scoped lock on one pinned connection. Row locks occur only afterward and never replace Project admission.
 - A pinned connection remains checked out until the session lock is released or the connection is destroyed. It must never return to the pool while holding a lock.
+- A development upload admitted under the Project lock atomically hands the pinned session to an attempt-scoped shared advisory lock. Settlement holds the Project lock while acquiring the matching exclusive lock, so no process can begin or outlive publication or staging cleanup.
 - Keep ordinary transactions short and never hold one across Git, network, backup-copy, or filesystem work. Preserve explicit ordinary, pinned-lease, and recovery/health connection budgets.
 
 ## Migration and recovery enumeration
 
 - Steps 5–8 add checksum-verified migrations in one serial lane: `0002_development_bootstrap.sql`, `0003_project_read_events.sql`, `0004_collaboration.sql`, then `0005_accept_recovery.sql`. Each migration change owns its registry entry, grants, forced-RLS policy, and real PostgreSQL evidence.
 - The recovery-candidate catalog contains only operation kind, opaque Project/operation identity, and scheduling timestamps. Enumerate at most 100 rows per stable keyset page; full journals are readable only after re-entering exact forced-RLS Project scope under the canonical Project lock.
+- The active-placement catalog contains only the placement lease needed to schedule startup integrity checks. Classifying an activated Project as `recovery-required` removes its catalog entry in the same transaction so one isolated Project cannot fail global startup integrity enumeration. Enumerate at most 100 rows per stable Project-ID page, then re-enter forced-RLS Project scope under the canonical Project lock for Project, membership, and current-placement facts.
 - A nonterminal activation or Accept journal updates its candidate in the same transaction. Terminal completion or cancellation removes it. Enumeration is idempotent scheduling and never substitutes for the on-demand journal check.
 
 ## Verification

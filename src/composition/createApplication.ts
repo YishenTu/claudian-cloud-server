@@ -1,16 +1,40 @@
+import {
+  COLLAB_CLOUD_BINDING_LIMITS,
+  COLLAB_LIMITS,
+} from '@claudian/collab-protocol';
+
 import type { ServerConfig } from '../config/ServerConfig.js';
 import { CoordinationError } from '../coordination/CoordinationError.js';
 import { PostgresCoordination } from '../coordination/postgres/PostgresCoordination.js';
+import { DevelopmentBootstrapProfile } from '../onboarding/development/DevelopmentBootstrapProfile.js';
+import { DevelopmentBootstrapExpiryReconciler } from '../onboarding/development/DevelopmentBootstrapExpiryReconciler.js';
 import type { SafeLogger } from '../observability/SafeLogger.js';
+import { ProjectActivationCoordinator } from '../project-authority/lifecycle/ProjectActivationCoordinator.js';
+import { ActiveRepositoryIntegrityGate } from '../project-authority/lifecycle/ActiveRepositoryIntegrityGate.js';
+import { GitBundleImporter } from '../repositories/GitBundleImporter.js';
+import { BootstrapRepositoryIntegrityVerifier } from '../repositories/BootstrapRepositoryIntegrityVerifier.js';
+import { DevelopmentBootstrapUploadGate } from '../project-authority/lifecycle/DevelopmentBootstrapUploadGate.js';
 import {
   GitRepositoryAuthority,
   GitRepositoryError,
 } from '../repositories/GitRepositoryAuthority.js';
+import {
+  RepositoryPublication,
+  RepositoryPublicationError,
+} from '../repositories/RepositoryPublication.js';
+import { DevelopmentPrincipalAdapter } from '../request-context/DevelopmentPrincipalAdapter.js';
+import { BootstrapUploadAdmission } from '../resource-admission/BootstrapUploadAdmission.js';
 import { ResourceAdmission } from '../resource-admission/ResourceAdmission.js';
+import { CloudCapabilitiesRoute } from '../server/CloudCapabilitiesRoute.js';
+import { DevelopmentBootstrapRoutes } from '../server/DevelopmentBootstrapRoutes.js';
 import {
   HttpServer,
   type HttpServerAddress,
 } from '../server/HttpServer.js';
+import {
+  AuthorityVolumePairError,
+  AuthorityVolumePairVerifier,
+} from './AuthorityVolumePairVerifier.js';
 
 export type ApplicationErrorCode =
   | 'closed'
@@ -44,12 +68,17 @@ type ApplicationState =
   | 'stopped'
   | 'stopping';
 
-type StartupPhase = 'http' | 'postgres' | 'repository';
+type StartupPhase = 'authority' | 'http' | 'postgres' | 'recovery' | 'repository';
 
 function startupFailureReason(
   phase: StartupPhase,
   error: unknown,
 ): string {
+  if (phase === 'authority') {
+    return error instanceof AuthorityVolumePairError
+      ? 'authority-volume-mismatch'
+      : 'authority-volume-unavailable';
+  }
   if (phase === 'postgres') {
     if (
       error instanceof CoordinationError
@@ -60,9 +89,13 @@ function startupFailureReason(
     return 'postgres-unavailable';
   }
   if (phase === 'repository') {
-    if (error instanceof GitRepositoryError) return error.code;
+    if (
+      error instanceof GitRepositoryError
+      || error instanceof RepositoryPublicationError
+    ) return error.code;
     return 'repository-unavailable';
   }
+  if (phase === 'recovery') return 'activation-recovery-failed';
   return 'http-listen-failed';
 }
 
@@ -91,9 +124,17 @@ async function settleBefore(
 class CloudApplication implements Application {
   readonly #config: ServerConfig;
   readonly #coordination: PostgresCoordination;
+  readonly #activationCoordinator: ProjectActivationCoordinator;
+  readonly #activeRepositoryIntegrity: ActiveRepositoryIntegrityGate;
+  readonly #authorityVolumePair: AuthorityVolumePairVerifier;
+  readonly #bootstrapUploadAdmission: BootstrapUploadAdmission;
+  readonly #bootstrapRepositoryIntegrity: BootstrapRepositoryIntegrityVerifier;
+  readonly #bundleImporter: GitBundleImporter;
+  readonly #bootstrapExpiryReconciler: DevelopmentBootstrapExpiryReconciler;
   readonly #httpServer: HttpServer;
   readonly #logger: SafeLogger;
   readonly #repositoryAuthority: GitRepositoryAuthority;
+  readonly #repositoryPublication: RepositoryPublication;
   readonly #resourceAdmission: ResourceAdmission;
   #address: HttpServerAddress | undefined;
   #closePromise: Promise<void> | undefined;
@@ -122,9 +163,97 @@ class CloudApplication implements Application {
       resourceAdmission: this.#resourceAdmission,
       storageNodeId: options.config.repository.storageNodeId,
     });
+    this.#authorityVolumePair = new AuthorityVolumePairVerifier({
+      coordination: this.#coordination,
+      repositoryRoot: options.config.repository.root,
+      stagingRoot: options.config.developmentBootstrap.stagingRoot,
+    });
+    this.#bootstrapUploadAdmission = new BootstrapUploadAdmission({
+      maxConcurrentUploads: options.config.developmentBootstrap.maxConcurrentUploads,
+      maxUploadsPerAttempt: options.config.developmentBootstrap.maxUploadsPerAttempt,
+      queueMax: options.config.developmentBootstrap.queueMax,
+      queueTimeoutMs: options.config.developmentBootstrap.queueTimeoutMs,
+      stagingFreeSpaceFloorBytes:
+        options.config.developmentBootstrap.stagingFreeSpaceFloorBytes,
+      stagingReservationBytes:
+        options.config.developmentBootstrap.stagingReservationBytes,
+      stagingRoot: options.config.developmentBootstrap.stagingRoot,
+    });
+    this.#bundleImporter = new GitBundleImporter({
+      gitExecutable: options.config.repository.gitExecutable,
+      maximumBlobBytes: COLLAB_LIMITS.maxBlobBytes,
+      maximumBundleBytes: options.config.developmentBootstrap.maxBundleBytes,
+      maximumExpandedTreeEntries: 100_000,
+      maximumMetadataOutputBytes: options.config.repository.outputMaxBytes,
+      maximumRepositoryBytes: options.config.developmentBootstrap.maxRepositoryBytes,
+      maximumTreeEntries: COLLAB_LIMITS.maxChangedPaths,
+      operationTimeoutMs: options.config.repository.operationTimeoutMs,
+      resourceAdmission: this.#resourceAdmission,
+      stagingRoot: options.config.developmentBootstrap.stagingRoot,
+      uploadAdmission: this.#bootstrapUploadAdmission,
+      uploadIdleTimeoutMs: options.config.developmentBootstrap.uploadIdleTimeoutMs,
+      uploadTotalTimeoutMs: options.config.developmentBootstrap.uploadDeadlineMs,
+    });
+    const developmentBootstrapUploadGate = new DevelopmentBootstrapUploadGate();
+    this.#bootstrapRepositoryIntegrity = new BootstrapRepositoryIntegrityVerifier({
+      gitExecutable: options.config.repository.gitExecutable,
+      operationTimeoutMs: options.config.repository.operationTimeoutMs,
+      outputMaxBytes: options.config.repository.outputMaxBytes,
+      resourceAdmission: this.#resourceAdmission,
+    });
+    this.#repositoryPublication = new RepositoryPublication({
+      integrityVerifier: this.#bootstrapRepositoryIntegrity,
+      repositoryRoot: options.config.repository.root,
+      stagingRoot: options.config.developmentBootstrap.stagingRoot,
+      storageNodeId: options.config.repository.storageNodeId,
+    });
+    this.#activationCoordinator = new ProjectActivationCoordinator({
+      attemptCleaner: this.#bundleImporter,
+      coordination: this.#coordination,
+      publication: this.#repositoryPublication,
+      uploadGate: developmentBootstrapUploadGate,
+    });
+    this.#activeRepositoryIntegrity = new ActiveRepositoryIntegrityGate({
+      coordination: this.#coordination,
+      repository: this.#repositoryAuthority,
+    });
+    this.#bootstrapExpiryReconciler = new DevelopmentBootstrapExpiryReconciler({
+      catalog: this.#coordination,
+      settlement: this.#activationCoordinator,
+    });
+    const bootstrapProfile = new DevelopmentBootstrapProfile({
+      attemptTtlMs: options.config.developmentBootstrap.attemptTtlMs,
+      importer: this.#bundleImporter,
+      persistence: this.#coordination,
+      settlement: this.#activationCoordinator,
+      uploadGate: developmentBootstrapUploadGate,
+    });
+    const capabilitiesRoute = new CloudCapabilitiesRoute({
+      enabledCapabilities: new Set(['development-bootstrap']),
+      limits: {
+        maxDevelopmentBootstrapGitBundleBytes:
+          options.config.developmentBootstrap.maxBundleBytes,
+        maxDevelopmentBootstrapManifestUtf8Bytes:
+          COLLAB_CLOUD_BINDING_LIMITS.maxDevelopmentBootstrapManifestUtf8Bytes,
+        maxDevelopmentBootstrapReportUtf8Bytes:
+          COLLAB_CLOUD_BINDING_LIMITS.maxDevelopmentBootstrapReportUtf8Bytes,
+        maxEventReplay: COLLAB_CLOUD_BINDING_LIMITS.maxEventReplay,
+        maxGitReceivePackBytes: COLLAB_CLOUD_BINDING_LIMITS.maxGitReceivePackBytes,
+        maxJsonPayloadUtf8Bytes: COLLAB_LIMITS.maxJsonPayloadUtf8Bytes,
+        maxRepositoryBytes: options.config.developmentBootstrap.maxRepositoryBytes,
+      },
+    });
+    const bootstrapRoutes = new DevelopmentBootstrapRoutes({
+      maximumJsonBytes: COLLAB_LIMITS.maxJsonPayloadUtf8Bytes,
+      principalAdapter: new DevelopmentPrincipalAdapter({
+        profile: 'loopback-development',
+      }),
+      profile: bootstrapProfile,
+    });
     this.#httpServer = new HttpServer({
       config: options.config.http,
       isReady: () => this.#state === 'ready',
+      routes: [capabilitiesRoute, bootstrapRoutes],
     });
   }
 
@@ -161,6 +290,19 @@ class CloudApplication implements Application {
 
       phase = 'repository';
       await this.#repositoryAuthority.verifyCapability();
+      await this.#repositoryPublication.verifyCapability();
+      this.#assertStarting();
+
+      phase = 'authority';
+      await this.#authorityVolumePair.verify();
+      this.#assertStarting();
+
+      phase = 'recovery';
+      await this.#activationCoordinator.recoverAll();
+      await this.#bootstrapExpiryReconciler.reconcileAll();
+      phase = 'repository';
+      await this.#activeRepositoryIntegrity.verifyAll();
+      this.#bootstrapExpiryReconciler.start();
       this.#assertStarting();
 
       phase = 'http';
@@ -225,16 +367,21 @@ class CloudApplication implements Application {
 
   async #disposeOwners(): Promise<void> {
     const deadline = Date.now() + this.#config.shutdownTimeoutMs;
-    const admissionDrain = this.#resourceAdmission.close();
     const results: boolean[] = [];
 
-    results.push(await settleBefore(this.#repositoryAuthority.close(), deadline));
-    results.push(await settleBefore(admissionDrain, deadline));
-    results.push(await settleBefore(this.#coordination.close(), deadline));
     results.push(await settleBefore(
       this.#httpServer.close(Math.max(1, deadline - Date.now())),
       deadline,
     ));
+    results.push(await settleBefore(this.#bootstrapExpiryReconciler.close(), deadline));
+    results.push(await settleBefore(this.#activationCoordinator.close(), deadline));
+    results.push(await settleBefore(this.#bundleImporter.close(), deadline));
+    results.push(await settleBefore(this.#bootstrapUploadAdmission.close(), deadline));
+    this.#repositoryPublication.close();
+    results.push(await settleBefore(this.#bootstrapRepositoryIntegrity.close(), deadline));
+    results.push(await settleBefore(this.#repositoryAuthority.close(), deadline));
+    results.push(await settleBefore(this.#resourceAdmission.close(), deadline));
+    results.push(await settleBefore(this.#coordination.close(), deadline));
 
     if (results.includes(false)) throw new ApplicationError('shutdown-failed');
   }

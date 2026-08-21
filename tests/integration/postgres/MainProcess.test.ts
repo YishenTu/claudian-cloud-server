@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,7 +18,16 @@ describe('main process with foundation dependencies', () => {
       await new PostgresMigrator({
         connectionString: database.migrationUrl,
       }).apply();
-      const repositoryRoot = await mkdtemp(join(tmpdir(), 'claudian-main-repositories-'));
+      const authorityRoot = await mkdtemp(join(tmpdir(), 'claudian-main-authority-'));
+      const repositoryRoot = join(authorityRoot, 'repositories');
+      const stagingRoot = join(authorityRoot, 'repositories-staging');
+      await mkdir(repositoryRoot, { mode: 0o700 });
+      await mkdir(stagingRoot, { mode: 0o700 });
+      await writeFile(
+        join(authorityRoot, '.authority-volume-id'),
+        `${database.authorityVolumeId}\n`,
+        { mode: 0o600 },
+      );
       try {
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const port = await findAvailablePort();
@@ -31,6 +40,7 @@ describe('main process with foundation dependencies', () => {
               CLAUDIAN_CLOUD_PORT: String(port),
               CLAUDIAN_CLOUD_POSTGRES_URL: database.runtimeUrl,
               CLAUDIAN_CLOUD_REPOSITORY_ROOT: repositoryRoot,
+              CLAUDIAN_CLOUD_STAGING_ROOT: stagingRoot,
               CLAUDIAN_CLOUD_STORAGE_NODE_ID: 'test-node',
             },
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -73,7 +83,7 @@ describe('main process with foundation dependencies', () => {
           }
         }
       } finally {
-        await rm(repositoryRoot, { force: true, recursive: true });
+        await rm(authorityRoot, { force: true, recursive: true });
       }
     });
   });
@@ -83,7 +93,16 @@ describe('main process with foundation dependencies', () => {
       await new PostgresMigrator({
         connectionString: database.migrationUrl,
       }).apply();
-      const repositoryRoot = await mkdtemp(join(tmpdir(), 'claudian-main-idle-error-'));
+      const authorityRoot = await mkdtemp(join(tmpdir(), 'claudian-main-idle-error-'));
+      const repositoryRoot = join(authorityRoot, 'repositories');
+      const stagingRoot = join(authorityRoot, 'repositories-staging');
+      await mkdir(repositoryRoot, { mode: 0o700 });
+      await mkdir(stagingRoot, { mode: 0o700 });
+      await writeFile(
+        join(authorityRoot, '.authority-volume-id'),
+        `${database.authorityVolumeId}\n`,
+        { mode: 0o600 },
+      );
       const port = await findAvailablePort();
       const child = spawn(process.execPath, ['--import', 'tsx', 'src/main.ts'], {
         cwd: process.cwd(),
@@ -94,6 +113,7 @@ describe('main process with foundation dependencies', () => {
           CLAUDIAN_CLOUD_PORT: String(port),
           CLAUDIAN_CLOUD_POSTGRES_URL: database.runtimeUrl,
           CLAUDIAN_CLOUD_REPOSITORY_ROOT: repositoryRoot,
+          CLAUDIAN_CLOUD_STAGING_ROOT: stagingRoot,
           CLAUDIAN_CLOUD_STORAGE_NODE_ID: 'test-node',
         },
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -137,7 +157,7 @@ describe('main process with foundation dependencies', () => {
         if (child.exitCode === null && child.signalCode === null) {
           child.kill('SIGKILL');
         }
-        await rm(repositoryRoot, { force: true, recursive: true });
+        await rm(authorityRoot, { force: true, recursive: true });
       }
     });
   });
@@ -147,7 +167,16 @@ describe('main process with foundation dependencies', () => {
       await new PostgresMigrator({
         connectionString: database.migrationUrl,
       }).apply();
-      const repositoryRoot = await mkdtemp(join(tmpdir(), 'claudian-main-startup-stop-'));
+      const authorityRoot = await mkdtemp(join(tmpdir(), 'claudian-main-startup-stop-'));
+      const repositoryRoot = join(authorityRoot, 'repositories');
+      const stagingRoot = join(authorityRoot, 'repositories-staging');
+      await mkdir(repositoryRoot, { mode: 0o700 });
+      await mkdir(stagingRoot, { mode: 0o700 });
+      await writeFile(
+        join(authorityRoot, '.authority-volume-id'),
+        `${database.authorityVolumeId}\n`,
+        { mode: 0o600 },
+      );
       const blocker = new Client({ connectionString: database.adminUrl });
       const port = await findAvailablePort();
       let child: ReturnType<typeof spawn> | undefined;
@@ -170,6 +199,7 @@ describe('main process with foundation dependencies', () => {
             CLAUDIAN_CLOUD_POSTGRES_URL: database.runtimeUrl,
             CLAUDIAN_CLOUD_PROJECT_LOCK_TIMEOUT_MS: '1000',
             CLAUDIAN_CLOUD_REPOSITORY_ROOT: repositoryRoot,
+            CLAUDIAN_CLOUD_STAGING_ROOT: stagingRoot,
             CLAUDIAN_CLOUD_STORAGE_NODE_ID: 'test-node',
           },
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -205,7 +235,7 @@ describe('main process with foundation dependencies', () => {
         ) {
           child.kill('SIGKILL');
         }
-        await rm(repositoryRoot, { force: true, recursive: true });
+        await rm(authorityRoot, { force: true, recursive: true });
       }
     });
   });

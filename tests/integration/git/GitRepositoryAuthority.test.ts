@@ -305,6 +305,57 @@ describe('GitRepositoryAuthority', () => {
     }
   });
 
+  it('verifies an exact mixed-case ref set independently of locale ordering', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'claudian-git-exact-refs-'));
+    const work = join(root, 'work');
+    const accepted = placement('mixed_case_refs');
+    const bare = repositoryPath(root, accepted);
+    const resourceAdmission = admission();
+    const authority = new GitRepositoryAuthority({
+      gitExecutable: GIT_EXECUTABLE,
+      operationTimeoutMs: 2_000,
+      outputMaxBytes: 64 * 1024,
+      placementValidator: new CurrentPlacementValidator(),
+      repositoryRoot: root,
+      resourceAdmission,
+      storageNodeId: 'node-a',
+    });
+    try {
+      await execFileAsync(GIT_EXECUTABLE, ['init', '--initial-branch=main', work]);
+      await execFileAsync(GIT_EXECUTABLE, ['config', 'user.email', 'test@example.invalid'], {
+        cwd: work,
+      });
+      await execFileAsync(GIT_EXECUTABLE, ['config', 'user.name', 'Test User'], {
+        cwd: work,
+      });
+      await writeFile(join(work, 'file.txt'), 'content\n');
+      await execFileAsync(GIT_EXECUTABLE, ['add', 'file.txt'], { cwd: work });
+      await execFileAsync(GIT_EXECUTABLE, ['commit', '-m', 'fixture'], { cwd: work });
+      const { stdout } = await execFileAsync(GIT_EXECUTABLE, ['rev-parse', 'HEAD'], {
+        cwd: work,
+        encoding: 'utf8',
+      });
+      const oid = stdout.trim();
+      await execFileAsync(GIT_EXECUTABLE, ['branch', 'members/member-a'], { cwd: work });
+      await execFileAsync(GIT_EXECUTABLE, ['branch', 'members/Member-B'], { cwd: work });
+      await execFileAsync(GIT_EXECUTABLE, ['clone', '--bare', work, bare]);
+
+      assert.deepEqual(await authority.verifyIntegrity(accepted, {
+        expectedRefs: [{ name: 'refs/heads/main', oid }, {
+          name: 'refs/heads/members/member-a',
+          oid,
+        }, {
+          name: 'refs/heads/members/Member-B',
+          oid,
+        }],
+      }), { status: 'valid' });
+    } finally {
+      await authority.close();
+      await resourceAdmission.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
   it('accepts valid unreachable objects without charging diagnostic output', async () => {
     const root = await mkdtemp(join(tmpdir(), 'claudian-git-unreachable-'));
     const accepted = placement('valid_unreachable');

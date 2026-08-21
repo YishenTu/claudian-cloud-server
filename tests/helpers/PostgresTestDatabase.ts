@@ -12,6 +12,7 @@ export const POSTGRES_TEST_CONTAINER_LABEL = 'com.claudian.cloud.test-postgres=t
 
 export interface PostgresTestDatabase {
   readonly adminUrl: string;
+  readonly authorityVolumeId: string;
   readonly migrationUrl: string;
   readonly mode: 'container' | 'external';
   readonly runtimeUrl: string;
@@ -102,6 +103,7 @@ async function externalDatabase(
   }
 
   const database = `cloud_test_${randomToken(8)}`;
+  const authorityVolumeId = randomToken(16);
   const adminClient = new Client({
     connectionString: urlForDatabase(adminUrl, 'postgres'),
   });
@@ -117,6 +119,9 @@ async function externalDatabase(
     );
     await adminClient.query(
       `GRANT CONNECT ON DATABASE ${quoteIdentifier(database)} TO ${quoteIdentifier(MIGRATION_ROLE)}, ${quoteIdentifier(RUNTIME_ROLE)}`,
+    );
+    await adminClient.query(
+      `ALTER DATABASE ${quoteIdentifier(database)} SET claudian_cloud.authority_volume_id TO ${quoteLiteral(authorityVolumeId)}`,
     );
   } catch {
     if (created) {
@@ -134,6 +139,7 @@ async function externalDatabase(
   let closePromise: Promise<void> | undefined;
   return Object.freeze({
     adminUrl: urlForDatabase(adminUrl, database),
+    authorityVolumeId,
     close: () => {
       closePromise ??= dropExternalDatabase(adminUrl, database).catch(() => {
         throw new Error('postgres-test-database-cleanup-failed');
@@ -227,6 +233,7 @@ function quoteLiteral(value: string): string {
 
 async function provisionDatabase(options: {
   readonly adminPassword: string;
+  readonly authorityVolumeId: string;
   readonly database: string;
   readonly migrationPassword: string;
   readonly port: number;
@@ -257,6 +264,9 @@ async function provisionDatabase(options: {
     await client.query(
       `GRANT CONNECT ON DATABASE ${quoteIdentifier(options.database)} TO ${quoteIdentifier(MIGRATION_ROLE)}, ${quoteIdentifier(RUNTIME_ROLE)}`,
     );
+    await client.query(
+      `ALTER DATABASE ${quoteIdentifier(options.database)} SET claudian_cloud.authority_volume_id TO ${quoteLiteral(options.authorityVolumeId)}`,
+    );
   } finally {
     await client.end();
   }
@@ -269,6 +279,7 @@ async function startContainerDatabase(): Promise<PostgresTestDatabase> {
   const migrationPassword = randomToken();
   const runtimePassword = randomToken();
   const database = `cloud_test_${randomToken(8)}`;
+  const authorityVolumeId = randomToken(16);
   const environmentFile = join(temporaryRoot, 'postgres.env');
   let containerStarted = false;
 
@@ -301,6 +312,7 @@ async function startContainerDatabase(): Promise<PostgresTestDatabase> {
     const port = await publishedPort(containerName);
     await provisionDatabase({
       adminPassword,
+      authorityVolumeId,
       database,
       migrationPassword,
       port,
@@ -310,6 +322,7 @@ async function startContainerDatabase(): Promise<PostgresTestDatabase> {
     let closePromise: Promise<void> | undefined;
     return Object.freeze({
       adminUrl: databaseUrl(ADMIN_ROLE, adminPassword, port, database),
+      authorityVolumeId,
       close: () => {
         closePromise ??= Promise.all([
           stopContainer(containerName),

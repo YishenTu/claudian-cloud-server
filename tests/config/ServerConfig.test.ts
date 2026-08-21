@@ -13,6 +13,7 @@ const validSource = {
   CLAUDIAN_CLOUD_PORT: '8787',
   CLAUDIAN_CLOUD_POSTGRES_URL: 'postgresql://cloud-runtime:secret@127.0.0.1/cloud',
   CLAUDIAN_CLOUD_REPOSITORY_ROOT: '/srv/claudian/repositories',
+  CLAUDIAN_CLOUD_STAGING_ROOT: '/srv/claudian/staging',
   CLAUDIAN_CLOUD_STORAGE_NODE_ID: 'node-a',
 } as const;
 
@@ -27,6 +28,20 @@ describe('decodeServerConfig', () => {
     const config = decodeServerConfig(validSource);
 
     assert.deepEqual(config, {
+      developmentBootstrap: {
+        attemptTtlMs: 86_400_000,
+        maxBundleBytes: 1_073_741_824,
+        maxConcurrentUploads: 1,
+        maxRepositoryBytes: 1_073_741_824,
+        maxUploadsPerAttempt: 1,
+        queueMax: 4,
+        queueTimeoutMs: 10_000,
+        stagingFreeSpaceFloorBytes: 1_073_741_824,
+        stagingReservationBytes: 2_147_483_648,
+        stagingRoot: '/srv/claudian/staging',
+        uploadDeadlineMs: 900_000,
+        uploadIdleTimeoutMs: 30_000,
+      },
       gitAdmission: {
         maxChildren: 2,
         maxChildrenPerProject: 1,
@@ -55,6 +70,7 @@ describe('decodeServerConfig', () => {
       shutdownTimeoutMs: 15_000,
     });
     assert.equal(Object.isFrozen(config), true);
+    assert.equal(Object.isFrozen(config.developmentBootstrap), true);
     assert.equal(Object.isFrozen(config.gitAdmission), true);
     assert.equal(Object.isFrozen(config.http), true);
     assert.equal(Object.isFrozen(config.postgres), true);
@@ -180,6 +196,7 @@ describe('decodeServerConfig', () => {
       'CLAUDIAN_CLOUD_PORT',
       'CLAUDIAN_CLOUD_POSTGRES_URL',
       'CLAUDIAN_CLOUD_REPOSITORY_ROOT',
+      'CLAUDIAN_CLOUD_STAGING_ROOT',
       'CLAUDIAN_CLOUD_STORAGE_NODE_ID',
     ] as const) {
       const source = Object.fromEntries(
@@ -207,6 +224,14 @@ describe('decodeServerConfig', () => {
       CLAUDIAN_CLOUD_GIT_QUEUE_MAX: '20',
       CLAUDIAN_CLOUD_GIT_QUEUE_MAX_PER_PROJECT: '8',
       CLAUDIAN_CLOUD_GIT_QUEUE_TIMEOUT_MS: '5000',
+      CLAUDIAN_CLOUD_BOOTSTRAP_MAX_BUNDLE_BYTES: '536870912',
+      CLAUDIAN_CLOUD_BOOTSTRAP_MAX_REPOSITORY_BYTES: '536870912',
+      CLAUDIAN_CLOUD_BOOTSTRAP_QUEUE_MAX: '8',
+      CLAUDIAN_CLOUD_BOOTSTRAP_QUEUE_TIMEOUT_MS: '5000',
+      CLAUDIAN_CLOUD_BOOTSTRAP_STAGING_FREE_SPACE_FLOOR_BYTES: '536870912',
+      CLAUDIAN_CLOUD_BOOTSTRAP_STAGING_RESERVATION_BYTES: '1073741824',
+      CLAUDIAN_CLOUD_BOOTSTRAP_UPLOAD_DEADLINE_MS: '600000',
+      CLAUDIAN_CLOUD_BOOTSTRAP_UPLOAD_IDLE_TIMEOUT_MS: '15000',
       CLAUDIAN_CLOUD_POSTGRES_ORDINARY_POOL_MAX: '16',
       CLAUDIAN_CLOUD_POSTGRES_PINNED_POOL_MAX: '4',
       CLAUDIAN_CLOUD_POSTGRES_RESERVED_POOL_MAX: '4',
@@ -219,6 +244,20 @@ describe('decodeServerConfig', () => {
       queueMax: 20,
       queueMaxPerProject: 8,
       queueTimeoutMs: 5_000,
+    });
+    assert.deepEqual(config.developmentBootstrap, {
+      attemptTtlMs: 86_400_000,
+      maxBundleBytes: 536_870_912,
+      maxConcurrentUploads: 1,
+      maxRepositoryBytes: 536_870_912,
+      maxUploadsPerAttempt: 1,
+      queueMax: 8,
+      queueTimeoutMs: 5_000,
+      stagingFreeSpaceFloorBytes: 536_870_912,
+      stagingReservationBytes: 1_073_741_824,
+      stagingRoot: validSource.CLAUDIAN_CLOUD_STAGING_ROOT,
+      uploadDeadlineMs: 600_000,
+      uploadIdleTimeoutMs: 15_000,
     });
     assert.deepEqual(config.postgres, {
       ordinaryPoolMax: 16,
@@ -245,6 +284,16 @@ describe('decodeServerConfig', () => {
       ['CLAUDIAN_CLOUD_GIT_QUEUE_MAX', '1'],
       ['CLAUDIAN_CLOUD_GIT_QUEUE_MAX_PER_PROJECT', '1024'],
       ['CLAUDIAN_CLOUD_GIT_QUEUE_TIMEOUT_MS', '99'],
+      ['CLAUDIAN_CLOUD_BOOTSTRAP_ATTEMPT_TTL_MS', '7200000'],
+      ['CLAUDIAN_CLOUD_BOOTSTRAP_ATTEMPT_TTL_MS', '899999'],
+      ['CLAUDIAN_CLOUD_BOOTSTRAP_MAX_BUNDLE_BYTES', '1073741825'],
+      ['CLAUDIAN_CLOUD_BOOTSTRAP_MAX_REPOSITORY_BYTES', '1073741825'],
+      ['CLAUDIAN_CLOUD_BOOTSTRAP_QUEUE_MAX', '0'],
+      ['CLAUDIAN_CLOUD_BOOTSTRAP_QUEUE_TIMEOUT_MS', '99'],
+      ['CLAUDIAN_CLOUD_BOOTSTRAP_STAGING_FREE_SPACE_FLOOR_BYTES', '67108863'],
+      ['CLAUDIAN_CLOUD_BOOTSTRAP_STAGING_RESERVATION_BYTES', '2147483647'],
+      ['CLAUDIAN_CLOUD_BOOTSTRAP_UPLOAD_DEADLINE_MS', '30000'],
+      ['CLAUDIAN_CLOUD_BOOTSTRAP_UPLOAD_IDLE_TIMEOUT_MS', '30001'],
       ['CLAUDIAN_CLOUD_POSTGRES_ORDINARY_POOL_MAX', '0'],
       ['CLAUDIAN_CLOUD_POSTGRES_PINNED_POOL_MAX', '65'],
       ['CLAUDIAN_CLOUD_POSTGRES_RESERVED_POOL_MAX', '17'],
@@ -297,6 +346,8 @@ describe('decodeServerConfig', () => {
       ['CLAUDIAN_CLOUD_STORAGE_NODE_ID', `node/${secret}`],
       ['CLAUDIAN_CLOUD_REPOSITORY_ROOT', `relative/${secret}`],
       ['CLAUDIAN_CLOUD_REPOSITORY_ROOT', `/tmp/../${secret}`],
+      ['CLAUDIAN_CLOUD_STAGING_ROOT', `relative/${secret}`],
+      ['CLAUDIAN_CLOUD_STAGING_ROOT', '/srv/other/staging'],
       ['CLAUDIAN_CLOUD_GIT_EXECUTABLE', `relative/${secret}`],
     ] as const) {
       assert.throws(

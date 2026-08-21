@@ -13,14 +13,20 @@ export interface HttpServerAddress {
   readonly port: number;
 }
 
+export interface HttpRouteHandler {
+  handle(request: IncomingMessage, response: ServerResponse): boolean;
+}
+
 export interface HttpServerOptions {
   readonly config: HttpConfig;
   readonly isReady: () => boolean;
+  readonly routes?: readonly HttpRouteHandler[];
 }
 
 export class HttpServer {
   readonly #config: HttpConfig;
   readonly #healthRoutes: HealthRoutes;
+  readonly #routes: readonly HttpRouteHandler[];
   readonly #server: Server;
   #address: HttpServerAddress | undefined;
   #closePromise: Promise<void> | undefined;
@@ -29,6 +35,7 @@ export class HttpServer {
   constructor(options: HttpServerOptions) {
     this.#config = options.config;
     this.#healthRoutes = new HealthRoutes({ isReady: options.isReady });
+    this.#routes = Object.freeze([...(options.routes ?? [])]);
     this.#server = createServer((request, response) => {
       this.#handleRequest(request, response);
     });
@@ -113,6 +120,9 @@ export class HttpServer {
     response: ServerResponse,
   ): void {
     if (this.#healthRoutes.handle(request, response)) return;
+    for (const route of this.#routes) {
+      if (route.handle(request, response)) return;
+    }
     this.#sendJson(response, 404, { status: 'not-found' });
   }
 

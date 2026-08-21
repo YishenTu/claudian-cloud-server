@@ -3,3 +3,14 @@ export const FOUNDATION_SCHEMA = Object.freeze({
   name: 'foundation',
   version: 1,
 });
+
+export const DEVELOPMENT_BOOTSTRAP_SCHEMA = Object.freeze({
+  checksum: '18d367c9ef8a0d39d0d072bc2ed89b1b6f75bf306585adb6138c66b3e5a9afe6',
+  name: 'development-bootstrap',
+  version: 2,
+});
+
+export const POSTGRES_SCHEMAS = Object.freeze([
+  FOUNDATION_SCHEMA,
+  DEVELOPMENT_BOOTSTRAP_SCHEMA,
+]);

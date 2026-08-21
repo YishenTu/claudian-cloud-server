@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { CoordinationError } from '../../src/coordination/CoordinationError.js';
-import { projectLockKey } from '../../src/coordination/ProjectLockKey.js';
+import {
+  developmentBootstrapUploadLockKey,
+  projectLockKey,
+} from '../../src/coordination/ProjectLockKey.js';
 
 describe('projectLockKey', () => {
   it('matches the version-1 SHA-256 signed-big-endian specification literals', () => {
@@ -12,6 +15,17 @@ describe('projectLockKey', () => {
     assert.equal(
       projectLockKey('01HXTESTPROJECT00000000000000'),
       7_383_407_818_228_345_440n,
+    );
+  });
+
+  it('derives a distinct attempt-scoped upload fence key', () => {
+    assert.notEqual(
+      developmentBootstrapUploadLockKey('project-a', 'attempt-a'),
+      projectLockKey('project-a'),
+    );
+    assert.notEqual(
+      developmentBootstrapUploadLockKey('project-a', 'attempt-a'),
+      developmentBootstrapUploadLockKey('project-a', 'attempt-b'),
     );
   });
 

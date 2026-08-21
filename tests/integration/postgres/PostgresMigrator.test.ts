@@ -13,6 +13,7 @@ import {
 } from '../../helpers/PostgresTestDatabase.js';
 
 const FOUNDATION_CHECKSUM = '5e883d93536b2569f3655cc9f3982c4ad7e8e3daf7871500dc5d4f471e8504bb';
+const DEVELOPMENT_BOOTSTRAP_CHECKSUM = '18d367c9ef8a0d39d0d072bc2ed89b1b6f75bf306585adb6138c66b3e5a9afe6';
 
 async function execute(connectionString: string, sql: string): Promise<void> {
   const client = new Client({ connectionString });
@@ -94,12 +95,20 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
          FROM claudian_cloud.schema_migrations
         ORDER BY version`,
     );
-    assert.deepEqual(migration.rows, [{
-      checksum: FOUNDATION_CHECKSUM,
-      name: 'foundation',
-      state: 'applied',
-      version: 1,
-    }]);
+    assert.deepEqual(migration.rows, [
+      {
+        checksum: FOUNDATION_CHECKSUM,
+        name: 'foundation',
+        state: 'applied',
+        version: 1,
+      },
+      {
+        checksum: DEVELOPMENT_BOOTSTRAP_CHECKSUM,
+        name: 'development-bootstrap',
+        state: 'applied',
+        version: 2,
+      },
+    ]);
 
     const relations = await client.query<{ readonly relation: string }>(
       `SELECT table_name AS relation
@@ -110,8 +119,17 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
     assert.deepEqual(
       relations.rows.map(row => row.relation),
       [
+        'active_repository_placement_catalog',
+        'development_actor_mappings',
+        'development_bootstrap_attempt_routes',
+        'development_bootstrap_attempts',
+        'development_bootstrap_expiry_candidates',
+        'development_bootstrap_reports',
+        'development_bootstrap_settlements',
+        'development_bootstrap_uploads',
         'project_memberships',
         'projects',
+        'recovery_candidates',
         'repository_placements',
         'schema_migrations',
       ],
@@ -133,19 +151,13 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
     await client.query(
       `INSERT INTO claudian_cloud.schema_migrations
         (version, name, checksum, state, applied_at)
-       VALUES (2, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
+       VALUES (3, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
     );
-    await expectMigrationError(migrator, 'schema-newer', 2);
-    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 2');
+    await expectMigrationError(migrator, 'schema-newer', 3);
+    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 3');
 
     await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 1');
-    await client.query(
-      `INSERT INTO claudian_cloud.schema_migrations
-        (version, name, checksum, state, applied_at)
-       VALUES (2, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
-    );
     await expectMigrationError(migrator, 'schema-gap', 2);
-    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 2');
     await client.query(
       `INSERT INTO claudian_cloud.schema_migrations
         (version, name, checksum, state, applied_at)
@@ -193,8 +205,17 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
         ORDER BY c.relname`,
     );
     assert.deepEqual(ownership.rows, [
+      { owner: 'claudian_cloud_migration', relation: 'active_repository_placement_catalog' },
+      { owner: 'claudian_cloud_migration', relation: 'development_actor_mappings' },
+      { owner: 'claudian_cloud_migration', relation: 'development_bootstrap_attempt_routes' },
+      { owner: 'claudian_cloud_migration', relation: 'development_bootstrap_attempts' },
+      { owner: 'claudian_cloud_migration', relation: 'development_bootstrap_expiry_candidates' },
+      { owner: 'claudian_cloud_migration', relation: 'development_bootstrap_reports' },
+      { owner: 'claudian_cloud_migration', relation: 'development_bootstrap_settlements' },
+      { owner: 'claudian_cloud_migration', relation: 'development_bootstrap_uploads' },
       { owner: 'claudian_cloud_migration', relation: 'project_memberships' },
       { owner: 'claudian_cloud_migration', relation: 'projects' },
+      { owner: 'claudian_cloud_migration', relation: 'recovery_candidates' },
       { owner: 'claudian_cloud_migration', relation: 'repository_placements' },
       { owner: 'claudian_cloud_migration', relation: 'schema_migrations' },
     ]);
@@ -230,19 +251,26 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
           AND grantee = 'claudian_cloud_runtime'
         ORDER BY table_name, privilege_type`,
     );
+    const mutableRelations = [
+      'active_repository_placement_catalog',
+      'development_actor_mappings',
+      'development_bootstrap_attempts',
+      'development_bootstrap_expiry_candidates',
+      'development_bootstrap_reports',
+      'development_bootstrap_settlements',
+      'development_bootstrap_uploads',
+      'project_memberships',
+      'projects',
+      'recovery_candidates',
+      'repository_placements',
+    ];
     assert.deepEqual(tablePrivileges.rows, [
-      { privilege: 'DELETE', relation: 'project_memberships' },
-      { privilege: 'INSERT', relation: 'project_memberships' },
-      { privilege: 'SELECT', relation: 'project_memberships' },
-      { privilege: 'UPDATE', relation: 'project_memberships' },
-      { privilege: 'DELETE', relation: 'projects' },
-      { privilege: 'INSERT', relation: 'projects' },
-      { privilege: 'SELECT', relation: 'projects' },
-      { privilege: 'UPDATE', relation: 'projects' },
-      { privilege: 'DELETE', relation: 'repository_placements' },
-      { privilege: 'INSERT', relation: 'repository_placements' },
-      { privilege: 'SELECT', relation: 'repository_placements' },
-      { privilege: 'UPDATE', relation: 'repository_placements' },
+      ...mutableRelations.flatMap(relation => (
+        ['DELETE', 'INSERT', 'SELECT', 'UPDATE'].map(privilege => ({
+          privilege,
+          relation,
+        }))
+      )),
       { privilege: 'SELECT', relation: 'schema_migrations' },
     ]);
 
@@ -256,6 +284,26 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
         ORDER BY tablename`,
     );
     assert.deepEqual(policies.rows, [
+      {
+        policy_name: 'development_actor_mappings_project_scope',
+        relation: 'development_actor_mappings',
+      },
+      {
+        policy_name: 'development_bootstrap_attempts_project_scope',
+        relation: 'development_bootstrap_attempts',
+      },
+      {
+        policy_name: 'development_bootstrap_reports_project_scope',
+        relation: 'development_bootstrap_reports',
+      },
+      {
+        policy_name: 'development_bootstrap_settlements_project_scope',
+        relation: 'development_bootstrap_settlements',
+      },
+      {
+        policy_name: 'development_bootstrap_uploads_project_scope',
+        relation: 'development_bootstrap_uploads',
+      },
       {
         policy_name: 'project_memberships_project_scope',
         relation: 'project_memberships',
@@ -274,14 +322,25 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
         [projectId],
       );
       await migrationClient.query(
-        `INSERT INTO claudian_cloud.projects (project_id, created_at)
-         VALUES ($1, clock_timestamp())`,
+        `INSERT INTO claudian_cloud.projects (
+           project_id,
+           project_name,
+           manager_set_generation,
+           expected_main_oid,
+           service_state,
+           created_at,
+           activated_at
+         ) VALUES (
+           $1, 'Overlapping Project', 1, repeat('a', 40), 'active',
+           clock_timestamp(), clock_timestamp()
+         )`,
         [projectId],
       );
       await migrationClient.query(
         `INSERT INTO claudian_cloud.project_memberships (
-           project_id, member_id, role, status, revision, created_at, updated_at
-         ) VALUES ($1, 'overlapping-member', 'member', 'active', 1, clock_timestamp(), clock_timestamp())`,
+           project_id, member_id, display_name, role, status, revision,
+           created_at, updated_at
+         ) VALUES ($1, 'overlapping-member', 'Overlapping member', 'member', 'active', 1, clock_timestamp(), clock_timestamp())`,
         [projectId],
       );
       await migrationClient.query('COMMIT');
@@ -292,14 +351,25 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       "SELECT set_config('claudian_cloud.project_id', 'future.project', true)",
     );
     await migrationClient.query(
-      `INSERT INTO claudian_cloud.projects (project_id, created_at)
-       VALUES ('future.project', clock_timestamp())`,
+      `INSERT INTO claudian_cloud.projects (
+         project_id,
+         project_name,
+         manager_set_generation,
+         expected_main_oid,
+         service_state,
+         created_at,
+         activated_at
+       ) VALUES (
+         'future.project', 'Future Project', 1, repeat('b', 40), 'active',
+         clock_timestamp(), clock_timestamp()
+       )`,
     );
     await migrationClient.query(
       `INSERT INTO claudian_cloud.project_memberships (
-         project_id, member_id, role, status, revision, created_at, updated_at
+         project_id, member_id, display_name, role, status, revision,
+         created_at, updated_at
        ) VALUES (
-         'future.project', 'future.member', 'member', 'active', 1,
+         'future.project', 'future.member', 'Future member', 'member', 'active', 1,
          clock_timestamp(), clock_timestamp()
        )`,
     );

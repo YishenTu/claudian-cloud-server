@@ -1,12 +1,15 @@
 export type CoordinationErrorCode =
+  | 'authority-volume-mismatch'
   | 'busy'
   | 'cancelled'
   | 'closed'
   | 'dependency-failed'
   | 'invalid-member'
   | 'invalid-project'
+  | 'invalid-record'
   | 'lease-busy'
-  | 'schema-incompatible';
+  | 'schema-incompatible'
+  | 'state-conflict';
 
 export class CoordinationError extends Error {
   readonly code: CoordinationErrorCode;

@@ -27,6 +27,10 @@ function renderCompose(environmentFile: string): RenderedCompose {
       env: {
         ...process.env,
         CLAUDIAN_CLOUD_ENV_FILE: environmentFile,
+        CLAUDIAN_CLOUD_POSTGRES_ENV_FILE: resolve(
+          repositoryRoot,
+          '.env.postgres.example',
+        ),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     },

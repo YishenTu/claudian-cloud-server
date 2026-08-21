@@ -23,6 +23,7 @@ interface DeploymentFixture {
   readonly environmentFile: string;
   readonly fakeBinaryDirectory: string;
   readonly root: string;
+  readonly postgresEnvironmentFile: string;
   readonly targetRevision: string;
 }
 
@@ -42,6 +43,7 @@ async function createFixture(): Promise<DeploymentFixture> {
   const fakeBinaryDirectory = join(root, 'bin');
   const dockerLog = join(root, 'docker.log');
   const environmentFile = join(root, 'server.env');
+  const postgresEnvironmentFile = join(root, 'postgres.env');
 
   await mkdir(seed);
   git(root, 'init', '--bare', '--initial-branch=main', remote);
@@ -93,6 +95,7 @@ exit 0
   );
   await chmod(fakeDocker, 0o755);
   await writeFile(environmentFile, 'CLAUDIAN_CLOUD_PORT=8787\n');
+  await writeFile(postgresEnvironmentFile, 'POSTGRES_DB=postgres\n');
 
   return {
     checkout,
@@ -100,6 +103,7 @@ exit 0
     environmentFile,
     fakeBinaryDirectory,
     root,
+    postgresEnvironmentFile,
     targetRevision,
   };
 }
@@ -115,6 +119,7 @@ function runDeployment(
       ...process.env,
       CLAUDIAN_DEPLOY_BUILD_NETWORK: 'host',
       CLAUDIAN_DEPLOY_ENV_FILE: fixture.environmentFile,
+      CLAUDIAN_DEPLOY_POSTGRES_ENV_FILE: fixture.postgresEnvironmentFile,
       FAKE_DOCKER_LOG: fixture.dockerLog,
       PATH: `${fixture.fakeBinaryDirectory}:${process.env.PATH ?? ''}`,
       ...extraEnvironment,

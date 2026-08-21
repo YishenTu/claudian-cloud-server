@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import {
   access,
   chmod,
+  mkdir,
   mkdtemp,
   rm,
   writeFile,
@@ -24,6 +25,7 @@ import { Client } from 'pg';
 import { createApplication } from '../../../src/composition/createApplication.js';
 import type { ServerConfig } from '../../../src/config/ServerConfig.js';
 import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
 import { SafeLogger } from '../../../src/observability/SafeLogger.js';
 import {
   acquirePostgresTestDatabase,
@@ -45,6 +47,20 @@ function config(options: {
   readonly repositoryRoot: string;
 }): ServerConfig {
   return Object.freeze({
+    developmentBootstrap: Object.freeze({
+      attemptTtlMs: 86_400_000,
+      maxBundleBytes: 1_073_741_824,
+      maxConcurrentUploads: 1,
+      maxRepositoryBytes: 1_073_741_824,
+      maxUploadsPerAttempt: 1,
+      queueMax: 4,
+      queueTimeoutMs: 10_000,
+      stagingFreeSpaceFloorBytes: 1_073_741_824,
+      stagingReservationBytes: 2_147_483_648,
+      stagingRoot: `${options.repositoryRoot}-staging`,
+      uploadDeadlineMs: 900_000,
+      uploadIdleTimeoutMs: 30_000,
+    }),
     gitAdmission: Object.freeze({
       maxChildren: 2,
       maxChildrenPerProject: 1,
@@ -187,7 +203,41 @@ async function settleBeforeTest(
   }
 }
 
+async function removeSeededProject(
+  database: PostgresTestDatabase,
+  projectId: string,
+): Promise<void> {
+  const cleanup = new Client({ connectionString: database.migrationUrl });
+  try {
+    await cleanup.connect();
+    await cleanup.query('BEGIN');
+    await cleanup.query(
+      "SELECT set_config('claudian_cloud.project_id', $1, true)",
+      [projectId],
+    );
+    for (const relation of [
+      'active_repository_placement_catalog',
+      'development_actor_mappings',
+      'project_memberships',
+      'repository_placements',
+      'projects',
+    ]) {
+      await cleanup.query(
+        `DELETE FROM claudian_cloud.${relation} WHERE project_id = $1`,
+        [projectId],
+      );
+    }
+    await cleanup.query('COMMIT');
+  } catch (error: unknown) {
+    await cleanup.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    await cleanup.end();
+  }
+}
+
 describe('application composition', { concurrency: false }, () => {
+  let authorityRoot: string;
   let database: PostgresTestDatabase;
   let repositoryRoot: string;
 
@@ -196,11 +246,19 @@ describe('application composition', { concurrency: false }, () => {
     await new PostgresMigrator({
       connectionString: database.migrationUrl,
     }).apply();
-    repositoryRoot = await mkdtemp(join(tmpdir(), 'claudian-app-repositories-'));
+    authorityRoot = await mkdtemp(join(tmpdir(), 'claudian-app-authority-'));
+    repositoryRoot = join(authorityRoot, 'repositories');
+    await mkdir(repositoryRoot, { mode: 0o700 });
+    await mkdir(`${repositoryRoot}-staging`, { mode: 0o700 });
+    await writeFile(
+      join(authorityRoot, '.authority-volume-id'),
+      `${database.authorityVolumeId}\n`,
+      { mode: 0o600 },
+    );
   });
 
   after(async () => {
-    await rm(repositoryRoot, { force: true, recursive: true });
+    await rm(authorityRoot, { force: true, recursive: true });
     await database.close();
   });
 
@@ -271,6 +329,191 @@ describe('application composition', { concurrency: false }, () => {
           else resolve();
         });
       });
+    }
+  });
+
+  it('fails closed when the authority volume no longer matches PostgreSQL', async () => {
+    const marker = join(authorityRoot, '.authority-volume-id');
+    const lines: string[] = [];
+    await writeFile(marker, `${'f'.repeat(32)}\n`, { mode: 0o600 });
+    const application = createApplication({
+      config: config({
+        postgresUrl: database.runtimeUrl,
+        repositoryRoot,
+      }),
+      logger: logger(lines),
+    });
+    try {
+      await assert.rejects(
+        application.start(),
+        /application\.error\.startup-failed/,
+      );
+      assert.match(JSON.stringify(events(lines)), /authority-volume-mismatch/);
+      assert.equal(await cloudConnectionCount(database.adminUrl), 0);
+    } finally {
+      await application.close();
+      await writeFile(marker, `${database.authorityVolumeId}\n`, { mode: 0o600 });
+    }
+  });
+
+  it('settles abandoned expired bootstrap attempts before publishing readiness', async () => {
+    const seed = new PostgresCoordination({
+      ordinaryPoolMax: 2,
+      pinnedPoolMax: 1,
+      projectLockTimeoutMs: 1_000,
+      reservedPoolMax: 1,
+      runtimeConnectionString: database.runtimeUrl,
+      shutdownTimeoutMs: 1_000,
+    });
+    await seed.withProjectScope('project-expired-startup', scope => (
+      scope.putDevelopmentBootstrapAttempt({
+        attemptId: 'attempt-expired-startup',
+        createdAt: '2026-08-18T00:00:00.000Z',
+        expiresAt: '2026-08-19T00:00:00.000Z',
+        manifestJson: '{"manifest":"expired"}',
+        manifestSha256: 'a'.repeat(64),
+        projectId: 'project-expired-startup',
+        sourceHostMemberId: 'member-expired-startup',
+      })
+    ));
+    await seed.close();
+
+    const application = createApplication({
+      config: config({
+        postgresUrl: database.runtimeUrl,
+        repositoryRoot,
+      }),
+      logger: logger([]),
+    });
+    await application.start();
+    await application.close();
+
+    const inspection = new PostgresCoordination({
+      ordinaryPoolMax: 2,
+      pinnedPoolMax: 1,
+      projectLockTimeoutMs: 1_000,
+      reservedPoolMax: 1,
+      runtimeConnectionString: database.runtimeUrl,
+      shutdownTimeoutMs: 1_000,
+    });
+    try {
+      await inspection.withProjectScope('project-expired-startup', async scope => {
+        const attempt = await scope.getDevelopmentBootstrapAttempt(
+          'attempt-expired-startup',
+        );
+        assert.ok(attempt);
+        assert.equal(attempt.state, 'cancelled');
+        assert.ok(attempt.settlement);
+        assert.equal(attempt.settlement.kind, 'cancellation');
+        assert.equal(attempt.settlement.cancellationPhase, 'cancelled');
+      });
+    } finally {
+      await inspection.close();
+    }
+  });
+
+  it('keeps readiness closed when an active repository no longer has exact refs', async () => {
+    const projectId = 'project-active-corrupt';
+    const repositoryStorageKey = 'repository_active_corrupt';
+    const projectDirectory = join(
+      repositoryRoot,
+      Buffer.from(projectId, 'utf8').toString('hex'),
+    );
+    const repositoryPath = join(projectDirectory, repositoryStorageKey);
+    const work = join(authorityRoot, 'active-corrupt-work');
+    const seed = new Client({ connectionString: database.migrationUrl });
+    let application: ReturnType<typeof createApplication> | undefined;
+    try {
+      await seed.connect();
+      await execFileAsync(GIT_EXECUTABLE, ['init', '--initial-branch=main', work]);
+      await execFileAsync(GIT_EXECUTABLE, ['config', 'user.email', 'test@example.invalid'], {
+        cwd: work,
+      });
+      await execFileAsync(GIT_EXECUTABLE, ['config', 'user.name', 'Test User'], {
+        cwd: work,
+      });
+      await writeFile(join(work, 'file.txt'), 'content\n');
+      await execFileAsync(GIT_EXECUTABLE, ['add', 'file.txt'], { cwd: work });
+      await execFileAsync(GIT_EXECUTABLE, ['commit', '-m', 'fixture'], { cwd: work });
+      const main = await execFileAsync(GIT_EXECUTABLE, ['rev-parse', 'HEAD'], {
+        cwd: work,
+        encoding: 'utf8',
+      });
+      const mainOid = main.stdout.trim();
+      await execFileAsync(GIT_EXECUTABLE, ['branch', 'members/member-active-a'], {
+        cwd: work,
+      });
+      await execFileAsync(GIT_EXECUTABLE, ['branch', 'members/member-active-b'], {
+        cwd: work,
+      });
+      await mkdir(projectDirectory);
+      await execFileAsync(GIT_EXECUTABLE, ['clone', '--bare', work, repositoryPath]);
+      await seed.query('BEGIN');
+      await seed.query(
+        "SELECT set_config('claudian_cloud.project_id', $1, true)",
+        [projectId],
+      );
+      await seed.query(
+        `INSERT INTO claudian_cloud.projects (
+           project_id, project_name, manager_set_generation,
+           expected_main_oid, service_state, created_at, activated_at
+         ) VALUES ($1, 'Active corrupt project', 0, $2, 'active', $3, $3)`,
+        [projectId, mainOid, '2026-08-21T00:00:00.000Z'],
+      );
+      for (const [memberId, displayName, role] of [[
+        'member-active-a', 'Alice', 'manager',
+      ], [
+        'member-active-b', 'Bob', 'member',
+      ]] as const) {
+        await seed.query(
+          `INSERT INTO claudian_cloud.project_memberships (
+             project_id, member_id, display_name, role, status, revision,
+             created_at, updated_at
+           ) VALUES ($1, $2, $3, $4, 'active', 1, $5, $5)`,
+          [projectId, memberId, displayName, role, '2026-08-21T00:00:00.000Z'],
+        );
+      }
+      await seed.query(
+        `INSERT INTO claudian_cloud.repository_placements (
+           project_id, storage_node_id, repository_storage_key, generation,
+           active, created_at, updated_at
+         ) VALUES ($1, 'test-node', $2, 1, true, $3, $3)`,
+        [projectId, repositoryStorageKey, '2026-08-21T00:00:00.000Z'],
+      );
+      await seed.query(
+        `INSERT INTO claudian_cloud.active_repository_placement_catalog (
+           project_id, storage_node_id, repository_storage_key, generation
+         ) VALUES ($1, 'test-node', $2, 1)`,
+        [projectId, repositoryStorageKey],
+      );
+      await seed.query('COMMIT');
+      await execFileAsync(GIT_EXECUTABLE, [
+        '--git-dir',
+        repositoryPath,
+        'update-ref',
+        '-d',
+        'refs/heads/members/member-active-b',
+      ]);
+
+      const lines: string[] = [];
+      application = createApplication({
+        config: config({
+          postgresUrl: database.runtimeUrl,
+          repositoryRoot,
+        }),
+        logger: logger(lines),
+      });
+      await assert.rejects(
+        application.start(),
+        /application\.error\.startup-failed/u,
+      );
+      assert.match(JSON.stringify(events(lines)), /repository-corrupt/u);
+    } finally {
+      await application?.close().catch(() => undefined);
+      await seed.end().catch(() => undefined);
+      await removeSeededProject(database, projectId);
+      await rm(work, { force: true, recursive: true });
+      await rm(projectDirectory, { force: true, recursive: true });
     }
   });
 
