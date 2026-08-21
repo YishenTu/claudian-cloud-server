@@ -1,5 +1,7 @@
 import { isAbsolute, normalize, parse } from 'node:path';
 
+import { COLLAB_CLOUD_BINDING_LIMITS } from '@claudian/collab-protocol';
+
 import {
   ConfigError,
   type ConfigSource,
@@ -17,6 +19,21 @@ export interface GitAdmissionConfig {
   readonly queueMax: number;
   readonly queueMaxPerProject: number;
   readonly queueTimeoutMs: number;
+}
+
+export interface DevelopmentBootstrapConfig {
+  readonly attemptTtlMs: number;
+  readonly maxBundleBytes: number;
+  readonly maxConcurrentUploads: number;
+  readonly maxRepositoryBytes: number;
+  readonly maxUploadsPerAttempt: number;
+  readonly queueMax: number;
+  readonly queueTimeoutMs: number;
+  readonly stagingFreeSpaceFloorBytes: number;
+  readonly stagingReservationBytes: number;
+  readonly stagingRoot: string;
+  readonly uploadDeadlineMs: number;
+  readonly uploadIdleTimeoutMs: number;
 }
 
 export interface HttpConfig {
@@ -41,6 +58,7 @@ export interface RepositoryConfig {
 }
 
 export interface ServerConfig {
+  readonly developmentBootstrap: DevelopmentBootstrapConfig;
   readonly gitAdmission: GitAdmissionConfig;
   readonly http: HttpConfig;
   readonly postgres: PostgresConfig;
@@ -53,6 +71,15 @@ const STORAGE_NODE_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
 
 const CONFIG_FIELDS = new Set([
   'CLAUDIAN_CLOUD_BIND_HOST',
+  'CLAUDIAN_CLOUD_BOOTSTRAP_ATTEMPT_TTL_MS',
+  'CLAUDIAN_CLOUD_BOOTSTRAP_MAX_BUNDLE_BYTES',
+  'CLAUDIAN_CLOUD_BOOTSTRAP_MAX_REPOSITORY_BYTES',
+  'CLAUDIAN_CLOUD_BOOTSTRAP_QUEUE_MAX',
+  'CLAUDIAN_CLOUD_BOOTSTRAP_QUEUE_TIMEOUT_MS',
+  'CLAUDIAN_CLOUD_BOOTSTRAP_STAGING_FREE_SPACE_FLOOR_BYTES',
+  'CLAUDIAN_CLOUD_BOOTSTRAP_STAGING_RESERVATION_BYTES',
+  'CLAUDIAN_CLOUD_BOOTSTRAP_UPLOAD_DEADLINE_MS',
+  'CLAUDIAN_CLOUD_BOOTSTRAP_UPLOAD_IDLE_TIMEOUT_MS',
   'CLAUDIAN_CLOUD_GIT_EXECUTABLE',
   'CLAUDIAN_CLOUD_GIT_MAX_CHILDREN',
   'CLAUDIAN_CLOUD_GIT_MAX_CHILDREN_PER_PROJECT',
@@ -68,6 +95,7 @@ const CONFIG_FIELDS = new Set([
   'CLAUDIAN_CLOUD_POSTGRES_URL',
   'CLAUDIAN_CLOUD_PROJECT_LOCK_TIMEOUT_MS',
   'CLAUDIAN_CLOUD_REPOSITORY_ROOT',
+  'CLAUDIAN_CLOUD_STAGING_ROOT',
   'CLAUDIAN_CLOUD_STORAGE_NODE_ID',
 ]);
 
@@ -124,6 +152,112 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
   if (host !== '127.0.0.1') {
     throw new ConfigError('profile-conflict', 'CLAUDIAN_CLOUD_BIND_HOST');
   }
+
+  const repositoryRoot = requireAbsoluteNormalizedPath(
+    source,
+    'CLAUDIAN_CLOUD_REPOSITORY_ROOT',
+  );
+  const stagingRoot = requireAbsoluteNormalizedPath(
+    source,
+    'CLAUDIAN_CLOUD_STAGING_ROOT',
+  );
+  invalidWhen(
+    stagingRoot === repositoryRoot
+      || parse(stagingRoot).dir !== parse(repositoryRoot).dir,
+    'CLAUDIAN_CLOUD_STAGING_ROOT',
+  );
+
+  const maxBundleBytes = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_BOOTSTRAP_MAX_BUNDLE_BYTES',
+    1,
+    COLLAB_CLOUD_BINDING_LIMITS.maxDevelopmentBootstrapGitBundleBytes,
+    COLLAB_CLOUD_BINDING_LIMITS.maxDevelopmentBootstrapGitBundleBytes,
+  );
+  const maxRepositoryBytes = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_BOOTSTRAP_MAX_REPOSITORY_BYTES',
+    1,
+    COLLAB_CLOUD_BINDING_LIMITS.maxDevelopmentBootstrapRepositoryBytes,
+    COLLAB_CLOUD_BINDING_LIMITS.maxDevelopmentBootstrapRepositoryBytes,
+  );
+  const stagingReservationBytes = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_BOOTSTRAP_STAGING_RESERVATION_BYTES',
+    1,
+    COLLAB_CLOUD_BINDING_LIMITS.maxDevelopmentBootstrapStagingBytes,
+    COLLAB_CLOUD_BINDING_LIMITS.maxDevelopmentBootstrapStagingBytes,
+  );
+  invalidWhen(
+    stagingReservationBytes < maxBundleBytes + maxRepositoryBytes,
+    'CLAUDIAN_CLOUD_BOOTSTRAP_STAGING_RESERVATION_BYTES',
+  );
+
+  const uploadIdleTimeoutMs = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_BOOTSTRAP_UPLOAD_IDLE_TIMEOUT_MS',
+    100,
+    COLLAB_CLOUD_BINDING_LIMITS.uploadIdleTimeoutMs,
+    COLLAB_CLOUD_BINDING_LIMITS.uploadIdleTimeoutMs,
+  );
+  const uploadDeadlineMs = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_BOOTSTRAP_UPLOAD_DEADLINE_MS',
+    100,
+    COLLAB_CLOUD_BINDING_LIMITS.uploadDeadlineMs,
+    COLLAB_CLOUD_BINDING_LIMITS.uploadDeadlineMs,
+  );
+  invalidWhen(
+    uploadDeadlineMs <= uploadIdleTimeoutMs,
+    'CLAUDIAN_CLOUD_BOOTSTRAP_UPLOAD_DEADLINE_MS',
+  );
+
+  const attemptTtlMs = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_BOOTSTRAP_ATTEMPT_TTL_MS',
+    COLLAB_CLOUD_BINDING_LIMITS.bootstrapAttemptTtlMs,
+    COLLAB_CLOUD_BINDING_LIMITS.bootstrapAttemptTtlMs,
+    COLLAB_CLOUD_BINDING_LIMITS.bootstrapAttemptTtlMs,
+  );
+  invalidWhen(
+    attemptTtlMs <= uploadDeadlineMs,
+    'CLAUDIAN_CLOUD_BOOTSTRAP_ATTEMPT_TTL_MS',
+  );
+
+  const developmentBootstrap = Object.freeze({
+    attemptTtlMs,
+    maxBundleBytes,
+    maxConcurrentUploads:
+      COLLAB_CLOUD_BINDING_LIMITS.defaultMaxConcurrentBootstrapUploads,
+    maxRepositoryBytes,
+    maxUploadsPerAttempt:
+      COLLAB_CLOUD_BINDING_LIMITS.maxUploadsPerBootstrapAttempt,
+    queueMax: parseInteger(
+      source,
+      'CLAUDIAN_CLOUD_BOOTSTRAP_QUEUE_MAX',
+      1,
+      1_024,
+      4,
+    ),
+    queueTimeoutMs: parseInteger(
+      source,
+      'CLAUDIAN_CLOUD_BOOTSTRAP_QUEUE_TIMEOUT_MS',
+      100,
+      300_000,
+      10_000,
+    ),
+    stagingFreeSpaceFloorBytes: parseInteger(
+      source,
+      'CLAUDIAN_CLOUD_BOOTSTRAP_STAGING_FREE_SPACE_FLOOR_BYTES',
+      64 * 1_024 * 1_024,
+      Number.MAX_SAFE_INTEGER,
+      COLLAB_CLOUD_BINDING_LIMITS.maxDevelopmentBootstrapGitBundleBytes,
+    ),
+    stagingReservationBytes,
+    stagingRoot,
+    uploadDeadlineMs,
+    uploadIdleTimeoutMs,
+  });
 
   const maxChildren = parseInteger(
     source,
@@ -233,14 +367,12 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
       67_108_864,
       1_048_576,
     ),
-    root: requireAbsoluteNormalizedPath(
-      source,
-      'CLAUDIAN_CLOUD_REPOSITORY_ROOT',
-    ),
+    root: repositoryRoot,
     storageNodeId: requireStorageNodeId(source),
   });
 
   return Object.freeze({
+    developmentBootstrap,
     gitAdmission,
     http,
     postgres,

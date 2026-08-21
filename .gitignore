@@ -3,7 +3,9 @@
 .env
 .env.*
 !.env.example
+!.env.bootstrap.example
 !.env.migration.example
+!.env.postgres.example
 *.key
 *.pem
 *.log

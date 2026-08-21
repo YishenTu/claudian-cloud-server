@@ -1,17 +1,106 @@
 name: claudian-cloud-server
 
+x-cloud-image: &cloud-image
+  image: ${CLAUDIAN_CLOUD_IMAGE:-claudian-cloud-server:local}
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+
+x-one-shot-security: &one-shot-security
+  init: true
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=64m
+  restart: "no"
+
 services:
+  postgres:
+    image: postgres@sha256:7d2695c3aa88e792e8b3b233e7e4adb296a20412c6c0ca361e3edaaacfada108
+    network_mode: host
+    env_file:
+      - path: ${CLAUDIAN_CLOUD_POSTGRES_ENV_FILE:-/etc/claudian-cloud-server/postgres.env}
+        required: true
+    environment:
+      PGPORT: ${CLAUDIAN_CLOUD_POSTGRES_PORT:-5432}
+    command:
+      - postgres
+      - -c
+      - listen_addresses=127.0.0.1
+      - -c
+      - port=${CLAUDIAN_CLOUD_POSTGRES_PORT:-5432}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          pg_isready --host 127.0.0.1 --port "$${PGPORT}"
+          --username "$${POSTGRES_USER}" --dbname "$${POSTGRES_DB}"
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  cloud-bootstrap:
+    <<: *one-shot-security
+    image: postgres@sha256:7d2695c3aa88e792e8b3b233e7e4adb296a20412c6c0ca361e3edaaacfada108
+    profiles:
+      - bootstrap
+    network_mode: host
+    user: "0:0"
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    env_file:
+      - path: ${CLAUDIAN_CLOUD_BOOTSTRAP_ENV_FILE:-/etc/claudian-cloud-server/bootstrap.env}
+        required: true
+    environment:
+      PGPORT: ${CLAUDIAN_CLOUD_POSTGRES_PORT:-5432}
+    entrypoint:
+      - /bin/bash
+      - /usr/local/bin/bootstrap-postgres.sh
+    volumes:
+      - cloud-authority:/var/lib/claudian-cloud
+      - ./bootstrap-postgres.sh:/usr/local/bin/bootstrap-postgres.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  cloud-migration:
+    <<: [*cloud-image, *one-shot-security]
+    profiles:
+      - migration
+    network_mode: host
+    user: "10001:10001"
+    env_file:
+      - path: ${CLAUDIAN_CLOUD_MIGRATION_ENV_FILE:-/etc/claudian-cloud-server/migration.env}
+        required: true
+    command:
+      - node
+      - dist/migrate.js
+
   cloud-server:
-    image: ${CLAUDIAN_CLOUD_IMAGE:-claudian-cloud-server:local}
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
+    <<: *cloud-image
     network_mode: host
     env_file:
       - path: ${CLAUDIAN_CLOUD_ENV_FILE:-/etc/claudian-cloud-server/server.env}
         required: true
     environment:
       NODE_ENV: production
+    volumes:
+      - cloud-authority:/var/lib/claudian-cloud
     init: true
     read_only: true
     user: "10001:10001"
@@ -45,3 +134,7 @@ services:
       options:
         max-size: 10m
         max-file: "3"
+
+volumes:
+  cloud-authority:
+  postgres-data:

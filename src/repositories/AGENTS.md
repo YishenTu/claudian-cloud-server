@@ -5,7 +5,8 @@
 - This is the only scope that resolves repository storage keys into paths or starts Git processes. Callers pass a server-derived placement lease containing Project, node, opaque storage key, and generation; they never pass raw paths.
 - Validate placement state and generation before execution and again before a mutation. Stale generations, wrong nodes, maintenance state, or unavailable fence authority fail closed.
 - User-controlled names never form paths. Enforce normalized and real-path containment, no symlink roots or repository entries, and server-owned hooks and configuration.
-- Development staging and canonical repositories are sibling paths on one authority filesystem. Publication requires an exact validation marker and one atomic rename; repository presence or absence never decides activation, cancellation, or recovery without the Project-authority journal.
+- Development staging and canonical repositories are sibling paths on one authority filesystem. Publication requires an exact validation marker, live object-format/ref/OID/integrity verification, and one atomic rename; repository presence or absence never decides activation, cancellation, or recovery without the Project-authority journal.
+- Startup revalidates every active catalog placement under its Project lock and requires exact protected main plus active-member branch refs before readiness. Marker files never substitute for live Git verification.
 
 ## Git execution
 

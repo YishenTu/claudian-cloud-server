@@ -1,10 +1,48 @@
 import {
+  COLLAB_LIMITS,
+  isCollabGitOid,
   isCollabMemberId,
+  isCollabOpaqueId,
+  isCollabProjectId,
   type CollabMemberId,
   type CollabProjectId,
 } from '@claudian/collab-protocol';
 import { Pool, type PoolClient, type QueryResultRow } from 'pg';
 
+import {
+  type DevelopmentBootstrapAttemptLocator,
+  type ExpiredDevelopmentBootstrapAttempt,
+  type ExpiredDevelopmentBootstrapAttemptCatalog,
+  type ExpiredDevelopmentBootstrapAttemptCursor,
+  type ExpiredDevelopmentBootstrapAttemptPage,
+  type ListExpiredDevelopmentBootstrapAttemptsOptions,
+  type ListRecoveryCandidatesOptions,
+  type RecoveryCandidate,
+  type RecoveryCandidateCatalog,
+  type RecoveryCandidateCursor,
+  type RecoveryCandidatePage,
+} from '../DevelopmentBootstrapPersistence.js';
+import {
+  type ProjectRecord,
+} from '../ProjectPersistence.js';
+import type {
+  AcquireProjectLeaseOptions,
+  ActiveRepositoryPlacementPage,
+  DevelopmentBootstrapUploadLease,
+  ListActiveRepositoryPlacementsOptions,
+  PinnedProjectLease,
+  ProjectMembershipRecord,
+  ProjectScope,
+} from '../ProjectCoordination.js';
+export type {
+  AcquireProjectLeaseOptions,
+  ActiveRepositoryPlacementPage,
+  DevelopmentBootstrapUploadLease,
+  ListActiveRepositoryPlacementsOptions,
+  PinnedProjectLease,
+  ProjectMembershipRecord,
+  ProjectScope,
+} from '../ProjectCoordination.js';
 import {
   assertRepositoryPlacementLease,
   createRepositoryPlacementLease,
@@ -12,8 +50,12 @@ import {
   type RepositoryPlacementValidator,
 } from '../../repositories/RepositoryPlacement.js';
 import { CoordinationError } from '../CoordinationError.js';
-import { projectLockKey } from '../ProjectLockKey.js';
-import { FOUNDATION_SCHEMA } from './PostgresSchema.js';
+import {
+  developmentBootstrapUploadLockKey,
+  projectLockKey,
+} from '../ProjectLockKey.js';
+import { PostgresDevelopmentBootstrapPersistence } from './PostgresDevelopmentBootstrapPersistence.js';
+import { POSTGRES_SCHEMAS } from './PostgresSchema.js';
 
 export interface PostgresCoordinationOptions {
   readonly ordinaryPoolMax: number;
@@ -24,28 +66,8 @@ export interface PostgresCoordinationOptions {
   readonly shutdownTimeoutMs: number;
 }
 
-export interface AcquireProjectLeaseOptions {
-  readonly signal?: AbortSignal;
-}
-
-export interface ProjectMembershipRecord {
-  readonly memberId: CollabMemberId;
-  readonly revision: bigint;
-  readonly role: 'manager' | 'member';
-  readonly status: 'active' | 'left' | 'pending' | 'revoked';
-}
-
-export interface ProjectScope {
-  findMembership(memberId: CollabMemberId): Promise<ProjectMembershipRecord | undefined>;
-  getRepositoryPlacement(): Promise<RepositoryPlacementLease | undefined>;
-}
-
-export interface PinnedProjectLease {
-  close(): Promise<void>;
-  withProjectScope<T>(operation: (scope: ProjectScope) => Promise<T>): Promise<T>;
-}
-
 interface MembershipRow {
+  readonly display_name: string;
   readonly member_id: string;
   readonly revision: string;
   readonly role: string;
@@ -60,6 +82,16 @@ interface PlacementRow {
   readonly storage_node_id: string;
 }
 
+interface ProjectRow {
+  readonly activated_at: Date;
+  readonly created_at: Date;
+  readonly expected_main_oid: string;
+  readonly manager_set_generation: string;
+  readonly project_id: string;
+  readonly project_name: string;
+  readonly service_state: string;
+}
+
 interface MigrationRow {
   readonly checksum: string;
   readonly name: string;
@@ -67,10 +99,28 @@ interface MigrationRow {
   readonly version: number;
 }
 
+interface RecoveryCandidateRow {
+  readonly kind: string;
+  readonly operation_id: string;
+  readonly project_id: string;
+  readonly scheduled_at: Date;
+}
+
+interface BootstrapAttemptRouteRow {
+  readonly project_id: string | null;
+}
+
+interface ExpiredBootstrapAttemptRow {
+  readonly attempt_id: string;
+  readonly expires_at: Date;
+  readonly project_id: string;
+}
+
 type MarkBroken = () => void;
 
 const LOCK_RETRY_INTERVAL_MS = 5;
 const RUNTIME_ROLE = 'claudian_cloud_runtime';
+const AUTHORITY_VOLUME_ID_PATTERN = /^[0-9a-f]{32}$/u;
 
 function dependencyFailure(): CoordinationError {
   return new CoordinationError('dependency-failed');
@@ -78,6 +128,74 @@ function dependencyFailure(): CoordinationError {
 
 function handleIdlePoolError(_error: Error): void {
   // pg removes the failed idle client; the next operation reconnects or fails safely.
+}
+
+function validateRecoveryCursor(cursor: RecoveryCandidateCursor): void {
+  if (
+    !isCollabProjectId(cursor.projectId)
+    || !isCollabOpaqueId(cursor.operationId)
+    || Number.isNaN(Date.parse(cursor.scheduledAt))
+    || new Date(cursor.scheduledAt).toISOString() !== cursor.scheduledAt
+  ) {
+    throw new CoordinationError('invalid-record');
+  }
+}
+
+function recoveryCandidate(row: RecoveryCandidateRow): RecoveryCandidate {
+  if (
+    (row.kind !== 'activation' && row.kind !== 'accept')
+    || !isCollabProjectId(row.project_id)
+    || !isCollabOpaqueId(row.operation_id)
+    || !(row.scheduled_at instanceof Date)
+    || Number.isNaN(row.scheduled_at.valueOf())
+  ) {
+    throw dependencyFailure();
+  }
+  return Object.freeze({
+    kind: row.kind,
+    operationId: row.operation_id,
+    projectId: row.project_id,
+    scheduledAt: row.scheduled_at.toISOString(),
+  });
+}
+
+function validateIsoTimestamp(value: string): void {
+  if (
+    Number.isNaN(Date.parse(value))
+    || new Date(value).toISOString() !== value
+  ) {
+    throw new CoordinationError('invalid-record');
+  }
+}
+
+function validateExpiredAttemptCursor(
+  cursor: ExpiredDevelopmentBootstrapAttemptCursor,
+): void {
+  validateIsoTimestamp(cursor.expiresAt);
+  if (
+    !isCollabProjectId(cursor.projectId)
+    || !isCollabOpaqueId(cursor.attemptId)
+  ) {
+    throw new CoordinationError('invalid-record');
+  }
+}
+
+function expiredAttempt(
+  row: ExpiredBootstrapAttemptRow,
+): ExpiredDevelopmentBootstrapAttempt {
+  if (
+    !isCollabProjectId(row.project_id)
+    || !isCollabOpaqueId(row.attempt_id)
+    || !(row.expires_at instanceof Date)
+    || Number.isNaN(row.expires_at.valueOf())
+  ) {
+    throw dependencyFailure();
+  }
+  return Object.freeze({
+    attemptId: row.attempt_id,
+    expiresAt: row.expires_at.toISOString(),
+    projectId: row.project_id,
+  });
 }
 
 class CheckedOutPoolClient {
@@ -289,36 +407,39 @@ async function checkout(
   });
 }
 
-class PostgresProjectScope implements ProjectScope {
+class PostgresProjectScope
+  extends PostgresDevelopmentBootstrapPersistence
+  implements ProjectScope {
   readonly #client: PoolClient;
   readonly #markBroken: MarkBroken;
   readonly #projectId: CollabProjectId;
-  #active = true;
 
   constructor(
     client: PoolClient,
     projectId: CollabProjectId,
     markBroken: MarkBroken,
   ) {
+    super(
+      projectId,
+      <Row extends QueryResultRow>(text: string, values: readonly unknown[]) => (
+        safeQuery<Row>(client, text, values, markBroken)
+      ),
+    );
     this.#client = client;
     this.#projectId = projectId;
     this.#markBroken = markBroken;
   }
 
-  deactivate(): void {
-    this.#active = false;
-  }
-
   async findMembership(
     memberId: CollabMemberId,
   ): Promise<ProjectMembershipRecord | undefined> {
-    this.#assertActive();
+    this.assertActive();
     if (!isCollabMemberId(memberId)) {
       throw new CoordinationError('invalid-member');
     }
     const rows = await safeQuery<MembershipRow>(
       this.#client,
-      `SELECT member_id, role, status, revision
+      `SELECT display_name, member_id, role, status, revision
          FROM claudian_cloud.project_memberships
         WHERE project_id = $1 AND member_id = $2`,
       [this.#projectId, memberId],
@@ -328,12 +449,15 @@ class PostgresProjectScope implements ProjectScope {
     if (row === undefined) return undefined;
     if (
       !isCollabMemberId(row.member_id)
+      || row.display_name.length === 0
+      || row.display_name.length > COLLAB_LIMITS.maxMemberDisplayNameUtf16
       || (row.role !== 'manager' && row.role !== 'member')
       || !['active', 'left', 'pending', 'revoked'].includes(row.status)
     ) {
       throw dependencyFailure();
     }
     return Object.freeze({
+      displayName: row.display_name,
       memberId: row.member_id,
       revision: BigInt(row.revision),
       role: row.role,
@@ -341,8 +465,106 @@ class PostgresProjectScope implements ProjectScope {
     });
   }
 
+  async listMemberships(): Promise<readonly ProjectMembershipRecord[]> {
+    this.assertActive();
+    const rows = await safeQuery<MembershipRow>(
+      this.#client,
+      `SELECT display_name, member_id, role, status, revision
+         FROM claudian_cloud.project_memberships
+        WHERE project_id = $1
+        ORDER BY member_id`,
+      [this.#projectId],
+      this.#markBroken,
+    );
+    return Object.freeze(rows.map(row => {
+      const revision = BigInt(row.revision);
+      if (
+        !isCollabMemberId(row.member_id)
+        || row.display_name.length === 0
+        || row.display_name.length > COLLAB_LIMITS.maxMemberDisplayNameUtf16
+        || (row.role !== 'manager' && row.role !== 'member')
+        || !['active', 'left', 'pending', 'revoked'].includes(row.status)
+        || revision < 0n
+      ) {
+        throw dependencyFailure();
+      }
+      return Object.freeze({
+        displayName: row.display_name,
+        memberId: row.member_id,
+        revision,
+        role: row.role,
+        status: row.status as ProjectMembershipRecord['status'],
+      });
+    }));
+  }
+
+  async findDevelopmentActorMember(
+    actorId: string,
+  ): Promise<CollabMemberId | undefined> {
+    this.assertActive();
+    if (!isCollabMemberId(actorId)) {
+      throw new CoordinationError('invalid-member');
+    }
+    const rows = await safeQuery<{ readonly member_id: string }>(
+      this.#client,
+      `SELECT member_id
+         FROM claudian_cloud.development_actor_mappings
+        WHERE project_id = $1 AND actor_id = $2`,
+      [this.#projectId, actorId],
+      this.#markBroken,
+    );
+    const memberId = rows[0]?.member_id;
+    if (memberId === undefined) return undefined;
+    if (!isCollabMemberId(memberId)) throw dependencyFailure();
+    return memberId;
+  }
+
+  async getProject(): Promise<ProjectRecord | undefined> {
+    this.assertActive();
+    const rows = await safeQuery<ProjectRow>(
+      this.#client,
+      `SELECT project_id,
+              project_name,
+              manager_set_generation,
+              expected_main_oid,
+              service_state,
+              created_at,
+              activated_at
+         FROM claudian_cloud.projects
+        WHERE project_id = $1`,
+      [this.#projectId],
+      this.#markBroken,
+    );
+    const row = rows[0];
+    if (row === undefined) return undefined;
+    const managerSetGeneration = Number(row.manager_set_generation);
+    if (
+      row.project_id !== this.#projectId
+      || row.project_name.length === 0
+      || !Number.isSafeInteger(managerSetGeneration)
+      || managerSetGeneration < 0
+      || !isCollabGitOid(row.expected_main_oid)
+      || (row.service_state !== 'active' && row.service_state !== 'recovery-required')
+      || !(row.created_at instanceof Date)
+      || Number.isNaN(row.created_at.valueOf())
+      || !(row.activated_at instanceof Date)
+      || Number.isNaN(row.activated_at.valueOf())
+    ) {
+      throw dependencyFailure();
+    }
+    return Object.freeze({
+      activatedAt: row.activated_at.toISOString(),
+      createdAt: row.created_at.toISOString(),
+      expectedMainOid: row.expected_main_oid,
+      managerSetGeneration,
+      projectId: row.project_id,
+      projectName: row.project_name,
+      serviceState: row.service_state,
+    });
+  }
+
   async getRepositoryPlacement(): Promise<RepositoryPlacementLease | undefined> {
-    this.#assertActive();
+    this.assertActive();
     const rows = await safeQuery<PlacementRow>(
       this.#client,
       `SELECT project_id,
@@ -367,9 +589,6 @@ class PostgresProjectScope implements ProjectScope {
     });
   }
 
-  #assertActive(): void {
-    if (!this.#active) throw new CoordinationError('closed');
-  }
 }
 
 async function rollback(
@@ -438,6 +657,7 @@ class PostgresPinnedProjectLease implements PinnedProjectLease {
   #activeOperation: Promise<void> | undefined;
   #closePromise: Promise<void> | undefined;
   #closed = false;
+  #transferred = false;
   #transactionActive = false;
 
   constructor(
@@ -454,7 +674,9 @@ class PostgresPinnedProjectLease implements PinnedProjectLease {
   close(): Promise<void> {
     if (this.#closePromise === undefined) {
       this.#closed = true;
-      this.#closePromise = this.#finishClose();
+      this.#closePromise = this.#transferred
+        ? Promise.resolve()
+        : this.#finishClose();
     }
     return this.#closePromise;
   }
@@ -489,6 +711,86 @@ class PostgresPinnedProjectLease implements PinnedProjectLease {
     }
   }
 
+  async drainDevelopmentBootstrapUploads(attemptId: string): Promise<void> {
+    if (this.#closed || this.#transferred) throw new CoordinationError('closed');
+    if (this.#checkedOutClient.isBroken()) throw dependencyFailure();
+    if (this.#transactionActive) throw new CoordinationError('lease-busy');
+    const uploadLockKey = developmentBootstrapUploadLockKey(
+      this.#projectId,
+      attemptId,
+    );
+    for (;;) {
+      const rows = await safeQuery<{ readonly acquired: boolean }>(
+        this.#client,
+        'SELECT pg_try_advisory_lock($1::bigint) AS acquired',
+        [uploadLockKey.toString()],
+        this.#checkedOutClient.markBroken,
+      );
+      if (rows[0]?.acquired === true) break;
+      await new Promise<void>(resolve => {
+        const timer = setTimeout(resolve, LOCK_RETRY_INTERVAL_MS);
+        timer.unref();
+      });
+      if (this.#checkedOutClient.isBroken()) {
+        throw dependencyFailure();
+      }
+    }
+    const rows = await safeQuery<{ readonly unlocked: boolean }>(
+      this.#client,
+      'SELECT pg_advisory_unlock($1::bigint) AS unlocked',
+      [uploadLockKey.toString()],
+      this.#checkedOutClient.markBroken,
+    );
+    if (rows[0]?.unlocked !== true) throw dependencyFailure();
+  }
+
+  async handoffToDevelopmentBootstrapUpload(
+    attemptId: string,
+  ): Promise<DevelopmentBootstrapUploadLease> {
+    if (this.#closed || this.#transferred) throw new CoordinationError('closed');
+    if (this.#checkedOutClient.isBroken()) throw dependencyFailure();
+    if (this.#transactionActive) throw new CoordinationError('lease-busy');
+    const uploadLockKey = developmentBootstrapUploadLockKey(
+      this.#projectId,
+      attemptId,
+    );
+    let sharedAcquired = false;
+    try {
+      await safeQuery(
+        this.#client,
+        'SELECT pg_advisory_lock_shared($1::bigint)',
+        [uploadLockKey.toString()],
+        this.#checkedOutClient.markBroken,
+      );
+      sharedAcquired = true;
+      const rows = await safeQuery<{ readonly unlocked: boolean }>(
+        this.#client,
+        'SELECT pg_advisory_unlock($1::bigint) AS unlocked',
+        [this.#lockKey.toString()],
+        this.#checkedOutClient.markBroken,
+      );
+      if (rows[0]?.unlocked !== true) throw dependencyFailure();
+      this.#transferred = true;
+      this.#closed = true;
+      return new PostgresDevelopmentBootstrapUploadLease(
+        this.#checkedOutClient,
+        uploadLockKey,
+      );
+    } catch (error: unknown) {
+      if (sharedAcquired) {
+        try {
+          await this.#client.query(
+            'SELECT pg_advisory_unlock_shared($1::bigint)',
+            [uploadLockKey.toString()],
+          );
+        } catch {
+          this.#checkedOutClient.markBroken();
+        }
+      }
+      throw error;
+    }
+  }
+
   async #finishClose(): Promise<void> {
     await this.#activeOperation;
     let releasedCleanly = false;
@@ -516,7 +818,50 @@ class PostgresPinnedProjectLease implements PinnedProjectLease {
   }
 }
 
-export class PostgresCoordination implements RepositoryPlacementValidator {
+class PostgresDevelopmentBootstrapUploadLease
+implements DevelopmentBootstrapUploadLease {
+  readonly #checkedOutClient: CheckedOutPoolClient;
+  readonly #client: PoolClient;
+  readonly #lockKey: bigint;
+  #closePromise: Promise<void> | undefined;
+
+  constructor(checkedOutClient: CheckedOutPoolClient, lockKey: bigint) {
+    this.#checkedOutClient = checkedOutClient;
+    this.#client = checkedOutClient.client;
+    this.#lockKey = lockKey;
+  }
+
+  close(): Promise<void> {
+    this.#closePromise ??= this.#finishClose();
+    return this.#closePromise;
+  }
+
+  async #finishClose(): Promise<void> {
+    let releasedCleanly = false;
+    try {
+      if (this.#checkedOutClient.isBroken()) throw dependencyFailure();
+      const rows = await safeQuery<{ readonly unlocked: boolean }>(
+        this.#client,
+        'SELECT pg_advisory_unlock_shared($1::bigint) AS unlocked',
+        [this.#lockKey.toString()],
+        this.#checkedOutClient.markBroken,
+      );
+      if (rows[0]?.unlocked !== true) {
+        this.#checkedOutClient.markBroken();
+        throw dependencyFailure();
+      }
+      releasedCleanly = true;
+    } finally {
+      this.#checkedOutClient.release(!releasedCleanly);
+    }
+    if (this.#checkedOutClient.isBroken()) throw dependencyFailure();
+  }
+}
+
+export class PostgresCoordination
+  implements DevelopmentBootstrapAttemptLocator,
+  ExpiredDevelopmentBootstrapAttemptCatalog, RecoveryCandidateCatalog,
+  RepositoryPlacementValidator {
   readonly #checkedOutClients = new CheckedOutPoolClients();
   readonly #ordinaryPool: Pool;
   readonly #pinnedPool: Pool;
@@ -588,6 +933,209 @@ export class PostgresCoordination implements RepositoryPlacementValidator {
     return this.#closePromise;
   }
 
+  async listRecoveryCandidates(
+    options: ListRecoveryCandidatesOptions = {},
+  ): Promise<RecoveryCandidatePage> {
+    this.#assertOpen();
+    const limit = options.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new CoordinationError('invalid-record');
+    }
+    const after = options.after;
+    if (after !== undefined) validateRecoveryCursor(after);
+
+    const deadline = Date.now() + this.#projectLockTimeoutMs;
+    const checkedOut = await checkout(
+      this.#reservedPool,
+      deadline,
+      undefined,
+      this.#checkedOutClients,
+    );
+    try {
+      const rows = after === undefined
+        ? await safeQuery<RecoveryCandidateRow>(
+          checkedOut.client,
+          `SELECT kind, project_id, operation_id, scheduled_at
+             FROM claudian_cloud.recovery_candidates
+            ORDER BY scheduled_at, kind, project_id, operation_id
+            LIMIT $1`,
+          [limit + 1],
+          checkedOut.markBroken,
+        )
+        : await safeQuery<RecoveryCandidateRow>(
+          checkedOut.client,
+          `SELECT kind, project_id, operation_id, scheduled_at
+             FROM claudian_cloud.recovery_candidates
+            WHERE (scheduled_at, kind, project_id, operation_id)
+                > ($1::timestamptz, $2, $3, $4)
+            ORDER BY scheduled_at, kind, project_id, operation_id
+            LIMIT $5`,
+          [
+            after.scheduledAt,
+            after.kind,
+            after.projectId,
+            after.operationId,
+            limit + 1,
+          ],
+          checkedOut.markBroken,
+        );
+      const pageRows = rows.slice(0, limit);
+      const candidates = Object.freeze(pageRows.map(recoveryCandidate));
+      const last = pageRows.at(-1);
+      const nextCursor = rows.length > limit && last !== undefined
+        ? recoveryCandidate(last)
+        : undefined;
+      return Object.freeze({ candidates, nextCursor });
+    } finally {
+      checkedOut.release();
+    }
+  }
+
+  async listActiveRepositoryPlacements(
+    options: ListActiveRepositoryPlacementsOptions = {},
+  ): Promise<ActiveRepositoryPlacementPage> {
+    this.#assertOpen();
+    const limit = options.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new CoordinationError('invalid-record');
+    }
+    if (options.after !== undefined && !isCollabProjectId(options.after)) {
+      throw new CoordinationError('invalid-record');
+    }
+    const deadline = Date.now() + this.#projectLockTimeoutMs;
+    const checkedOut = await checkout(
+      this.#reservedPool,
+      deadline,
+      undefined,
+      this.#checkedOutClients,
+    );
+    try {
+      const rows = await safeQuery<PlacementRow>(
+        checkedOut.client,
+        `SELECT project_id,
+                storage_node_id,
+                repository_storage_key,
+                generation,
+                true AS active
+           FROM claudian_cloud.active_repository_placement_catalog
+          WHERE $1::varchar IS NULL OR project_id > $1
+          ORDER BY project_id
+          LIMIT $2`,
+        [options.after ?? null, limit + 1],
+        checkedOut.markBroken,
+      );
+      const pageRows = rows.slice(0, limit);
+      const placements = Object.freeze(pageRows.map(row => (
+        createRepositoryPlacementLease({
+          active: row.active,
+          generation: Number(row.generation),
+          projectId: row.project_id,
+          repositoryStorageKey: row.repository_storage_key,
+          storageNodeId: row.storage_node_id,
+        })
+      )));
+      const last = placements.at(-1);
+      return Object.freeze({
+        nextCursor: rows.length > limit ? last?.projectId : undefined,
+        placements,
+      });
+    } finally {
+      checkedOut.release();
+    }
+  }
+
+  async listExpiredDevelopmentBootstrapAttempts(
+    options: ListExpiredDevelopmentBootstrapAttemptsOptions,
+  ): Promise<ExpiredDevelopmentBootstrapAttemptPage> {
+    this.#assertOpen();
+    validateIsoTimestamp(options.expiredBefore);
+    const limit = options.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new CoordinationError('invalid-record');
+    }
+    const after = options.after;
+    if (after !== undefined) validateExpiredAttemptCursor(after);
+
+    const deadline = Date.now() + this.#projectLockTimeoutMs;
+    const checkedOut = await checkout(
+      this.#reservedPool,
+      deadline,
+      undefined,
+      this.#checkedOutClients,
+    );
+    try {
+      const rows = after === undefined
+        ? await safeQuery<ExpiredBootstrapAttemptRow>(
+          checkedOut.client,
+          `SELECT project_id, attempt_id, expires_at
+             FROM claudian_cloud.development_bootstrap_expiry_candidates
+            WHERE expires_at <= $1
+            ORDER BY expires_at, project_id, attempt_id
+            LIMIT $2`,
+          [options.expiredBefore, limit + 1],
+          checkedOut.markBroken,
+        )
+        : await safeQuery<ExpiredBootstrapAttemptRow>(
+          checkedOut.client,
+          `SELECT project_id, attempt_id, expires_at
+             FROM claudian_cloud.development_bootstrap_expiry_candidates
+            WHERE expires_at <= $1
+              AND (expires_at, project_id, attempt_id)
+                  > ($2::timestamptz, $3, $4)
+            ORDER BY expires_at, project_id, attempt_id
+            LIMIT $5`,
+          [
+            options.expiredBefore,
+            after.expiresAt,
+            after.projectId,
+            after.attemptId,
+            limit + 1,
+          ],
+          checkedOut.markBroken,
+        );
+      const pageRows = rows.slice(0, limit);
+      const attempts = Object.freeze(pageRows.map(expiredAttempt));
+      const last = pageRows.at(-1);
+      const nextCursor = rows.length > limit && last !== undefined
+        ? expiredAttempt(last)
+        : undefined;
+      return Object.freeze({ attempts, nextCursor });
+    } finally {
+      checkedOut.release();
+    }
+  }
+
+  async findDevelopmentBootstrapProject(
+    attemptId: string,
+  ): Promise<CollabProjectId | undefined> {
+    this.#assertOpen();
+    if (!isCollabOpaqueId(attemptId)) {
+      throw new CoordinationError('invalid-record');
+    }
+    const deadline = Date.now() + this.#projectLockTimeoutMs;
+    const checkedOut = await checkout(
+      this.#reservedPool,
+      deadline,
+      undefined,
+      this.#checkedOutClients,
+    );
+    try {
+      const rows = await safeQuery<BootstrapAttemptRouteRow>(
+        checkedOut.client,
+        `SELECT claudian_cloud.find_development_bootstrap_project($1)
+              AS project_id`,
+        [attemptId],
+        checkedOut.markBroken,
+      );
+      const projectId = rows[0]?.project_id;
+      if (projectId === null || projectId === undefined) return undefined;
+      if (!isCollabProjectId(projectId)) throw dependencyFailure();
+      return projectId;
+    } finally {
+      checkedOut.release();
+    }
+  }
+
   async isCurrent(placement: RepositoryPlacementLease): Promise<boolean> {
     assertRepositoryPlacementLease(placement);
     const current = await this.#withReadScope(
@@ -638,14 +1186,49 @@ export class PostgresCoordination implements RepositoryPlacementValidator {
         [],
         checkedOut.markBroken,
       );
-      if (
-        rows.length !== 1
-        || rows[0]?.version !== FOUNDATION_SCHEMA.version
-        || rows[0].name !== FOUNDATION_SCHEMA.name
-        || rows[0].checksum !== FOUNDATION_SCHEMA.checksum
-        || rows[0].state !== 'applied'
-      ) {
+      if (rows.length !== POSTGRES_SCHEMAS.length) {
         throw new CoordinationError('schema-incompatible');
+      }
+      for (const [index, schema] of POSTGRES_SCHEMAS.entries()) {
+        const row = rows[index];
+        if (
+          row?.version !== schema.version
+          || row.name !== schema.name
+          || row.checksum !== schema.checksum
+          || row.state !== 'applied'
+        ) {
+          throw new CoordinationError('schema-incompatible');
+        }
+      }
+    } finally {
+      checkedOut.release();
+    }
+  }
+
+  async verifyAuthorityVolumeId(expected: string): Promise<void> {
+    this.#assertOpen();
+    if (!AUTHORITY_VOLUME_ID_PATTERN.test(expected)) {
+      throw new CoordinationError('authority-volume-mismatch');
+    }
+    const deadline = Date.now() + this.#projectLockTimeoutMs;
+    const checkedOut = await checkout(
+      this.#reservedPool,
+      deadline,
+      undefined,
+      this.#checkedOutClients,
+    );
+    try {
+      const rows = await safeQuery<{ readonly authority_volume_id: string | null }>(
+        checkedOut.client,
+        `SELECT current_setting(
+                  'claudian_cloud.authority_volume_id',
+                  true
+                ) AS authority_volume_id`,
+        [],
+        checkedOut.markBroken,
+      );
+      if (rows[0]?.authority_volume_id !== expected) {
+        throw new CoordinationError('authority-volume-mismatch');
       }
     } finally {
       checkedOut.release();

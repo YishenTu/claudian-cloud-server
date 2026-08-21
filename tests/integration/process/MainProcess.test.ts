@@ -15,6 +15,7 @@ describe('main process', () => {
         CLAUDIAN_CLOUD_PORT: '49152',
         CLAUDIAN_CLOUD_POSTGRES_URL: `postgresql://runtime:${credential}@127.0.0.1:1/cloud-test`,
         CLAUDIAN_CLOUD_REPOSITORY_ROOT: '/tmp/claudian-cloud-test-repositories',
+        CLAUDIAN_CLOUD_STAGING_ROOT: '/tmp/claudian-cloud-test-staging',
         CLAUDIAN_CLOUD_STORAGE_NODE_ID: 'test-node',
       },
       stdio: ['ignore', 'pipe', 'pipe'],

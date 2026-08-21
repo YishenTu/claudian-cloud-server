@@ -63,15 +63,26 @@ async function seedProject(
       [input.projectId],
     );
     await client.query(
-      `INSERT INTO claudian_cloud.projects (project_id, created_at)
-       VALUES ($1, clock_timestamp())`,
+      `INSERT INTO claudian_cloud.projects (
+         project_id,
+         project_name,
+         manager_set_generation,
+         expected_main_oid,
+         service_state,
+         created_at,
+         activated_at
+       ) VALUES (
+         $1, 'Overlapping Project', 1, repeat('a', 40), 'active',
+         clock_timestamp(), clock_timestamp()
+       )`,
       [input.projectId],
     );
     await client.query(
       `INSERT INTO claudian_cloud.project_memberships (
-         project_id, member_id, role, status, revision, created_at, updated_at
+         project_id, member_id, display_name, role, status, revision,
+         created_at, updated_at
        ) VALUES (
-         $1, 'overlapping-member', $2, 'active', 1,
+         $1, 'overlapping-member', 'Overlapping member', $2, 'active', 1,
          clock_timestamp(), clock_timestamp()
        )`,
       [input.projectId, input.role],
@@ -83,6 +94,12 @@ async function seedProject(
        ) VALUES (
          $1, 'node-a', $2, 1, true, clock_timestamp(), clock_timestamp()
        )`,
+      [input.projectId, input.repositoryStorageKey],
+    );
+    await client.query(
+      `INSERT INTO claudian_cloud.active_repository_placement_catalog (
+         project_id, storage_node_id, repository_storage_key, generation
+       ) VALUES ($1, 'node-a', $2, 1)`,
       [input.projectId, input.repositoryStorageKey],
     );
     await client.query('COMMIT');
@@ -255,6 +272,56 @@ async function replaceMigrationChecksum(
 }
 
 describe('PostgresCoordination', () => {
+  it('hands Project admission to a cross-process upload fence without a gap', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({
+        connectionString: database.migrationUrl,
+      }).apply();
+      const first = new PostgresCoordination({
+        ordinaryPoolMax: 1,
+        pinnedPoolMax: 1,
+        projectLockTimeoutMs: 1_000,
+        reservedPoolMax: 1,
+        runtimeConnectionString: database.runtimeUrl,
+        shutdownTimeoutMs: 2_000,
+      });
+      const second = new PostgresCoordination({
+        ordinaryPoolMax: 1,
+        pinnedPoolMax: 1,
+        projectLockTimeoutMs: 1_000,
+        reservedPoolMax: 1,
+        runtimeConnectionString: database.runtimeUrl,
+        shutdownTimeoutMs: 2_000,
+      });
+      try {
+        const admission = await first.acquireProjectLease('project-upload');
+        const upload = await admission.handoffToDevelopmentBootstrapUpload(
+          'attempt-upload',
+        );
+        await admission.close();
+
+        const settlement = await second.acquireProjectLease('project-upload');
+        const draining = settlement.drainDevelopmentBootstrapUploads(
+          'attempt-upload',
+        );
+        const settledEarly = await Promise.race([
+          draining.then(() => true),
+          new Promise<false>(resolve => setTimeout(() => resolve(false), 25)),
+        ]);
+        assert.equal(settledEarly, false);
+
+        await upload.close();
+        await draining;
+        await settlement.close();
+      } finally {
+        await Promise.all([
+          first.close().catch(() => undefined),
+          second.close().catch(() => undefined),
+        ]);
+      }
+    });
+  });
+
   it('owns Project scope, lock contention, pool isolation, and placement reads', async () => {
     await withPostgresTestDatabase(async database => {
       await new PostgresMigrator({
@@ -283,6 +350,22 @@ describe('PostgresCoordination', () => {
       try {
         await coordination.verifySchemaCompatibility();
 
+        const firstPlacementPage = await coordination
+          .listActiveRepositoryPlacements({ limit: 1 });
+        assert.deepEqual(firstPlacementPage.placements.map(item => item.projectId), [
+          'project-a',
+        ]);
+        assert.equal(firstPlacementPage.nextCursor, 'project-a');
+        const secondPlacementPage = await coordination
+          .listActiveRepositoryPlacements({
+            after: firstPlacementPage.nextCursor,
+            limit: 1,
+          });
+        assert.deepEqual(secondPlacementPage.placements.map(item => item.projectId), [
+          'project-b',
+        ]);
+        assert.equal(secondPlacementPage.nextCursor, undefined);
+
         const projectA = await coordination.withProjectScope(
           'project-a',
           async scope => ({
@@ -291,6 +374,7 @@ describe('PostgresCoordination', () => {
           }),
         );
         assert.deepEqual(projectA.membership, {
+          displayName: 'Overlapping member',
           memberId: 'overlapping-member',
           revision: 1n,
           role: 'manager',

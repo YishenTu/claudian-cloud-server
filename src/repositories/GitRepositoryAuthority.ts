@@ -1,3 +1,5 @@
+import { isCollabGitOid } from '@claudian/collab-protocol';
+
 import {
   ResourceAdmissionError,
   type ResourceAdmission,
@@ -60,7 +62,13 @@ export interface GitRepositoryAuthorityOptions {
 }
 
 export interface VerifyRepositoryIntegrityOptions {
+  readonly expectedRefs?: readonly ExpectedRepositoryRef[];
   readonly signal?: AbortSignal;
+}
+
+export interface ExpectedRepositoryRef {
+  readonly name: string;
+  readonly oid?: string;
 }
 
 export interface RepositoryIntegrityResult {
@@ -93,6 +101,37 @@ function mapAdmissionError(error: ResourceAdmissionError): GitRepositoryError {
 
 function mapProcessError(error: GitProcessError): GitRepositoryError {
   return new GitRepositoryError(error.code);
+}
+
+function assertExactRefs(
+  output: Buffer,
+  expectedRefs: readonly ExpectedRepositoryRef[],
+): void {
+  const actual = output.toString('utf8').split('\n').filter(Boolean).map(line => {
+    const separator = line.indexOf('\0');
+    if (separator <= 0 || line.indexOf('\0', separator + 1) !== -1) {
+      throw new GitRepositoryError('repository-corrupt');
+    }
+    return Object.freeze({
+      name: line.slice(0, separator),
+      oid: line.slice(separator + 1),
+    });
+  });
+  const expectedByName = new Map(expectedRefs.map(ref => [ref.name, ref]));
+  const actualByName = new Map(actual.map(ref => [ref.name, ref.oid]));
+  if (
+    actual.length !== expectedRefs.length
+    || actualByName.size !== actual.length
+    || expectedByName.size !== expectedRefs.length
+    || actual.some(ref => !isCollabGitOid(ref.oid))
+    || expectedRefs.some(expectedRef => {
+      const actualOid = actualByName.get(expectedRef.name);
+      return actualOid === undefined
+        || (expectedRef.oid !== undefined && actualOid !== expectedRef.oid);
+    })
+  ) {
+    throw new GitRepositoryError('repository-corrupt');
+  }
 }
 
 export class GitRepositoryAuthority {
@@ -187,6 +226,20 @@ export class GitRepositoryAuthority {
         );
         resolved = await this.#pathPolicy.resolveExisting(placementSnapshot);
         await this.#pathPolicy.revalidate(placementSnapshot);
+        if (options.expectedRefs !== undefined) {
+          const refs = await this.#supervisor.runCommand({
+            arguments: [
+              'for-each-ref',
+              '--format=%(refname)%00%(objectname)',
+              'refs/heads',
+            ],
+            captureOutput: true,
+            cwd: resolved.repositoryPath,
+            failureCode: 'repository-corrupt',
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+          });
+          assertExactRefs(refs, options.expectedRefs);
+        }
         await this.#supervisor.runIntegrityCheck(
           resolved.repositoryPath,
           options.signal,
@@ -195,6 +248,7 @@ export class GitRepositoryAuthority {
         if (error instanceof RepositoryPlacementError) {
           throw mapPlacementError(error);
         }
+        if (error instanceof GitRepositoryError) throw error;
         if (error instanceof GitProcessError) throw mapProcessError(error);
         throw new GitRepositoryError('process-failed');
       }

@@ -27,6 +27,27 @@ export interface GitProcessSupervisorOptions {
   readonly outputMaxBytes: number;
 }
 
+export interface GitProcessCommand {
+  readonly arguments: readonly string[];
+  readonly captureOutput: boolean;
+  readonly cwd: string;
+  readonly failureCode: GitProcessErrorCode;
+  readonly input?: string;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+}
+
+export interface GitProcessStreamingCommand {
+  readonly arguments: readonly string[];
+  readonly cwd: string;
+  readonly failureCode: GitProcessErrorCode;
+  readonly input?: string;
+  readonly onStdoutChunk: (chunk: Buffer) => void;
+  readonly signal?: AbortSignal;
+  readonly stdoutMaxBytes: number;
+  readonly timeoutMs?: number;
+}
+
 interface RunningGitProcess {
   readonly settled: Promise<unknown>;
   terminate(code: GitProcessErrorCode): void;
@@ -107,6 +128,34 @@ export class GitProcessSupervisor {
     }).then(() => undefined);
   }
 
+  runCommand(command: GitProcessCommand): Promise<Buffer> {
+    return this.#runProcess({
+      arguments: command.arguments,
+      captureOutput: command.captureOutput,
+      cwd: command.cwd,
+      failureCode: command.failureCode,
+      ...(command.input === undefined ? {} : { input: command.input }),
+      signal: command.signal,
+      ...(command.timeoutMs === undefined ? {} : { timeoutMs: command.timeoutMs }),
+    });
+  }
+
+  runStreamingCommand(command: GitProcessStreamingCommand): Promise<void> {
+    return this.#runProcess({
+      arguments: command.arguments,
+      captureOutput: false,
+      cwd: command.cwd,
+      failureCode: command.failureCode,
+      ...(command.input === undefined ? {} : { input: command.input }),
+      signal: command.signal,
+      stdoutStream: {
+        maximumBytes: command.stdoutMaxBytes,
+        onChunk: command.onStdoutChunk,
+      },
+      ...(command.timeoutMs === undefined ? {} : { timeoutMs: command.timeoutMs }),
+    }).then(() => undefined);
+  }
+
   async verifyBareRepository(
     repositoryPath: string,
     signal?: AbortSignal,
@@ -118,20 +167,23 @@ export class GitProcessSupervisor {
       failureCode: 'repository-corrupt',
       signal,
     });
-    if (output.trim() !== 'true') {
+    if (output.toString('utf8').trim() !== 'true') {
       throw new GitProcessError('repository-corrupt');
     }
   }
 
-  async verifyVersion(): Promise<void> {
+  async verifyVersion(signal?: AbortSignal, timeoutMs?: number): Promise<void> {
     const output = await this.#runProcess({
       arguments: ['--version'],
       captureOutput: true,
       cwd: undefined,
       failureCode: 'git-unavailable',
-      signal: undefined,
+      signal,
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
     });
-    const match = /^git version (\d+)\.(\d+)(?:\.(\d+))?/.exec(output.trim());
+    const match = /^git version (\d+)\.(\d+)(?:\.(\d+))?/.exec(
+      output.toString('utf8').trim(),
+    );
     const major = Number(match?.[1]);
     const minor = Number(match?.[2]);
     if (
@@ -149,8 +201,14 @@ export class GitProcessSupervisor {
     readonly captureOutput: boolean;
     readonly cwd: string | undefined;
     readonly failureCode: GitProcessErrorCode;
+    readonly input?: string;
     readonly signal: AbortSignal | undefined;
-  }): Promise<string> {
+    readonly stdoutStream?: Readonly<{
+      maximumBytes: number;
+      onChunk: (chunk: Buffer) => void;
+    }>;
+    readonly timeoutMs?: number;
+  }): Promise<Buffer> {
     if (this.#closed) return Promise.reject(new GitProcessError('closed'));
     if (options.signal?.aborted === true) {
       return Promise.reject(new GitProcessError('cancelled'));
@@ -171,17 +229,21 @@ export class GitProcessSupervisor {
     } catch {
       return Promise.reject(new GitProcessError('git-unavailable'));
     }
-    child.stdin.end();
+    child.stdin.on('error', () => {
+      // An early child exit may close stdin before the bounded input is written.
+    });
+    child.stdin.end(options.input);
 
     let rejectSettled!: (error: GitProcessError) => void;
-    let resolveSettled!: (output: string) => void;
+    let resolveSettled!: (output: Buffer) => void;
     let terminationCode: GitProcessErrorCode | undefined;
     let terminationTimer: ReturnType<typeof setTimeout> | undefined;
     let outputBytes = 0;
+    let streamedStdoutBytes = 0;
     let settled = false;
     const capturedOutput: Buffer[] = [];
 
-    const settledPromise = new Promise<string>((resolve, reject) => {
+    const settledPromise = new Promise<Buffer>((resolve, reject) => {
       resolveSettled = resolve;
       rejectSettled = reject;
     });
@@ -195,7 +257,7 @@ export class GitProcessSupervisor {
       if (settled) return;
       settled = true;
       cleanup();
-      resolveSettled(Buffer.concat(capturedOutput).toString('utf8'));
+      resolveSettled(Buffer.concat(capturedOutput));
     };
     const settleFailure = (code: GitProcessErrorCode): void => {
       if (settled) return;
@@ -228,12 +290,30 @@ export class GitProcessSupervisor {
 
     const operationTimer = setTimeout(
       () => terminate('timeout'),
-      this.#operationTimeoutMs,
+      options.timeoutMs === undefined
+        ? this.#operationTimeoutMs
+        : Math.min(this.#operationTimeoutMs, options.timeoutMs),
     );
     operationTimer.unref();
     options.signal?.addEventListener('abort', onAbort, { once: true });
     child.stdout.on('data', (chunk: Buffer) => {
-      countOutput(chunk, options.captureOutput);
+      if (options.stdoutStream === undefined) {
+        countOutput(chunk, options.captureOutput);
+        return;
+      }
+      streamedStdoutBytes += chunk.length;
+      if (streamedStdoutBytes > options.stdoutStream.maximumBytes) {
+        terminate('output-limit');
+        return;
+      }
+      child.stdout.pause();
+      try {
+        options.stdoutStream.onChunk(chunk);
+      } catch {
+        terminate(options.failureCode);
+      } finally {
+        if (terminationCode === undefined) child.stdout.resume();
+      }
     });
     child.stderr.on('data', (chunk: Buffer) => {
       countOutput(chunk, false);

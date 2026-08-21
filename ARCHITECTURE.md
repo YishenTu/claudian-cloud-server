@@ -304,6 +304,8 @@ table access.
 
 The local milestone uses one dedicated recovery-candidate catalog for activation and Accept scheduling. A row contains only operation kind, opaque Project ID, opaque operation or attempt ID, and scheduling timestamps. Runtime enumeration is keyset-paged in stable order with at most 100 rows per page and cannot expose journal payload, membership, placement, report, Request, or Ticket data. Every nonterminal journal updates its candidate in the same PostgreSQL transaction; terminal completion or cancellation removes it. A scanner must acquire the canonical Project advisory lock, enter forced-RLS Project scope, and re-read the full journal before recovery. Startup scanning improves latency, but every Project admission repeats this check under the same lock, so enumeration is never the correctness boundary. An unreadable catalog, unknown authority-volume identity, or unclassified candidate holds global readiness false; a classified `recovery-required` Project blocks only that Project.
 
+The package-owned bootstrap follow-up routes carry an opaque attempt ID but no caller-asserted Project ID. A separate minimal routing relation therefore maps one globally unique attempt ID to its Project ID. Runtime may insert that pair atomically with the scoped attempt and call one exact lookup function, but it cannot enumerate or read the relation directly. The lookup reveals no bootstrap payload and grants no admission: the caller must enter the returned Project's forced-RLS scope and re-read the exact attempt before actor and operation authorization.
+
 ### 6.3 Repository isolation
 
 Each Project has exactly one bare repository. A placement record maps the
@@ -741,18 +743,18 @@ Ordinary cancellation no longer owns the operation after `prepared`. Recovery re
 
 ### 12.4 Development onboarding
 
-The private bootstrap is isolated from normal Project admission. Attempt state is exactly `collecting`, `validating`, `ready`, `activating`, `rejected`, `cancelled`, `recovery-required`, or `activated`. The former Host must persist its non-restart stop fence, drain Project work and Git children, and stop LAN authority before the Host actor may begin. Two actor-bound reports must independently agree on the immutable logical JSON manifest, exact two-Member authority state, repository identity, protected and personal refs, and readiness. The source Host streams one raw Git bundle; SQLite, Project-directory archives, credentials, CA material, Vault data, unpublished files, local-only commits, and drafts are never uploaded.
+The private bootstrap is isolated from normal Project admission. Attempt state is exactly `collecting`, `validating`, `ready`, `activating`, `rejected`, `cancelled`, `recovery-required`, or `activated`. The former Host must persist its non-restart stop fence, drain Project work and Git children, and stop LAN authority before the Host actor may begin. Two actor-bound reports must independently agree on the immutable logical JSON manifest, exact two-Member authority state, repository identity, protected and personal refs, and readiness. The source Host streams one raw Git bundle; SQLite, Project-directory archives, credentials, CA material, Vault data, unpublished files, local-only commits, and drafts are never uploaded. Upload admission transfers atomically from the canonical Project lock to an attempt-scoped PostgreSQL shared advisory fence on the same pinned session. Settlement holds the Project lock while draining the matching exclusive fence, so no process can start or retain staging work past publication or cleanup.
 
 Activation has four durable phases:
 
 | Phase | Durable meaning and permitted next effect |
 | --- | --- |
 | `publish-intent` | Validation is complete, the target Project ID and placement are reserved, and activation recovery exclusively owns settlement. Cancellation may no longer delete or roll back authority state. |
-| `repository-published` | A validated bare staging repository and marker were atomically renamed to the sibling canonical path on the same authority filesystem; Project state remains invisible to ordinary admission. |
-| `activated` | One Project-scoped PostgreSQL transaction creates the active Project, exactly two active memberships, development actor mappings, expected refs, active placement generation `1`, and the replayable activation result. This is the Cloud authority and visibility boundary. |
+| `repository-published` | A validated bare staging repository and marker were atomically renamed to the sibling canonical path on the same authority filesystem; the object format, exact refs/OIDs, and strict Git integrity are reverified from the live repository; Project state remains invisible to ordinary admission. |
+| `activated` | One Project-scoped PostgreSQL transaction creates the active Project with Cloud manager-set generation `0`, exactly two active memberships with preserved display names, development actor mappings, expected refs, active placement generation `1`, the bounded active-placement catalog entry, and the replayable activation result. This is the Cloud authority and visibility boundary. |
 | `completed` | Exact attempt-only staging and reservations are cleaned, the stable result remains replayable, and the recovery candidate is removed. |
 
-Cancellation is allowed only before `publish-intent` and has phases `cancel-intent`, `cancelled`, and `recovery-required`. `cancel-intent` freezes further report/upload/activation admission before deleting attempt-owned staging; `cancelled` proves those resources are absent and stores the stable result. Contradictory ownership or cleanup observations become `recovery-required`. Expiry uses the same cancellation owner and may clean only paths proven to belong to an invisible attempt. Filesystem presence, absence, or a marker alone never proves activation or cancellation.
+Cancellation is allowed only before `publish-intent` and has phases `cancel-intent`, `cancelled`, and `recovery-required`. `cancel-intent` freezes further report/upload/activation admission before deleting attempt-owned staging; `cancelled` proves those resources are absent and stores the stable result. Contradictory ownership or cleanup observations become `recovery-required`. Expiry uses the same cancellation owner and may clean only paths proven to belong to an invisible attempt. Startup settlement is followed by one lifecycle-owned periodic scanner, so the fixed attempt lifetime remains enforced while the process stays running; scans never overlap and shutdown cancels the next scan before draining an active one. Filesystem presence, absence, or a marker alone never proves activation or cancellation.
 
 This flow is not the production LAN-to-Cloud cutover protocol. Production
 freeze, proof, resumable upload, activation, rollback, redirection, and
@@ -1195,7 +1197,8 @@ state remains non-admissible and requires recovery.
    required capabilities;
 6. inspect and schedule durable operation recovery;
 7. mark only unreconciled Projects as recovery-required when isolation is safe;
-8. start HTTP admission and publish readiness.
+8. enumerate the bounded active-placement catalog, re-enter each Project under its canonical lock, and verify live Git integrity plus exact main and Member refs;
+9. start HTTP admission and publish readiness.
 
 Production schema migration is a separate command using a migration role.
 Application startup verifies the schema and fails closed on unsupported
