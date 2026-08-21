@@ -1,9 +1,8 @@
 # Claudian Cloud Server Architecture
 
-Status: target architecture accepted for scaffolding; the source-scope scaffold
-exists and application implementation has not started.
+Status: foundation implemented; the steps 5–8 local Cloud milestone is accepted and frozen for implementation.
 
-Last reconciled: 2026-08-18
+Last reconciled: 2026-08-21
 
 ## 1. Purpose
 
@@ -96,6 +95,8 @@ virtual machine or persistent container per Project.
 15. **Placement generation is an execution fence.** Every repository operation
     carries a server-derived placement lease. Stale generations and demoted
     nodes fail closed; placement is not merely routing metadata.
+16. **The local milestone has three independent version authorities.** The accepted producer revision is `@claudian/collab-protocol` `0.4.0` with canonical wire version `4`; Cloud binding version `1` defines its routes and capabilities. The Claudian LAN control/event binding remains independently at version `9`. No adapter infers compatibility from package SemVer alone or couples a Cloud version change to the LAN binding.
+17. **Durable phase records are singular authorities.** Activation, cancellation, client binding, and Accept each have one named journal or transition record. Membership, placement, repository directories, refs, indexes, and marker files are observations used to advance or reject that journal; none becomes a parallel phase authority.
 
 ## 4. System context and trust boundaries
 
@@ -301,6 +302,8 @@ arbitrary rows. Cross-Project metadata access has its own tests and database
 grants; it is not implemented by giving the request runtime role unrestricted
 table access.
 
+The local milestone uses one dedicated recovery-candidate catalog for activation and Accept scheduling. A row contains only operation kind, opaque Project ID, opaque operation or attempt ID, and scheduling timestamps. Runtime enumeration is keyset-paged in stable order with at most 100 rows per page and cannot expose journal payload, membership, placement, report, Request, or Ticket data. Every nonterminal journal updates its candidate in the same PostgreSQL transaction; terminal completion or cancellation removes it. A scanner must acquire the canonical Project advisory lock, enter forced-RLS Project scope, and re-read the full journal before recovery. Startup scanning improves latency, but every Project admission repeats this check under the same lock, so enumeration is never the correctness boundary. An unreadable catalog, unknown authority-volume identity, or unclassified candidate holds global readiness false; a classified `recovery-required` Project blocks only that Project.
+
 ### 6.3 Repository isolation
 
 Each Project has exactly one bare repository. A placement record maps the
@@ -490,10 +493,7 @@ boundary; neither creates a second domain API or exposes filesystem paths.
 
 ## 8. Protocol ownership and compatibility
 
-The `claudian` repository produces a versioned package such as
-`@claudian/collab-protocol`. The Cloud Server depends on an exact compatible
-version. Local development may use a workspace or packed artifact, but CI and
-deployments use a reproducible pinned package.
+The `claudian` repository produces `@claudian/collab-protocol`. The Cloud Server depends on an exact compatible version. The steps 5–8 producer revision advances package version `0.3.0` and canonical wire version `3` to package version `0.4.0` and wire version `4`, and introduces Cloud binding version `1`. Local development consumes the exact packed producer artifact and records its checksum; CI and deployments use those reproducible bytes. Package SemVer, canonical wire version, Cloud binding version, and the independently owned LAN version are never substituted for one another.
 
 The package exposes curated boundaries only:
 
@@ -599,6 +599,10 @@ This is an intentionally insecure actor assertion inside the operator's private
 development network. The deployment operator owns endpoint access; Cloud Server
 does not authenticate these development callers. The assertion is deleted or
 disabled by construction before external Alpha.
+
+The private bootstrap accepts only one active source Project with exactly two membership records total. Both records are active and correspond to distinct reporting Members; exactly one reporter is the current Host and at least one is a Manager. Pending or live invitations, pending memberships, collaboration records, nonterminal authority/lifecycle operations, undrained Project work, active Collab Git children, or mismatched local repository identity make the profile ineligible. Existing Git history is allowed, while unpublished working-tree changes, local commits, and private drafts stay local.
+
+Before activation, the development principal may be matched only against the immutable attempt manifest and that actor's independently submitted report. The source Host actor alone may begin, upload, activate, or cancel; both accepted actors may submit only their own report and read bounded attempt status. After activation, `actor_id = member_id` mappings are persisted and every ordinary operation derives active membership and role from Cloud state. This pre-activation exception does not authorize a caller to assert role, service state, placement, or another Member's report.
 
 ### 10.2 Self-hosted Cloud
 
@@ -722,54 +726,48 @@ Publish never advances protected accepted state.
 
 ### 12.3 Accept
 
-Accept uses the existing exact review semantics:
+Accept uses four durable phases under one pinned Project write lease:
 
-1. acquire the Project write lease;
-2. revalidate Manager membership, Project service state, request status,
-   request revision, expected main/head OIDs, and resolving-Ticket revisions;
-3. return an exact idempotency replay if already complete;
-4. commit a `prepared` operation that locks the accepted request tuple;
-5. derive and validate the exact merge tree;
-6. persist a deterministic commit plan containing the tree, parents, identity,
-   timestamps, exact commit-message bytes, expected main, and exact reviewed
-   tuple;
-7. create the accepted commit without checking out the repository;
-8. persist and revalidate the resulting commit OID before any protected-ref
-   mutation;
-9. compare-and-swap protected main from the expected OID to that persisted
-   result OID;
-10. commit request completion, accepted Ticket relations, exact Ticket closures,
-   idempotency result, and redacted event;
-11. release the Project write lease.
+| Phase | Durable meaning and permitted next effect |
+| --- | --- |
+| `prepared` | PostgreSQL holds the actor, normalized fingerprint, reviewed request revision and personal-ref OID, expected main OID, exact relations and resolving-Ticket revisions, placement generation, and the deterministic commit plan. Main has not been intentionally changed. |
+| `result-persisted` | Repository authority has recreated or created the exact deterministic result object, parsed it back, and PostgreSQL holds the verified result OID. Main may still equal expected or may already equal result after a lost response. |
+| `main-updated` | Protected main has been verified at the persisted result OID after expected-OID compare-and-swap or the contained fast path. SQL domain finalization may still be incomplete. |
+| `completed` | One PostgreSQL transaction marks the Request merged, promotes accepted relations, closes only the exact resolving Tickets, advances `projects.expected_main_oid`, appends `main.updated`, persists the idempotent result, and removes the recovery candidate. |
 
-Recovery inspects the journal and main ref. If main still equals the expected
-OID, it may repeat the exact CAS. If main equals the result, it finalizes. If it
-equals neither, the Project enters recovery-required state and rejects further
-protected writes. A crash after commit creation but before result-OID
-persistence leaves only a dangling Git object; recovery recreates the commit
-from the durable deterministic plan and never guesses which object represented
-the operation.
+The deterministic plan fixes repository object format and placement generation; the validated tree; ordered parents `[expectedMainOid, expectedHeadOid]`; author and committer `Claudian Collab <collab@claudian.local>`; the `preparedAt` instant truncated once to whole Unix seconds with timezone `+0000`; exact UTF-8 message bytes `Accept request <requestId>\n`; and the reviewed Request/Ticket tuple. Repository authority creates the commit without checkout or ambient Git configuration and parses the object back to verify every field and OID before main CAS.
+
+Ordinary cancellation no longer owns the operation after `prepared`. Recovery recreates only the deterministic object recorded there. When main equals expected, it may persist the result and repeat the exact CAS; when main equals the verified result, it advances without rewriting; when main equals neither, or any placement, object, phase, or SQL observation contradicts the journal, the Project becomes `recovery-required`. A crash after object creation but before `result-persisted` leaves an ignorable dangling object, not an alternate authority. The contained fast path records and verifies the already-contained result without a protected-ref write.
 
 ### 12.4 Development onboarding
 
-The private bootstrap is isolated from normal Project admission:
+The private bootstrap is isolated from normal Project admission. Attempt state is exactly `collecting`, `validating`, `ready`, `activating`, `rejected`, `cancelled`, `recovery-required`, or `activated`. The former Host must persist its non-restart stop fence, drain Project work and Git children, and stop LAN authority before the Host actor may begin. Two actor-bound reports must independently agree on the immutable logical JSON manifest, exact two-Member authority state, repository identity, protected and personal refs, and readiness. The source Host streams one raw Git bundle; SQLite, Project-directory archives, credentials, CA material, Vault data, unpublished files, local-only commits, and drafts are never uploaded.
 
-1. create an expiring onboarding attempt and isolated staging paths;
-2. accept the canonical package only while the LAN Host is manually stopped;
-3. compare the two trusted development client reports and reject conflicts;
-4. validate Project identity, membership, roles, repository refs, reachable
-   objects, tree policy, and coordination package consistency;
-5. verify repository integrity in staging;
-6. commit placement and activation through a recoverable operation;
-7. make the accepted Cloud record authoritative;
-8. remove failed or abandoned staging data idempotently.
+Activation has four durable phases:
+
+| Phase | Durable meaning and permitted next effect |
+| --- | --- |
+| `publish-intent` | Validation is complete, the target Project ID and placement are reserved, and activation recovery exclusively owns settlement. Cancellation may no longer delete or roll back authority state. |
+| `repository-published` | A validated bare staging repository and marker were atomically renamed to the sibling canonical path on the same authority filesystem; Project state remains invisible to ordinary admission. |
+| `activated` | One Project-scoped PostgreSQL transaction creates the active Project, exactly two active memberships, development actor mappings, expected refs, active placement generation `1`, and the replayable activation result. This is the Cloud authority and visibility boundary. |
+| `completed` | Exact attempt-only staging and reservations are cleaned, the stable result remains replayable, and the recovery candidate is removed. |
+
+Cancellation is allowed only before `publish-intent` and has phases `cancel-intent`, `cancelled`, and `recovery-required`. `cancel-intent` freezes further report/upload/activation admission before deleting attempt-owned staging; `cancelled` proves those resources are absent and stores the stable result. Contradictory ownership or cleanup observations become `recovery-required`. Expiry uses the same cancellation owner and may clean only paths proven to belong to an invisible attempt. Filesystem presence, absence, or a marker alone never proves activation or cancellation.
 
 This flow is not the production LAN-to-Cloud cutover protocol. Production
 freeze, proof, resumable upload, activation, rollback, redirection, and
 split-authority prevention require a separate accepted design before external
 use.
 
-### 12.5 Production Project creation gate
+### 12.5 Claudian local Cloud binding
+
+Cloud activation does not wait for client-local state. Each client first persists a transition `intent` and keeps the former Host's non-restart fence active. Terminal binding begins only after Cloud snapshot and upload-pack are available, and each client repeats readiness immediately before changing local authority.
+
+The one transition record advances through `intent`, `readiness-confirmed`, `origin-rotated`, `cloud-verified`, `membership-replaced`, `index-repaired`, `lan-authority-retired`, and `fence-terminal`. `membership-replaced` is the adapter-selection boundary: the strict tagged Cloud membership record becomes authoritative even if the derived Project index still needs repair. `lan-authority-retired` atomically moves only the former Host's exact inactive authority directory to an inert attempt-scoped private directory; the other client records a no-op. `fence-terminal` retains a terminal non-restart fence, recreates one Project work session from the Cloud record, and completes binding.
+
+Recovery resumes from the durable phase plus exact observed URL, repository identity, membership, index, and retired-authority state. It never restores LAN authority after Cloud `activated`. The Cloud membership stores only canonical server URL, Cloud binding and wire versions, derived Git URL, and development actor ID; it stores no active LAN credential, CA, Host ownership, or duplicate recovery phase.
+
+### 12.6 Production Project creation gate
 
 The private first slice advertises no production Project-creation operation.
 Before external Alpha, one production path is selected: Cloud-native creation
@@ -1364,6 +1362,16 @@ This is the critical path, not a parallel task assignment:
 Each phase exits only when its interface-level and real integration tests pass.
 Later phases do not bypass missing recovery or isolation from earlier phases.
 
+### 21.1 Steps 5–8 delivery gates and ownership
+
+The local milestone advances through six ordered proof gates: `G5` bootstrap and persistent activation; `G6R` snapshot, events, upload-pack, and two-client binding; `G6W` personal-ref receive-pack; `G7` Requests, Tickets, comments, and Publish; `G8A` deterministic Accept and server recovery; and `GI` complete localhost integration. A changed contract, phase, owner, or capability reopens its gate and every dependent gate.
+
+The mergeable PR order is fixed: Claudian protocol producer; Cloud exact protocol consumer; Cloud bootstrap; Claudian bootstrap; Cloud read plane; Claudian read/binding; Cloud personal write; Cloud collaboration; Claudian Publish; Cloud Accept; Claudian final integration. Every branch starts from the latest merged `origin/main`; Cloud never consumes unmerged Claudian source and capability advertisement occurs only after the complete server path and its gate evidence exist.
+
+Schema evolution is one serial, checksum-verified lane: `0002_development_bootstrap.sql`, `0003_project_read_events.sql`, `0004_collaboration.sql`, then `0005_accept_recovery.sql`. The task that introduces each migration also owns its checksum/schema registry entry, least-privilege grants, forced-RLS policy, and real PostgreSQL evidence. Gates freeze that ordered catalog; they do not become a second migration owner.
+
+Shared contract files, the Claudian root package manifest and lockfile belong to the producer PR. Cloud's package manifest, lockfile, vendored tarball, checksum metadata, and WebSocket dependency pins belong to the exact-consumer PR. No later transport tranche edits those manifests opportunistically. The exact merged `0.4.0` artifact and checksum are retained for the mandatory npm publication and clean-registry verification gate before the first Gomami deployment.
+
 ## 22. Explicit non-goals
 
 - endpoint reachability, entry-access policy, caller login, credential issuance,
@@ -1404,11 +1412,7 @@ Later phases do not bypass missing recovery or isolation from earlier phases.
 
 ## 24. Blocking status
 
-The architecture is ready for protocol extraction and server scaffolding.
-Project mutation implementation must use the one canonical advisory-lock
-contract and fixed lock order in §11; repository interfaces must carry the
-placement lease and generation from their first implementation so sharding does
-not require a domain-API rewrite.
+The foundation is implemented and the steps 5–8 local milestone is ready for producer-first implementation through the six gates in §21.1. Project mutation implementation must use the one canonical advisory-lock contract and fixed lock order in §11; repository interfaces must carry the placement lease and generation from their first implementation so sharding does not require a domain-API rewrite.
 
 The following are intentionally deferred and do not block the private first
 slice:

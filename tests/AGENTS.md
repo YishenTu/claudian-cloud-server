@@ -7,6 +7,7 @@
 - `integration/git/` uses real Git and bare repositories for Smart HTTP, refs, placement generations, path containment, quotas, sandboxing, and process lifecycle.
 - `fault-injection/` kills work after every documented durable phase and proves exact completion, idempotent replay, permitted staging cleanup, or `recovery-required` isolation.
 - `capacity/` exercises the staged workloads and provisional limits in `ARCHITECTURE.md`; results revise configuration and do not silently become product commitments.
+- Steps 5–8 advance through `G5`, `G6R`, `G6W`, `G7`, `G8A`, and `GI`. A changed contract, durable phase, owner, or advertised capability reopens its gate and every dependent gate.
 
 ## Evidence rules
 
