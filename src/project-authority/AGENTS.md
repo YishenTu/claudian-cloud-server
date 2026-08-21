@@ -12,6 +12,9 @@
 - Every Project mutation enters the same write lane and canonical PostgreSQL advisory-lock key. Before new work, resolve or isolate every non-terminal cross-store journal.
 - Revalidate membership, role, service state, expected revisions, expected OIDs, and placement lease at the last boundary before the first irreversible effect.
 - Cross-store operations persist a deterministic pre-effect checkpoint, record possible and confirmed progress, use expected-OID CAS, and finalize idempotently. Never infer success from a missing file or lost response.
+- Development activation advances only through `publish-intent`, `repository-published`, `activated`, and `completed`; the Project becomes visible and authoritative only at `activated`. Cancellation advances through `cancel-intent`, `cancelled`, or `recovery-required` and cannot take ownership after `publish-intent`.
+- Accept advances only through `prepared`, `result-persisted`, `main-updated`, and `completed`. Its deterministic commit plan is durable at `prepared`, its verified result OID is durable before protected-main CAS, and ordinary cancellation cannot own it afterward.
+- The bounded global recovery catalog schedules work but grants no authority. Startup and every on-demand Project admission acquire the canonical Project lock, enter Project scope, and re-read the authoritative journal before recovery, isolation, or new work.
 - Reads may run concurrently only when they cannot expose a mixed authoritative snapshot. Membership changes re-evaluate queued work and event access.
 
 ## Lifecycle scope

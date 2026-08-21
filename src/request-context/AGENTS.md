@@ -11,4 +11,5 @@
 ## Profiles and tests
 
 - Keep the private-development actor assertion in a separately named adapter that cannot be composed into an external profile.
+- Before Project activation, that adapter may bind the asserted actor only to the matching immutable bootstrap manifest/report under the accepted two-client exception. It never accepts asserted role, service state, placement, Host status, or another Member's report; after activation, ordinary Project authority derives membership and role from Cloud state.
 - Contract tests prove that client-controlled fields cannot override accepted actor or device attribution and that missing or malformed ingress context fails closed without logging assertion material.

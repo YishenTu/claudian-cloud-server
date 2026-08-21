@@ -6,6 +6,8 @@
 - The initial `development/` flow is limited to the private two-device profile:
   the LAN Host is manually stopped, two trusted reports must match, staged Git
   and coordination state are validated, and failures clean up idempotently.
+- Before activation, the development actor may match only its own immutable attempt manifest/report. Only the source Host actor may begin, upload, activate, or cancel; either exact accepted actor may submit its own report and read bounded status. Ordinary Project admission takes over immediately at Cloud activation.
+- Attempt state is exactly `collecting`, `validating`, `ready`, `activating`, `rejected`, `cancelled`, `recovery-required`, or `activated`. Onboarding owns comparison, staging, validation, expiry, and cancellation requests; Project authority alone owns activation/cancellation settlement and visibility.
 - Do not reuse the development assertion, LAN Host admission, invitation trust,
   or LAN Host-transfer bindings for production Cloud onboarding.
 - Production LAN-to-Cloud onboarding remains absent until freeze proof,
