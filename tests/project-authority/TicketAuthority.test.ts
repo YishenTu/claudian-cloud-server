@@ -282,6 +282,7 @@ class MemoryCoordination implements ProjectTicketAuthorityCoordination {
 
   scope(): ProjectScope & ProjectReadScope {
     return {
+      accept: { getNonterminal: () => Promise.resolve(undefined) },
       appendProjectEvent: (input: Parameters<ProjectScope['appendProjectEvent']>[0]) => {
         const event = {
           ...input,

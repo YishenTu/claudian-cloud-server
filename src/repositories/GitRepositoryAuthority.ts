@@ -1,10 +1,13 @@
 import {
+  COLLAB_LIMITS,
   COLLAB_MAIN_REF,
+  COLLAB_MEMBER_REF_PREFIX,
   collabMemberRef,
   isCollabGitOid,
   type CollabMemberId,
   type CollabGitOid,
   type CollabProjectId,
+  isCollabMemberId,
 } from '@claudian/collab-protocol';
 import { lstat, readdir, realpath, rm } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
@@ -25,6 +28,15 @@ import {
   type ProjectRequestInspection,
   type ProjectRequestInspectionInput,
 } from '../project-authority/requests/ProjectRequestRepository.js';
+import {
+  ProjectAcceptRepositoryError,
+  type InspectProjectAcceptInput,
+  type ProjectAcceptInspection,
+  type ProjectAcceptMainPlan,
+  type ProjectAcceptRepository,
+  type ProjectAcceptRepositoryReservation,
+  type ProjectAcceptResultPlan,
+} from '../project-authority/acceptance/ProjectAcceptRepository.js';
 import {
   GitReceivePackPolicy,
   GitReceivePackPolicyError,
@@ -316,6 +328,81 @@ function sameRefs(
     && [...left].every(([name, oid]) => right.get(name) === oid);
 }
 
+function acceptError(
+  code: ConstructorParameters<typeof ProjectAcceptRepositoryError>[0],
+): never {
+  throw new ProjectAcceptRepositoryError(code);
+}
+
+function acceptObjectFormat(output: Buffer): 'sha1' | 'sha256' {
+  const format = output.toString('ascii').trim();
+  if (format !== 'sha1' && format !== 'sha256') return acceptError('state-conflict');
+  return format;
+}
+
+function acceptCommitBytes(plan: ProjectAcceptResultPlan): Buffer {
+  if (plan.resultKind !== 'merge') return acceptError('invalid-plan');
+  const commit = plan.commit;
+  const timestamp = Date.parse(plan.preparedAt);
+  if (
+    Number.isNaN(timestamp)
+    || timestamp % 1_000 !== 0
+    || commit.authorName !== 'Claudian Collab'
+    || commit.authorEmail !== 'collab@claudian.local'
+    || commit.committerName !== 'Claudian Collab'
+    || commit.committerEmail !== 'collab@claudian.local'
+    || commit.parents[0] !== plan.expectedMainOid
+    || commit.parents[1] !== plan.expectedHeadOid
+    || commit.message !== `Accept request ${plan.requestId}\n`
+    || plan.preparedAt !== new Date(timestamp).toISOString()
+  ) {
+    return acceptError('invalid-plan');
+  }
+  const epoch = Math.floor(timestamp / 1_000);
+  return Buffer.from([
+    `tree ${commit.treeOid}`,
+    `parent ${commit.parents[0]}`,
+    `parent ${commit.parents[1]}`,
+    `author ${commit.authorName} <${commit.authorEmail}> ${String(epoch)} +0000`,
+    `committer ${commit.committerName} <${commit.committerEmail}> ${String(epoch)} +0000`,
+    '',
+    commit.message,
+  ].join('\n'), 'utf8');
+}
+
+function validAcceptOid(
+  oid: unknown,
+  objectFormat: 'sha1' | 'sha256',
+): oid is CollabGitOid {
+  return isCollabGitOid(oid)
+    && oid.length === (objectFormat === 'sha1' ? 40 : 64);
+}
+
+function validAcceptPersonalRef(personalRef: string): boolean {
+  if (!personalRef.startsWith(COLLAB_MEMBER_REF_PREFIX)) return false;
+  const memberId = personalRef.slice(COLLAB_MEMBER_REF_PREFIX.length);
+  return isCollabMemberId(memberId) && collabMemberRef(memberId) === personalRef;
+}
+
+function assertAcceptPlan(plan: ProjectAcceptResultPlan): void {
+  if (
+    plan.personalRef !== collabMemberRef(plan.requestMemberId)
+    || !validAcceptOid(plan.expectedMainOid, plan.objectFormat)
+    || !validAcceptOid(plan.expectedHeadOid, plan.objectFormat)
+    || plan.relations.some(relation => (
+      !validAcceptOid(relation.commitOid, plan.objectFormat)
+    ))
+    || (
+      plan.resultOid !== undefined
+      && !validAcceptOid(plan.resultOid, plan.objectFormat)
+    )
+    || (
+      plan.resultKind === 'merge'
+      && !validAcceptOid(plan.commit.treeOid, plan.objectFormat)
+    )
+  ) return acceptError('invalid-plan');
+}
+
 interface ReceiveReservationState {
   readonly child: GitChildPermit;
   readonly permit: GitReceivePermit;
@@ -324,9 +411,125 @@ interface ReceiveReservationState {
   inUse: boolean;
 }
 
-const RECEIVE_POLICY_METADATA_MAX_BYTES = 48 * 1_024 * 1_024;
+interface AcceptReservationState {
+  active: boolean;
+  readonly child: GitChildPermit;
+  inUse: boolean;
+  readonly projectId: CollabProjectId;
+}
 
-export class GitRepositoryAuthority {
+const RECEIVE_POLICY_METADATA_MAX_BYTES = 48 * 1_024 * 1_024;
+const ACCEPT_TREE_OUTPUT_MAX_BYTES = 112 * 1_024 * 1_024;
+const ACCEPT_MAX_EXPANDED_TREE_ENTRIES = 100_000;
+const WINDOWS_RESERVED_PATH = /^(?:con|prn|aux|nul|com(?:[1-9¹²³])|lpt(?:[1-9¹²³]))(?:\..*)?$/iu;
+const WINDOWS_INVALID_PATH = /[<>:"\\|?*]/u;
+const RESERVED_REPOSITORY_ROOTS = new Set(['.claudian', '.git', 'workspace']);
+
+function invalidPathControl(value: string): boolean {
+  for (const character of value) {
+    const code = character.codePointAt(0);
+    if (code !== undefined && (code <= 0x1f || code === 0x7f)) return true;
+  }
+  return false;
+}
+
+function validPortablePathSegment(segment: string): boolean {
+  return segment.length > 0
+    && segment.length <= COLLAB_LIMITS.maxPathSegmentUtf16
+    && segment !== '.'
+    && segment !== '..'
+    && !invalidPathControl(segment)
+    && !WINDOWS_INVALID_PATH.test(segment)
+    && !/[. ]$/u.test(segment)
+    && !WINDOWS_RESERVED_PATH.test(segment)
+    && !RESERVED_REPOSITORY_ROOTS.has(
+      segment.normalize('NFC').toLocaleLowerCase('en-US'),
+    );
+}
+
+class AcceptTreePolicyParser {
+  readonly #comparisons = new Map<string, string>();
+  readonly #entriesByParent = new Map<string, number>();
+  readonly #objectFormat: 'sha1' | 'sha256';
+  #buffer = Buffer.alloc(0);
+  #entryCount = 0;
+  #invalid = false;
+
+  constructor(objectFormat: 'sha1' | 'sha256') {
+    this.#objectFormat = objectFormat;
+  }
+
+  push(chunk: Buffer): void {
+    if (this.#invalid) return;
+    this.#buffer = Buffer.concat([this.#buffer, chunk]);
+    for (;;) {
+      const end = this.#buffer.indexOf(0);
+      if (end < 0) {
+        if (this.#buffer.length > 2_048) this.#reject();
+        return;
+      }
+      const record = this.#buffer.subarray(0, end);
+      this.#buffer = this.#buffer.subarray(end + 1);
+      this.#parse(record);
+    }
+  }
+
+  finish(): void {
+    if (this.#invalid || this.#buffer.length !== 0) acceptError('unsupported-tree');
+  }
+
+  #parse(record: Buffer): void {
+    const separator = record.indexOf(0x09);
+    if (separator <= 0) return this.#reject();
+    const metadata = record.subarray(0, separator).toString('ascii').split(' ');
+    if (metadata.length !== 3) return this.#reject();
+    const [mode, type, oid] = metadata;
+    if (
+      oid === undefined
+      || !validAcceptOid(oid, this.#objectFormat)
+      || !(
+        (type === 'tree' && (mode === '040000' || mode === '40000'))
+        || (type === 'blob' && (mode === '100644' || mode === '100755'))
+      )
+    ) return this.#reject();
+    let path: string;
+    try {
+      path = new TextDecoder('utf-8', { fatal: true }).decode(
+        record.subarray(separator + 1),
+      );
+    } catch {
+      return this.#reject();
+    }
+    const segments = path.split('/');
+    if (
+      path.length === 0
+      || path.length > COLLAB_LIMITS.maxRepositoryPathUtf16
+      || segments.some(segment => !validPortablePathSegment(segment))
+    ) return this.#reject();
+    this.#entryCount += 1;
+    if (this.#entryCount > ACCEPT_MAX_EXPANDED_TREE_ENTRIES) return this.#reject();
+    const parent = segments.slice(0, -1).join('/');
+    const parentEntries = (this.#entriesByParent.get(parent) ?? 0) + 1;
+    if (parentEntries > COLLAB_LIMITS.maxChangedPaths) return this.#reject();
+    this.#entriesByParent.set(parent, parentEntries);
+    const comparison = path.normalize('NFC').toLocaleLowerCase('en-US');
+    const prior = this.#comparisons.get(comparison);
+    if (prior !== undefined && prior !== path) return this.#reject();
+    this.#comparisons.set(comparison, path);
+  }
+
+  #reject(): void {
+    this.#invalid = true;
+    this.#buffer = Buffer.alloc(0);
+  }
+}
+
+export class GitRepositoryAuthority implements ProjectAcceptRepository {
+  readonly #acceptReservations = new WeakMap<
+    ProjectAcceptRepositoryReservation,
+    AcceptReservationState
+  >();
+  readonly #activeAcceptReservations = new Set<AcceptReservationState>();
   readonly #activeReceiveReservations = new Set<ReceiveReservationState>();
   readonly #pathPolicy: RepositoryPathPolicy;
   readonly #receiveAdmission: GitReceiveAdmission | undefined;
@@ -379,6 +582,11 @@ export class GitRepositoryAuthority {
         state.child.release();
       }
       this.#activeReceiveReservations.clear();
+      for (const state of this.#activeAcceptReservations) {
+        state.active = false;
+        state.child.release();
+      }
+      this.#activeAcceptReservations.clear();
       this.#closePromise = Promise.allSettled([
         this.#supervisor.close(),
         this.#receiveAdmission?.close() ?? Promise.resolve(),
@@ -572,6 +780,294 @@ export class GitRepositoryAuthority {
     });
   }
 
+  inspectAccept(
+    reservation: ProjectAcceptRepositoryReservation,
+    input: InspectProjectAcceptInput,
+  ): Promise<ProjectAcceptInspection> {
+    if (
+      input.placement.projectId !== input.projectId
+      || !validAcceptPersonalRef(input.personalRef)
+    ) {
+      return Promise.reject(new ProjectAcceptRepositoryError('invalid-plan'));
+    }
+    return this.#runAcceptOperation(
+      reservation,
+      input.placement,
+      input.signal,
+      async (repositoryPath, placement) => {
+        const objectFormat = await this.#readAcceptObjectFormat(
+          repositoryPath,
+          input.signal,
+        );
+        if (
+          !validAcceptOid(input.expectedMainOid, objectFormat)
+          || !validAcceptOid(input.expectedHeadOid, objectFormat)
+          || input.relationCommitOids.some(oid => !validAcceptOid(oid, objectFormat))
+        ) return acceptError('invalid-plan');
+        const before = await this.#readRefs(repositoryPath, input.signal);
+        this.#assertAcceptRefs(before, input.expectedMainOid, input.expectedHeadOid,
+          input.personalRef);
+        await this.#assertCommit(repositoryPath, input.expectedMainOid, input.signal);
+        await this.#assertCommit(repositoryPath, input.expectedHeadOid, input.signal);
+        for (const relationOid of input.relationCommitOids) {
+          if (!await this.#isAncestor(
+            repositoryPath,
+            relationOid,
+            input.expectedHeadOid,
+            input.signal,
+          )) return acceptError('stale-relation');
+        }
+        let result: ProjectAcceptInspection;
+        if (await this.#isAncestor(
+          repositoryPath,
+          input.expectedHeadOid,
+          input.expectedMainOid,
+          input.signal,
+        )) {
+          await this.#assertAcceptTreePolicy(
+            repositoryPath,
+            input.expectedMainOid,
+            objectFormat,
+            input.signal,
+          );
+          result = Object.freeze({ kind: 'contained' as const, objectFormat });
+        } else {
+          const mergeTree = await this.#supervisor.runCommand({
+            acceptedExitCodes: [0, 1],
+            arguments: [
+              'merge-tree',
+              '--write-tree',
+              input.expectedMainOid,
+              input.expectedHeadOid,
+            ],
+            captureOutput: true,
+            cwd: repositoryPath,
+            failureCode: 'repository-corrupt',
+            signal: input.signal,
+          });
+          const lines = mergeTree.toString('utf8').trimEnd().split('\n');
+          const treeOid = lines[0] ?? '';
+          if (!isCollabGitOid(treeOid)) return acceptError('state-conflict');
+          if (lines.length !== 1) return acceptError('conflicting');
+          await this.#assertTree(repositoryPath, treeOid, input.signal);
+          await this.#assertAcceptTreePolicy(
+            repositoryPath,
+            treeOid,
+            objectFormat,
+            input.signal,
+          );
+          result = Object.freeze({
+            kind: 'merge' as const,
+            objectFormat,
+            treeOid,
+          });
+        }
+        await this.#pathPolicy.revalidate(placement);
+        await input.revalidateAuthority();
+        this.#assertOpen();
+        assertNotAborted(input.signal);
+        const after = await this.#readRefs(repositoryPath, input.signal);
+        if (!sameRefs(before, after)) return acceptError('state-conflict');
+        return result;
+      },
+    );
+  }
+
+  materializeAcceptResult(
+    reservation: ProjectAcceptRepositoryReservation,
+    plan: ProjectAcceptResultPlan,
+  ): Promise<CollabGitOid> {
+    let placement: RepositoryPlacementLease;
+    try {
+      placement = createRepositoryPlacementLease({
+        active: true,
+        ...plan.placement,
+      });
+    } catch {
+      return Promise.reject(new ProjectAcceptRepositoryError('invalid-plan'));
+    }
+    if (
+      plan.personalRef !== collabMemberRef(plan.requestMemberId)
+    ) {
+      return Promise.reject(new ProjectAcceptRepositoryError('invalid-plan'));
+    }
+    try {
+      assertAcceptPlan(plan);
+    } catch {
+      return Promise.reject(new ProjectAcceptRepositoryError('invalid-plan'));
+    }
+    return this.#runAcceptOperation(
+      reservation,
+      placement,
+      undefined,
+      async (repositoryPath, currentPlacement) => {
+        const objectFormat = await this.#readAcceptObjectFormat(repositoryPath);
+        if (objectFormat !== plan.objectFormat) return acceptError('state-conflict');
+        const refs = await this.#readRefs(repositoryPath);
+        if (refs.get(plan.personalRef) !== plan.expectedHeadOid) {
+          return acceptError('stale-head');
+        }
+        for (const relation of plan.relations) {
+          if (!await this.#isAncestor(
+            repositoryPath,
+            relation.commitOid,
+            plan.expectedHeadOid,
+          )) return acceptError('stale-relation');
+        }
+        if (plan.resultKind === 'contained') {
+          if (refs.get(plan.mainRef) !== plan.expectedMainOid) {
+            return acceptError('stale-main');
+          }
+          if (plan.resultOid !== undefined && plan.resultOid !== plan.expectedMainOid) {
+            return acceptError('invalid-plan');
+          }
+          if (!await this.#isAncestor(
+            repositoryPath,
+            plan.expectedHeadOid,
+            plan.expectedMainOid,
+          )) return acceptError('state-conflict');
+          await this.#assertAcceptTreePolicy(
+            repositoryPath,
+            plan.expectedMainOid,
+            objectFormat,
+          );
+          return plan.expectedMainOid;
+        }
+        const bytes = acceptCommitBytes(plan);
+        await this.#assertTree(repositoryPath, plan.commit.treeOid);
+        await this.#assertAcceptTreePolicy(
+          repositoryPath,
+          plan.commit.treeOid,
+          objectFormat,
+        );
+        await this.#pathPolicy.revalidate(currentPlacement);
+        const output = await this.#supervisor.runCommand({
+          arguments: ['hash-object', '-t', 'commit', '-w', '--stdin'],
+          captureOutput: true,
+          cwd: repositoryPath,
+          failureCode: 'repository-corrupt',
+          input: bytes,
+        });
+        const resultOid = output.toString('ascii').trim();
+        if (
+          !isCollabGitOid(resultOid)
+          || resultOid.length !== (objectFormat === 'sha1' ? 40 : 64)
+          || (plan.resultOid !== undefined && resultOid !== plan.resultOid)
+        ) return acceptError('state-conflict');
+        const persisted = await this.#supervisor.runCommand({
+          arguments: ['cat-file', 'commit', resultOid],
+          captureOutput: true,
+          cwd: repositoryPath,
+          failureCode: 'repository-corrupt',
+        });
+        if (!persisted.equals(bytes)) return acceptError('state-conflict');
+        const currentMainOid = refs.get(plan.mainRef);
+        if (
+          currentMainOid !== plan.expectedMainOid
+          && currentMainOid !== resultOid
+        ) return acceptError('stale-main');
+        return resultOid;
+      },
+    );
+  }
+
+  settleAcceptMain(
+    reservation: ProjectAcceptRepositoryReservation,
+    plan: ProjectAcceptMainPlan,
+  ): Promise<'advanced' | 'replayed'> {
+    let placement: RepositoryPlacementLease;
+    try {
+      placement = createRepositoryPlacementLease({
+        active: true,
+        ...plan.placement,
+      });
+    } catch {
+      return Promise.reject(new ProjectAcceptRepositoryError('invalid-plan'));
+    }
+    if (!isCollabGitOid(plan.resultOid)) {
+      return Promise.reject(new ProjectAcceptRepositoryError('invalid-plan'));
+    }
+    try {
+      assertAcceptPlan(plan);
+    } catch {
+      return Promise.reject(new ProjectAcceptRepositoryError('invalid-plan'));
+    }
+    return this.#runAcceptOperation(
+      reservation,
+      placement,
+      undefined,
+      async (repositoryPath, currentPlacement) => {
+        const objectFormat = await this.#readAcceptObjectFormat(repositoryPath);
+        if (
+          objectFormat !== plan.objectFormat
+          || plan.resultOid.length !== (objectFormat === 'sha1' ? 40 : 64)
+        ) return acceptError('state-conflict');
+        if (plan.resultKind === 'contained') {
+          if (plan.resultOid !== plan.expectedMainOid) return acceptError('invalid-plan');
+          await this.#assertCommit(repositoryPath, plan.resultOid);
+          await this.#assertAcceptTreePolicy(
+            repositoryPath,
+            plan.resultOid,
+            objectFormat,
+          );
+        } else {
+          const bytes = acceptCommitBytes(plan);
+          await this.#assertTree(repositoryPath, plan.commit.treeOid);
+          await this.#assertAcceptTreePolicy(
+            repositoryPath,
+            plan.commit.treeOid,
+            objectFormat,
+          );
+          const persisted = await this.#supervisor.runCommand({
+            arguments: ['cat-file', 'commit', plan.resultOid],
+            captureOutput: true,
+            cwd: repositoryPath,
+            failureCode: 'repository-corrupt',
+          });
+          if (!persisted.equals(bytes)) return acceptError('state-conflict');
+        }
+        const before = await this.#readRefs(repositoryPath);
+        const personalOid = before.get(plan.personalRef);
+        const mainOid = before.get(plan.mainRef);
+        if (personalOid !== plan.expectedHeadOid) return acceptError('stale-head');
+        if (mainOid === plan.resultOid) return 'replayed';
+        if (mainOid !== plan.expectedMainOid || plan.resultKind === 'contained') {
+          return acceptError('stale-main');
+        }
+        await this.#pathPolicy.revalidate(currentPlacement);
+        try {
+          await this.#supervisor.runCommand({
+            arguments: [
+              'update-ref',
+              plan.mainRef,
+              plan.resultOid,
+              plan.expectedMainOid,
+            ],
+            captureOutput: false,
+            cwd: repositoryPath,
+            failureCode: 'repository-corrupt',
+          });
+        } catch (error: unknown) {
+          if (!(error instanceof GitProcessError)) throw error;
+          const raced = await this.#readRefs(repositoryPath);
+          if (raced.get(plan.mainRef) === plan.resultOid) return 'replayed';
+          return acceptError('state-conflict');
+        }
+        const after = await this.#readRefs(repositoryPath);
+        if (
+          after.get(plan.mainRef) !== plan.resultOid
+          || after.size !== before.size
+          || [...before].some(([name, oid]) => (
+            name === plan.mainRef
+              ? after.get(name) !== plan.resultOid
+              : after.get(name) !== oid
+          ))
+        ) return acceptError('state-conflict');
+        return 'advanced';
+      },
+    );
+  }
+
   async reserveReceivePack(
     projectId: CollabProjectId,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
@@ -626,6 +1122,47 @@ export class GitRepositoryAuthority {
     };
     this.#receiveReservations.set(reservation, state);
     this.#activeReceiveReservations.add(state);
+    return reservation;
+  }
+
+  async reserveAccept(
+    projectId: CollabProjectId,
+    options: Readonly<{ readonly signal?: AbortSignal }> = {},
+  ): Promise<ProjectAcceptRepositoryReservation> {
+    this.#assertOpen();
+    let child: GitChildPermit;
+    try {
+      child = await this.#resourceAdmission.acquireGitChild({
+        classification: 'write',
+        projectId,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      });
+    } catch (error: unknown) {
+      if (error instanceof ResourceAdmissionError && error.code === 'cancelled') {
+        throw new ProjectAcceptRepositoryError('cancelled');
+      }
+      throw new ProjectAcceptRepositoryError('unavailable');
+    }
+    const reservation: ProjectAcceptRepositoryReservation = Object.freeze({
+      close: (): Promise<void> => {
+        const state = this.#acceptReservations.get(reservation);
+        if (state?.active === true) {
+          state.active = false;
+          this.#activeAcceptReservations.delete(state);
+          state.child.release();
+        }
+        return Promise.resolve();
+      },
+      projectId,
+    });
+    const state: AcceptReservationState = {
+      active: true,
+      child,
+      inUse: false,
+      projectId,
+    };
+    this.#acceptReservations.set(reservation, state);
+    this.#activeAcceptReservations.add(state);
     return reservation;
   }
 
@@ -932,6 +1469,162 @@ export class GitRepositoryAuthority {
     } finally {
       permit.release();
     }
+  }
+
+  async #runAcceptOperation<T>(
+    reservation: ProjectAcceptRepositoryReservation,
+    placement: RepositoryPlacementLease,
+    signal: AbortSignal | undefined,
+    operation: (
+      repositoryPath: string,
+      placement: RepositoryPlacementLease,
+    ) => Promise<T>,
+  ): Promise<T> {
+    this.#assertOpen();
+    const state = this.#acceptReservations.get(reservation);
+    if (
+      state?.active !== true
+      || state.inUse
+      || state.projectId !== placement.projectId
+      || reservation.projectId !== placement.projectId
+    ) throw new ProjectAcceptRepositoryError('invalid-plan');
+    let placementSnapshot: RepositoryPlacementLease;
+    try {
+      placementSnapshot = createRepositoryPlacementLease(placement);
+    } catch {
+      throw new ProjectAcceptRepositoryError('invalid-plan');
+    }
+    state.inUse = true;
+    try {
+      this.#assertOpen();
+      assertNotAborted(signal);
+      const resolved = await this.#pathPolicy.resolveExisting(placementSnapshot);
+      await this.#pathPolicy.revalidate(placementSnapshot);
+      return await operation(resolved.repositoryPath, placementSnapshot);
+    } catch (error: unknown) {
+      if (error instanceof ProjectAcceptRepositoryError) throw error;
+      if (
+        (error instanceof GitRepositoryError && error.code === 'cancelled')
+        || (error instanceof GitProcessError && error.code === 'cancelled')
+      ) {
+        throw new ProjectAcceptRepositoryError('cancelled');
+      }
+      if (error instanceof RepositoryPlacementError) {
+        if (
+          error.code !== 'placement-unavailable'
+          && error.code !== 'repository-root-unavailable'
+        ) throw new ProjectAcceptRepositoryError('state-conflict');
+        throw new ProjectAcceptRepositoryError('unavailable');
+      }
+      if (error instanceof GitProcessError) {
+        if (
+          error.code !== 'git-unavailable'
+          && error.code !== 'timeout'
+          && error.code !== 'unsupported-git'
+        ) throw new ProjectAcceptRepositoryError('state-conflict');
+        throw new ProjectAcceptRepositoryError('unavailable');
+      }
+      if (error instanceof GitRepositoryError) {
+        throw new ProjectAcceptRepositoryError('unavailable');
+      }
+      throw new ProjectAcceptRepositoryError('unavailable');
+    } finally {
+      state.inUse = false;
+    }
+  }
+
+  #assertAcceptRefs(
+    refs: ReadonlyMap<string, CollabGitOid>,
+    expectedMainOid: CollabGitOid,
+    expectedHeadOid: CollabGitOid,
+    personalRef: string,
+  ): void {
+    if (refs.get(COLLAB_MAIN_REF) !== expectedMainOid) {
+      throw new ProjectAcceptRepositoryError('stale-main');
+    }
+    if (refs.get(personalRef) !== expectedHeadOid) {
+      throw new ProjectAcceptRepositoryError('stale-head');
+    }
+  }
+
+  async #assertCommit(
+    repositoryPath: string,
+    oid: CollabGitOid,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.#supervisor.runCommand({
+      arguments: ['cat-file', '-e', `${oid}^{commit}`],
+      captureOutput: false,
+      cwd: repositoryPath,
+      failureCode: 'repository-corrupt',
+      ...(signal === undefined ? {} : { signal }),
+    });
+  }
+
+  async #assertTree(
+    repositoryPath: string,
+    oid: CollabGitOid,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.#supervisor.runCommand({
+      arguments: ['cat-file', '-e', `${oid}^{tree}`],
+      captureOutput: false,
+      cwd: repositoryPath,
+      failureCode: 'repository-corrupt',
+      ...(signal === undefined ? {} : { signal }),
+    });
+  }
+
+  async #assertAcceptTreePolicy(
+    repositoryPath: string,
+    treeishOid: CollabGitOid,
+    objectFormat: 'sha1' | 'sha256',
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const parser = new AcceptTreePolicyParser(objectFormat);
+    await this.#supervisor.runStreamingCommand({
+      arguments: ['ls-tree', '-r', '-t', '-z', '--full-tree', treeishOid],
+      cwd: repositoryPath,
+      failureCode: 'repository-corrupt',
+      onStdoutChunk: chunk => parser.push(chunk),
+      ...(signal === undefined ? {} : { signal }),
+      stdoutMaxBytes: ACCEPT_TREE_OUTPUT_MAX_BYTES,
+    });
+    parser.finish();
+  }
+
+  async #isAncestor(
+    repositoryPath: string,
+    ancestorOid: CollabGitOid,
+    descendantOid: CollabGitOid,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const output = await this.#supervisor.runCommand({
+      acceptedExitCodes: [0, 1],
+      arguments: ['merge-base', '--all', ancestorOid, descendantOid],
+      captureOutput: true,
+      cwd: repositoryPath,
+      failureCode: 'repository-corrupt',
+      ...(signal === undefined ? {} : { signal }),
+    });
+    const bases = output.toString('ascii').trim().split('\n').filter(Boolean);
+    if (bases.some(base => !isCollabGitOid(base))) {
+      throw new ProjectAcceptRepositoryError('state-conflict');
+    }
+    return bases.includes(ancestorOid);
+  }
+
+  #readAcceptObjectFormat(
+    repositoryPath: string,
+    signal?: AbortSignal,
+  ): Promise<'sha1' | 'sha256'> {
+    return this.#supervisor.runCommand({
+      arguments: ['rev-parse', '--show-object-format'],
+      captureOutput: true,
+      cwd: repositoryPath,
+      failureCode: 'repository-corrupt',
+      ...(signal === undefined ? {} : { signal }),
+    }).then(acceptObjectFormat);
   }
 
   async #runRequestRead<T>(

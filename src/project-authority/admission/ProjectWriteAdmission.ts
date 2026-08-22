@@ -1,6 +1,7 @@
 import type {
   CollabGitOid,
   CollabMemberId,
+  CollabOperationId,
   CollabProjectId,
   CollabRole,
 } from '@claudian/collab-protocol';
@@ -51,7 +52,10 @@ export interface AuthorizedProjectWrite {
   readonly revalidate: () => Promise<void>;
   readonly role: CollabRole;
   readonly signal: AbortSignal;
-  transact<T>(operation: (scope: ProjectScope) => Promise<T>): Promise<T>;
+  transact<T>(
+    operation: (scope: ProjectScope) => Promise<T>,
+    options?: Readonly<{ readonly acceptOperationId?: CollabOperationId }>,
+  ): Promise<T>;
 }
 
 export interface ProjectWriteAdmissionCoordination {
@@ -205,11 +209,19 @@ export class ProjectWriteAdmission {
         await lease.withProjectScope(
           scope => this.#authorizeMember(scope, principal).then(() => undefined),
         );
-        const attempt = await lease.withProjectScope(
-          scope => scope.getNonterminalDevelopmentBootstrapAttempt(),
-        );
-        if (attempt !== undefined) {
-          if (recovered || attempt.state === 'recovery-required') {
+        const recoveryState = await lease.withProjectScope(async scope => ({
+          accept: await scope.accept.getNonterminal(),
+          bootstrap: await scope.getNonterminalDevelopmentBootstrapAttempt(),
+        }));
+        if (
+          recoveryState.bootstrap !== undefined
+          || recoveryState.accept !== undefined
+        ) {
+          if (
+            recovered
+            || recoveryState.bootstrap?.state === 'recovery-required'
+            || recoveryState.accept?.phase === 'recovery-required'
+          ) {
             return fail('recovery-required');
           }
         } else {
@@ -231,10 +243,21 @@ export class ProjectWriteAdmission {
             },
             role: facts.role,
             signal,
-            transact: <T>(operation: (scope: ProjectScope) => Promise<T>) => {
+            transact: <T>(
+              operation: (scope: ProjectScope) => Promise<T>,
+              transactionOptions: Readonly<{
+                readonly acceptOperationId?: CollabOperationId;
+              }> = {},
+            ) => {
               this.#assertAvailable(signal);
               return lease.withProjectScope(async scope => {
-                await this.#revalidate(scope, principal, projectId, facts);
+                await this.#revalidate(
+                  scope,
+                  principal,
+                  projectId,
+                  facts,
+                  transactionOptions.acceptOperationId,
+                );
                 return operation(scope);
               });
             },
@@ -321,9 +344,17 @@ export class ProjectWriteAdmission {
     principal: IngressPrincipal,
     projectId: CollabProjectId,
     expected: AuthorizedFacts,
+    acceptOperationId?: CollabOperationId,
   ): Promise<void> {
     const current = await this.#authorize(scope, principal, projectId);
-    if (await scope.getNonterminalDevelopmentBootstrapAttempt() !== undefined) {
+    const accept = await scope.accept.getNonterminal();
+    if (
+      await scope.getNonterminalDevelopmentBootstrapAttempt() !== undefined
+      || (
+        accept !== undefined
+        && accept.operationId !== acceptOperationId
+      )
+    ) {
       return fail('recovery-required');
     }
     if (
