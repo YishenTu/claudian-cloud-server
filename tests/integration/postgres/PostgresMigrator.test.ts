@@ -16,6 +16,7 @@ const FOUNDATION_CHECKSUM = '5e883d93536b2569f3655cc9f3982c4ad7e8e3daf7871500dc5
 const DEVELOPMENT_BOOTSTRAP_CHECKSUM = '18d367c9ef8a0d39d0d072bc2ed89b1b6f75bf306585adb6138c66b3e5a9afe6';
 const PROJECT_READ_EVENTS_CHECKSUM = 'd490c9083abc5e0294c9d144d832b5070040276d716555d398ca80456aecf9d8';
 const COLLABORATION_CHECKSUM = '13ee2c7de2b189fb502a6610bff250f9de9133a82d79c153658251cf7f5a5780';
+const ACCEPT_RECOVERY_CHECKSUM = '0f0e91dd7be0ac961222c8802925425b87d6b540f87f1eebca89bde3efb4a1bd';
 
 async function execute(connectionString: string, sql: string): Promise<void> {
   const client = new Client({ connectionString });
@@ -122,6 +123,12 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
         state: 'applied',
         version: 4,
       },
+      {
+        checksum: ACCEPT_RECOVERY_CHECKSUM,
+        name: 'accept-recovery',
+        state: 'applied',
+        version: 5,
+      },
     ]);
 
     const relations = await client.query<{ readonly relation: string }>(
@@ -133,6 +140,8 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
     assert.deepEqual(
       relations.rows.map(row => row.relation),
       [
+        'accept_journal_relations',
+        'accept_journals',
         'active_repository_placement_catalog',
         'change_requests',
         'development_actor_mappings',
@@ -174,10 +183,10 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
     await client.query(
       `INSERT INTO claudian_cloud.schema_migrations
         (version, name, checksum, state, applied_at)
-       VALUES (5, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
+       VALUES (6, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
     );
-    await expectMigrationError(migrator, 'schema-newer', 5);
-    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 5');
+    await expectMigrationError(migrator, 'schema-newer', 6);
+    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 6');
 
     await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 1');
     await expectMigrationError(migrator, 'schema-gap', 2);
@@ -236,6 +245,8 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
         ORDER BY c.relname`,
     );
     assert.deepEqual(ownership.rows, [
+      { owner: 'claudian_cloud_migration', relation: 'accept_journal_relations' },
+      { owner: 'claudian_cloud_migration', relation: 'accept_journals' },
       { owner: 'claudian_cloud_migration', relation: 'active_repository_placement_catalog' },
       { owner: 'claudian_cloud_migration', relation: 'change_requests' },
       { owner: 'claudian_cloud_migration', relation: 'development_actor_mappings' },
@@ -292,6 +303,8 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
         ORDER BY table_name, privilege_type`,
     );
     const privilegesByRelation: Readonly<Record<string, readonly string[]>> = {
+      accept_journal_relations: ['INSERT', 'SELECT'],
+      accept_journals: ['INSERT', 'SELECT'],
       active_repository_placement_catalog: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       change_requests: ['INSERT', 'SELECT', 'UPDATE'],
       development_actor_mappings: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
@@ -331,6 +344,14 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
         ORDER BY tablename`,
     );
     assert.deepEqual(policies.rows, [
+      {
+        policy_name: 'accept_journal_relations_project_scope',
+        relation: 'accept_journal_relations',
+      },
+      {
+        policy_name: 'accept_journals_project_scope',
+        relation: 'accept_journals',
+      },
       {
         policy_name: 'change_requests_project_scope',
         relation: 'change_requests',

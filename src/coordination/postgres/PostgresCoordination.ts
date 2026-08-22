@@ -69,6 +69,7 @@ import {
   projectLockKey,
 } from '../ProjectLockKey.js';
 import { PostgresDevelopmentBootstrapPersistence } from './PostgresDevelopmentBootstrapPersistence.js';
+import { PostgresAcceptPersistence } from './PostgresAcceptPersistence.js';
 import { PostgresCollaborationPersistence } from './PostgresCollaborationPersistence.js';
 import { POSTGRES_SCHEMAS } from './PostgresSchema.js';
 
@@ -475,6 +476,7 @@ async function checkout(
 class PostgresProjectScope
   extends PostgresDevelopmentBootstrapPersistence
   implements ProjectScope {
+  readonly accept: PostgresAcceptPersistence;
   readonly collaboration: PostgresCollaborationPersistence;
   readonly #client: PoolClient;
   readonly #markBroken: MarkBroken;
@@ -486,18 +488,24 @@ class PostgresProjectScope
     projectId: CollabProjectId,
     markBroken: MarkBroken,
   ) {
+    const query = <Row extends QueryResultRow>(
+      text: string,
+      values: readonly unknown[],
+    ): Promise<readonly Row[]> => safeQuery<Row>(client, text, values, markBroken);
     super(
       projectId,
-      <Row extends QueryResultRow>(text: string, values: readonly unknown[]) => (
-        safeQuery<Row>(client, text, values, markBroken)
-      ),
+      query,
     );
     this.collaboration = new PostgresCollaborationPersistence(
       projectId,
-      <Row extends QueryResultRow>(text: string, values: readonly unknown[]) => (
-        safeQuery<Row>(client, text, values, markBroken)
-      ),
+      query,
     );
+    this.accept = new PostgresAcceptPersistence({
+      appendProjectEvent: event => this.appendProjectEvent(event),
+      collaboration: this.collaboration,
+      projectId,
+      query,
+    });
     this.#client = client;
     this.#projectId = projectId;
     this.#markBroken = markBroken;
