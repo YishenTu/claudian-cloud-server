@@ -5,6 +5,10 @@ import type {
 
 import type { DevelopmentBootstrapProjectPersistence } from './DevelopmentBootstrapPersistence.js';
 import type {
+  CollaborationProjectPersistence,
+  CollaborationReadPersistence,
+} from './CollaborationPersistence.js';
+import type {
   ProjectEventPersistence,
   ProjectEventReader,
 } from './ProjectEventPersistence.js';
@@ -36,6 +40,7 @@ export interface ProjectReadScope
   >,
   ProjectEventReader,
   ProjectPersistence {
+  readonly collaboration: CollaborationReadPersistence;
   findMembership(memberId: CollabMemberId): Promise<ProjectMembershipRecord | undefined>;
   getRepositoryPlacement(): Promise<RepositoryPlacementLease | undefined>;
   listActiveSnapshotMemberships(): Promise<readonly ProjectSnapshotMembershipRecord[]>;
@@ -45,6 +50,7 @@ export interface ProjectScope
   extends DevelopmentBootstrapProjectPersistence,
   ProjectEventPersistence,
   ProjectPersistence {
+  readonly collaboration: CollaborationProjectPersistence;
   findMembership(memberId: CollabMemberId): Promise<ProjectMembershipRecord | undefined>;
   getRepositoryPlacement(): Promise<RepositoryPlacementLease | undefined>;
   listMemberships(): Promise<readonly ProjectMembershipRecord[]>;

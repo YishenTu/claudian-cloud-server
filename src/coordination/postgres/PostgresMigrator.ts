@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { Client } from 'pg';
 
 import {
+  COLLABORATION_SCHEMA,
   DEVELOPMENT_BOOTSTRAP_SCHEMA,
   FOUNDATION_SCHEMA,
   PROJECT_READ_EVENTS_SCHEMA,
@@ -90,6 +91,15 @@ const MIGRATION_RESOURCES = Object.freeze([
       import.meta.url,
     ),
     version: PROJECT_READ_EVENTS_SCHEMA.version,
+  }),
+  Object.freeze({
+    checksum: COLLABORATION_SCHEMA.checksum,
+    name: COLLABORATION_SCHEMA.name,
+    resource: new URL(
+      './migrations/0004_collaboration.sql',
+      import.meta.url,
+    ),
+    version: COLLABORATION_SCHEMA.version,
   }),
 ]);
 
