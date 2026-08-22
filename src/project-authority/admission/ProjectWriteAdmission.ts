@@ -6,15 +6,20 @@ import type {
 } from '@claudian/collab-protocol';
 
 import type {
+  AcquireProjectLeaseOptions,
   PinnedProjectLease,
+  ProjectReadScope,
   ProjectScope,
 } from '../../coordination/ProjectCoordination.js';
+import { CoordinationError } from '../../coordination/CoordinationError.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
 import type { RepositoryPlacementLease } from '../../repositories/RepositoryPlacement.js';
 
 export type ProjectWriteAdmissionErrorCode =
   | 'authorization-denied'
+  | 'cancelled'
   | 'closed'
+  | 'dependency-failed'
   | 'recovery-required'
   | 'state-conflict';
 
@@ -48,7 +53,15 @@ export interface AuthorizedProjectWrite {
 }
 
 export interface ProjectWriteAdmissionCoordination {
-  acquireProjectLease(projectId: CollabProjectId): Promise<PinnedProjectLease>;
+  acquireProjectLease(
+    projectId: CollabProjectId,
+    options?: AcquireProjectLeaseOptions,
+  ): Promise<PinnedProjectLease>;
+  withProjectReadScope<T>(
+    projectId: CollabProjectId,
+    operation: (scope: ProjectReadScope) => Promise<T>,
+    options?: AcquireProjectLeaseOptions,
+  ): Promise<T>;
 }
 
 export interface ProjectRecoveryPort {
@@ -68,6 +81,12 @@ interface AuthorizedFacts {
   readonly role: CollabRole;
 }
 
+interface AuthorizedMemberFacts {
+  readonly memberId: CollabMemberId;
+  readonly membershipRevision: bigint;
+  readonly role: CollabRole;
+}
+
 function fail(code: ProjectWriteAdmissionErrorCode): never {
   throw new ProjectWriteAdmissionError(code);
 }
@@ -83,6 +102,7 @@ function samePlacement(
 }
 
 export class ProjectWriteAdmission {
+  readonly #controllers = new Set<AbortController>();
   readonly #coordination: ProjectWriteAdmissionCoordination;
   readonly #recovery: ProjectRecoveryPort;
   readonly #running = new Set<Promise<void>>();
@@ -98,20 +118,71 @@ export class ProjectWriteAdmission {
     principal: IngressPrincipal,
     projectId: CollabProjectId,
     operation: (write: AuthorizedProjectWrite) => Promise<T>,
+    options: AcquireProjectLeaseOptions = {},
+  ): Promise<T> {
+    return this.#track(options, signal => this.#run(
+      principal,
+      projectId,
+      operation,
+      signal,
+    ));
+  }
+
+  preflight(
+    principal: IngressPrincipal,
+    projectId: CollabProjectId,
+    options: AcquireProjectLeaseOptions = {},
+  ): Promise<void> {
+    return this.#track(options, signal => {
+      this.#assertAvailable(signal);
+      return this.#coordination.withProjectReadScope(
+        projectId,
+        scope => this.#authorizeMember(scope, principal).then(() => undefined),
+        { signal },
+      );
+    });
+  }
+
+  #track<T>(
+    options: AcquireProjectLeaseOptions,
+    operation: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
     if (this.#closed) {
       return Promise.reject(new ProjectWriteAdmissionError('closed'));
     }
-    const running = this.#run(principal, projectId, operation);
+    const controller = new AbortController();
+    const onAbort = (): void => controller.abort();
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+    if (options.signal?.aborted === true) controller.abort();
+    this.#controllers.add(controller);
+    const running = Promise.resolve().then(
+      () => operation(controller.signal),
+    ).catch((error: unknown) => {
+      if (!(error instanceof CoordinationError)) throw error;
+      if (error.code === 'cancelled') return fail('cancelled');
+      if (error.code === 'closed') return fail('closed');
+      if (
+        error.code === 'invalid-member'
+        || error.code === 'invalid-project'
+        || error.code === 'invalid-record'
+        || error.code === 'state-conflict'
+      ) return fail('state-conflict');
+      return fail('dependency-failed');
+    });
     const tracked = running.then(() => undefined, () => undefined);
     this.#running.add(tracked);
-    void tracked.finally(() => this.#running.delete(tracked));
+    void tracked.finally(() => {
+      options.signal?.removeEventListener('abort', onAbort);
+      this.#controllers.delete(controller);
+      this.#running.delete(tracked);
+    });
     return running;
   }
 
   close(): Promise<void> {
     if (this.#closePromise === undefined) {
       this.#closed = true;
+      for (const controller of this.#controllers) controller.abort();
       this.#closePromise = Promise.allSettled([...this.#running]).then(() => undefined);
     }
     return this.#closePromise;
@@ -121,11 +192,17 @@ export class ProjectWriteAdmission {
     principal: IngressPrincipal,
     projectId: CollabProjectId,
     operation: (write: AuthorizedProjectWrite) => Promise<T>,
+    signal: AbortSignal,
   ): Promise<T> {
     let recovered = false;
     for (;;) {
-      const lease = await this.#coordination.acquireProjectLease(projectId);
+      this.#assertAvailable(signal);
+      const lease = await this.#coordination.acquireProjectLease(projectId, { signal });
       try {
+        this.#assertAvailable(signal);
+        await lease.withProjectScope(
+          scope => this.#authorizeMember(scope, principal).then(() => undefined),
+        );
         const attempt = await lease.withProjectScope(
           scope => scope.getNonterminalDevelopmentBootstrapAttempt(),
         );
@@ -144,9 +221,12 @@ export class ProjectWriteAdmission {
             membershipRevision: facts.membershipRevision,
             placement: facts.placement,
             projectId,
-            revalidate: () => lease.withProjectScope(scope => (
-              this.#revalidate(scope, principal, projectId, facts)
-            )),
+            revalidate: () => {
+              this.#assertAvailable(signal);
+              return lease.withProjectScope(scope => (
+                this.#revalidate(scope, principal, projectId, facts)
+              ));
+            },
             role: facts.role,
           });
           return await operation(write);
@@ -154,8 +234,38 @@ export class ProjectWriteAdmission {
       } finally {
         await lease.close();
       }
-      await this.#recovery.recoverProject(projectId);
+      await this.#waitForRecovery(projectId, signal);
       recovered = true;
+    }
+  }
+
+  #assertAvailable(signal: AbortSignal): void {
+    if (this.#closed) fail('closed');
+    if (signal.aborted) fail('cancelled');
+  }
+
+  async #waitForRecovery(
+    projectId: CollabProjectId,
+    signal: AbortSignal,
+  ): Promise<void> {
+    this.#assertAvailable(signal);
+    const recovery = this.#recovery.recoverProject(projectId);
+    let abortListener: (() => void) | undefined;
+    try {
+      await Promise.race([
+        recovery,
+        new Promise<never>((_resolve, reject) => {
+          abortListener = () => reject(new ProjectWriteAdmissionError(
+            this.#closed ? 'closed' : 'cancelled',
+          ));
+          signal.addEventListener('abort', abortListener, { once: true });
+          if (signal.aborted) abortListener();
+        }),
+      ]);
+    } finally {
+      if (abortListener !== undefined) {
+        signal.removeEventListener('abort', abortListener);
+      }
     }
   }
 
@@ -164,22 +274,34 @@ export class ProjectWriteAdmission {
     principal: IngressPrincipal,
     projectId: CollabProjectId,
   ): Promise<AuthorizedFacts> {
+    const member = await this.#authorizeMember(scope, principal);
     const project = await scope.getProject();
-    if (project === undefined) return fail('state-conflict');
+    if (project === undefined) return fail('authorization-denied');
     if (project.serviceState !== 'active') return fail('recovery-required');
-    const memberId = await scope.findDevelopmentActorMember(principal.actorId);
-    if (memberId === undefined) return fail('authorization-denied');
-    const membership = await scope.findMembership(memberId);
-    if (membership?.status !== 'active') return fail('authorization-denied');
     const placement = await scope.getRepositoryPlacement();
     if (placement === undefined || placement.projectId !== projectId) {
       return fail('state-conflict');
     }
     return Object.freeze({
       expectedMainOid: project.expectedMainOid,
+      memberId: member.memberId,
+      membershipRevision: member.membershipRevision,
+      placement,
+      role: member.role,
+    });
+  }
+
+  async #authorizeMember(
+    scope: Pick<ProjectReadScope, 'findDevelopmentActorMember' | 'findMembership'>,
+    principal: IngressPrincipal,
+  ): Promise<AuthorizedMemberFacts> {
+    const memberId = await scope.findDevelopmentActorMember(principal.actorId);
+    if (memberId === undefined) return fail('authorization-denied');
+    const membership = await scope.findMembership(memberId);
+    if (membership?.status !== 'active') return fail('authorization-denied');
+    return Object.freeze({
       memberId,
       membershipRevision: membership.revision,
-      placement,
       role: membership.role,
     });
   }
@@ -190,10 +312,10 @@ export class ProjectWriteAdmission {
     projectId: CollabProjectId,
     expected: AuthorizedFacts,
   ): Promise<void> {
+    const current = await this.#authorize(scope, principal, projectId);
     if (await scope.getNonterminalDevelopmentBootstrapAttempt() !== undefined) {
       return fail('recovery-required');
     }
-    const current = await this.#authorize(scope, principal, projectId);
     if (
       current.expectedMainOid !== expected.expectedMainOid
       || current.memberId !== expected.memberId

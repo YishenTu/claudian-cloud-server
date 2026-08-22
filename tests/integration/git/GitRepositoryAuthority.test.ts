@@ -12,6 +12,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -242,6 +243,39 @@ async function closeFakeAuthority(fixture: Awaited<ReturnType<typeof createFakeA
 }
 
 describe('GitRepositoryAuthority', () => {
+  it('rejects receive cleanup through a symlinked object directory', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'claudian-git-cleanup-containment-'));
+    const accepted = placement('repository');
+    const bare = repositoryPath(root, accepted);
+    const outside = join(root, 'outside-objects');
+    const victim = join(outside, 'incoming-victim');
+    const resourceAdmission = admission();
+    const authority = new GitRepositoryAuthority({
+      gitExecutable: GIT_EXECUTABLE,
+      operationTimeoutMs: 2_000,
+      outputMaxBytes: 64 * 1_024,
+      placementValidator: new CurrentPlacementValidator(),
+      repositoryRoot: root,
+      resourceAdmission,
+      storageNodeId: 'node-a',
+    });
+    try {
+      await mkdir(bare, { recursive: true });
+      await mkdir(victim, { recursive: true });
+      await symlink(outside, join(bare, 'objects'));
+
+      await expectGitError(
+        authority.cleanupReceivePackState(accepted),
+        'repository-corrupt',
+      );
+      await access(victim);
+    } finally {
+      await authority.close();
+      await resourceAdmission.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
   it('verifies a current contained bare repository with real Git', async () => {
     const root = await mkdtemp(join(tmpdir(), 'claudian-git-authority-'));
     const resourceAdmission = admission();

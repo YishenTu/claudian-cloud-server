@@ -11,6 +11,7 @@ import { DevelopmentBootstrapExpiryReconciler } from '../onboarding/development/
 import type { SafeLogger } from '../observability/SafeLogger.js';
 import { ProjectActivationCoordinator } from '../project-authority/lifecycle/ProjectActivationCoordinator.js';
 import { ProjectReadAuthority } from '../project-authority/reads/ProjectReadAuthority.js';
+import { ProjectPersonalRefAuthority } from '../project-authority/writes/ProjectPersonalRefAuthority.js';
 import { ProjectEventWakeup } from '../project-authority/reads/ProjectEventWakeup.js';
 import { ActiveRepositoryIntegrityGate } from '../project-authority/lifecycle/ActiveRepositoryIntegrityGate.js';
 import { GitBundleImporter } from '../repositories/GitBundleImporter.js';
@@ -27,12 +28,14 @@ import {
 import { DevelopmentPrincipalAdapter } from '../request-context/DevelopmentPrincipalAdapter.js';
 import { BootstrapUploadAdmission } from '../resource-admission/BootstrapUploadAdmission.js';
 import { ProjectEventAdmission } from '../resource-admission/ProjectEventAdmission.js';
+import { GitReceiveAdmission } from '../resource-admission/GitReceiveAdmission.js';
 import { ResourceAdmission } from '../resource-admission/ResourceAdmission.js';
 import { CloudCapabilitiesRoute } from '../server/CloudCapabilitiesRoute.js';
 import { DevelopmentBootstrapRoutes } from '../server/DevelopmentBootstrapRoutes.js';
 import { ProjectSnapshotRoutes } from '../server/control/ProjectSnapshotRoutes.js';
 import { ProjectEventRoutes } from '../server/events/ProjectEventRoutes.js';
 import { GitUploadPackRoutes } from '../server/git/GitUploadPackRoutes.js';
+import { GitReceivePackRoutes } from '../server/git/GitReceivePackRoutes.js';
 import {
   HttpServer,
   type HttpServerAddress,
@@ -143,6 +146,7 @@ class CloudApplication implements Application {
   readonly #projectEventAdmission: ProjectEventAdmission;
   readonly #projectEventWakeup: ProjectEventWakeup;
   readonly #projectReadAuthority: ProjectReadAuthority;
+  readonly #projectPersonalRefAuthority: ProjectPersonalRefAuthority;
   readonly #repositoryAuthority: GitRepositoryAuthority;
   readonly #repositoryPublication: RepositoryPublication;
   readonly #resourceAdmission: ResourceAdmission;
@@ -171,6 +175,24 @@ class CloudApplication implements Application {
       operationTimeoutMs: options.config.repository.operationTimeoutMs,
       outputMaxBytes: options.config.repository.outputMaxBytes,
       placementValidator: this.#coordination,
+      receiveAdmission: new GitReceiveAdmission({
+        capacityTimeoutMs: options.config.gitAdmission.queueTimeoutMs,
+        freeSpaceFloorBytes:
+          options.config.developmentBootstrap.stagingFreeSpaceFloorBytes,
+        maxConcurrentReceives: options.config.gitAdmission.maxWriteChildren,
+        maxConcurrentReceivesPerProject: 1,
+        maximumRequestBytes:
+          COLLAB_CLOUD_BINDING_LIMITS.maxGitReceivePackBytes,
+        repositoryRoot: options.config.repository.root,
+        reservationBytes: options.config.developmentBootstrap.maxRepositoryBytes,
+      }),
+      receivePolicy: {
+        maximumBlobBytes: COLLAB_LIMITS.maxBlobBytes,
+        maximumExpandedTreeEntries: 100_000,
+        maximumRepositoryBytes:
+          options.config.developmentBootstrap.maxRepositoryBytes,
+        maximumTreeEntries: COLLAB_LIMITS.maxChangedPaths,
+      },
       repositoryRoot: options.config.repository.root,
       resourceAdmission: this.#resourceAdmission,
       storageNodeId: options.config.repository.storageNodeId,
@@ -230,6 +252,11 @@ class CloudApplication implements Application {
       publication: this.#repositoryPublication,
       uploadGate: developmentBootstrapUploadGate,
     });
+    this.#projectPersonalRefAuthority = new ProjectPersonalRefAuthority({
+      coordination: this.#coordination,
+      recovery: this.#activationCoordinator,
+      repository: this.#repositoryAuthority,
+    });
     this.#activeRepositoryIntegrity = new ActiveRepositoryIntegrityGate({
       coordination: this.#coordination,
       repository: this.#repositoryAuthority,
@@ -248,6 +275,7 @@ class CloudApplication implements Application {
     const capabilitiesRoute = new CloudCapabilitiesRoute({
       enabledCapabilities: new Set([
         'development-bootstrap',
+        'git-receive-pack-personal-ref',
         'git-upload-pack',
         'project-events',
         'project-snapshot',
@@ -293,6 +321,13 @@ class CloudApplication implements Application {
       operationTimeoutMs: options.config.repository.operationTimeoutMs,
       principalAdapter,
     });
+    const gitReceivePackRoutes = new GitReceivePackRoutes({
+      authority: this.#projectPersonalRefAuthority,
+      maximumRequestBytes: COLLAB_CLOUD_BINDING_LIMITS.maxGitReceivePackBytes,
+      maximumResponseBytes: options.config.repository.outputMaxBytes,
+      operationTimeoutMs: options.config.repository.operationTimeoutMs,
+      principalAdapter,
+    });
     this.#httpServer = new HttpServer({
       config: options.config.http,
       isReady: () => this.#state === 'ready',
@@ -300,6 +335,7 @@ class CloudApplication implements Application {
         capabilitiesRoute,
         bootstrapRoutes,
         projectSnapshotRoutes,
+        gitReceivePackRoutes,
         gitUploadPackRoutes,
       ],
       upgradeRoutes: [this.#projectEventRoutes],
@@ -423,9 +459,11 @@ class CloudApplication implements Application {
     const eventClose = this.#projectEventRoutes.close();
     this.#projectEventWakeup.close();
     const readClose = this.#projectReadAuthority.close();
+    const personalRefClose = this.#projectPersonalRefAuthority.close();
     results.push(await settleBefore(eventClose, deadline));
     results.push(await settleBefore(eventAdmissionClose, deadline));
     results.push(await settleBefore(readClose, deadline));
+    results.push(await settleBefore(personalRefClose, deadline));
     results.push(await settleBefore(httpClose, deadline));
     results.push(await settleBefore(this.#bootstrapExpiryReconciler.close(), deadline));
     results.push(await settleBefore(this.#activationCoordinator.close(), deadline));
