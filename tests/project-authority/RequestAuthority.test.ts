@@ -217,6 +217,7 @@ class MemoryCoordination implements ProjectRequestAuthorityCoordination {
 
   scope(): ProjectScope & ProjectReadScope {
     return {
+      accept: { getNonterminal: () => Promise.resolve(undefined) },
       appendProjectEvent: (
         input: Parameters<ProjectScope['appendProjectEvent']>[0],
       ) => {

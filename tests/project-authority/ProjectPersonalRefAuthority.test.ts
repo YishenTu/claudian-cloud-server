@@ -67,6 +67,7 @@ class MemoryCoordination {
       withProjectScope: async <T>(
         operation: (scope: ProjectScope) => Promise<T>,
       ): Promise<T> => operation({
+        accept: { getNonterminal: () => Promise.resolve(undefined) },
         findDevelopmentActorMember: (actorId: string) => Promise.resolve(
           actorId,
         ),
@@ -221,6 +222,7 @@ describe('ProjectPersonalRefAuthority', () => {
             withProjectScope: <T>(
               operation: (scope: ProjectScope) => Promise<T>,
             ): Promise<T> => operation({
+              accept: { getNonterminal: () => Promise.resolve(undefined) },
               findDevelopmentActorMember: () => Promise.resolve(undefined),
               findMembership: () => Promise.resolve(undefined),
               getNonterminalDevelopmentBootstrapAttempt: () => Promise.resolve(
@@ -306,6 +308,7 @@ describe('ProjectPersonalRefAuthority', () => {
             withProjectScope: <T>(
               operation: (scope: ProjectScope) => Promise<T>,
             ): Promise<T> => operation({
+              accept: { getNonterminal: () => Promise.resolve(undefined) },
               findDevelopmentActorMember: () => Promise.resolve('member-a'),
               findMembership: () => Promise.resolve(activeMember),
               getNonterminalDevelopmentBootstrapAttempt: () => Promise.resolve({
