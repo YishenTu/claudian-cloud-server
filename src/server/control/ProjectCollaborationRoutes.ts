@@ -7,6 +7,7 @@ import {
   type CollabControlOperationMap,
 } from '@claudian/collab-protocol';
 
+import type { ProjectAcceptCoordinator } from '../../project-authority/acceptance/ProjectAcceptCoordinator.js';
 import type { ProjectRequestAuthority } from '../../project-authority/requests/ProjectRequestAuthority.js';
 import type { ProjectTicketAuthority } from '../../project-authority/tickets/ProjectTicketAuthority.js';
 import type { DevelopmentPrincipalAdapter } from '../../request-context/DevelopmentPrincipalAdapter.js';
@@ -19,7 +20,7 @@ import {
 
 type ActiveCollaborationOperation = Exclude<
   CollabControlOperation,
-  'acceptRequest' | 'getProjectSnapshot'
+  'getProjectSnapshot'
 >;
 
 function unsupportedOperation(operation: never): never {
@@ -27,6 +28,7 @@ function unsupportedOperation(operation: never): never {
 }
 
 export interface ProjectCollaborationRoutesOptions {
+  readonly acceptAuthority: ProjectAcceptCoordinator;
   readonly maximumJsonBytes: number;
   readonly operationTimeoutMs: number;
   readonly principalAdapter: DevelopmentPrincipalAdapter;
@@ -58,11 +60,13 @@ function assertPathProject(
 }
 
 export class ProjectCollaborationRoutes {
+  readonly #acceptAuthority: ProjectAcceptCoordinator;
   readonly #requestAuthority: ProjectRequestAuthority;
   readonly #ticketAuthority: ProjectTicketAuthority;
   readonly #transport: ProjectJsonTransport;
 
   constructor(options: ProjectCollaborationRoutesOptions) {
+    this.#acceptAuthority = options.acceptAuthority;
     this.#requestAuthority = options.requestAuthority;
     this.#ticketAuthority = options.ticketAuthority;
     this.#transport = new ProjectJsonTransport(options);
@@ -73,7 +77,6 @@ export class ProjectCollaborationRoutes {
     if (
       match?.kind !== 'project-operation'
       || match.operation === 'getProjectSnapshot'
-      || match.operation === 'acceptRequest'
     ) {
       return false;
     }
@@ -94,6 +97,13 @@ export class ProjectCollaborationRoutes {
   ): Promise<unknown> {
     const options = { signal: context.signal };
     switch (operation) {
+      case 'acceptRequest': {
+        const request = decodedRequest(operation, context.data);
+        assertPathProject(pathProjectId, request);
+        return collabControlOperationCodec(operation).decodeResponse(
+          await this.#acceptAuthority.accept(context.principal, request, options),
+        );
+      }
       case 'getRequest': {
         const request = decodedRequest(operation, context.data);
         assertPathProject(pathProjectId, request);

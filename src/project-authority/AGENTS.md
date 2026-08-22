@@ -16,7 +16,9 @@
 - Development bundle staging acquires its process-local gate and atomically hands the canonical Project lock to an attempt-scoped PostgreSQL shared upload fence before streaming. After persisting settlement intent, Project authority closes the local gate, aborts staging, drains the matching exclusive database fence, and only then publishes or deletes the attempt artifact.
 - Accept advances only through `prepared`, `result-persisted`, `main-updated`, and `completed`. Its deterministic commit plan is durable at `prepared`, its verified result OID is durable before protected-main CAS, and ordinary cancellation cannot own it afterward.
 - Accept reserves its Project-scoped Git child before acquiring the canonical Project lease and holds that reservation through inspection and settlement. Do not acquire Git capacity from inside the lease: receive-pack uses the same capacity-before-lease order, and inversion can deadlock the Project.
+- Receive-pack resolves pending recovery during its capacity-free authorization preflight, then reserves Git capacity and re-enters write admission to close the race. It never invokes recovery while holding its receive reservation.
 - The bounded global recovery catalog schedules work but grants no authority. Startup and every on-demand Project admission acquire the canonical Project lock, enter Project scope, and re-read the authoritative journal before recovery, isolation, or new work.
+- One mixed recovery dispatcher routes catalog candidates and ordinary write-admission recovery to the activation or Accept owner. The dispatcher owns no recovery policy and never treats catalog metadata as authority.
 - Reads may run concurrently only when they cannot expose a mixed authoritative snapshot. Membership changes re-evaluate queued work and event access.
 
 ## Lifecycle scope

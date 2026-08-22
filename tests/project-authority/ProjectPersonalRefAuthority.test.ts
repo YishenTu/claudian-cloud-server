@@ -176,7 +176,19 @@ describe('ProjectPersonalRefAuthority', () => {
     const events: string[] = [];
     const repository = new MemoryRepository(events);
     const coordination = {
-      acquireProjectLease: () => Promise.reject(new Error('lease-not-expected')),
+      acquireProjectLease: (): Promise<PinnedProjectLease> => Promise.resolve({
+        close: () => Promise.resolve(),
+        drainDevelopmentBootstrapUploads: () => Promise.resolve(),
+        handoffToDevelopmentBootstrapUpload: () => Promise.reject(
+          new Error('unexpected-upload-handoff'),
+        ),
+        withProjectScope: <T>(
+          operation: (scope: ProjectScope) => Promise<T>,
+        ): Promise<T> => operation({
+          findDevelopmentActorMember: () => Promise.resolve(undefined),
+          findMembership: () => Promise.resolve(undefined),
+        } as unknown as ProjectScope),
+      }),
       withProjectReadScope: <T>(
         _projectId: CollabProjectId,
         operation: (scope: ProjectReadScope) => Promise<T>,
@@ -211,9 +223,12 @@ describe('ProjectPersonalRefAuthority', () => {
     for (const recoveryShape of ['attempt', 'service'] as const) {
       const events: string[] = [];
       const repository = new MemoryRepository(events);
+      let leaseCount = 0;
       const coordination = {
-        acquireProjectLease: (projectId: CollabProjectId): Promise<PinnedProjectLease> => (
-          Promise.resolve({
+        acquireProjectLease: (projectId: CollabProjectId): Promise<PinnedProjectLease> => {
+          leaseCount += 1;
+          const preflight = leaseCount === 1;
+          return Promise.resolve({
             close: () => Promise.resolve(),
             drainDevelopmentBootstrapUploads: () => Promise.resolve(),
             handoffToDevelopmentBootstrapUpload: () => Promise.reject(
@@ -223,10 +238,20 @@ describe('ProjectPersonalRefAuthority', () => {
               operation: (scope: ProjectScope) => Promise<T>,
             ): Promise<T> => operation({
               accept: { getNonterminal: () => Promise.resolve(undefined) },
-              findDevelopmentActorMember: () => Promise.resolve(undefined),
-              findMembership: () => Promise.resolve(undefined),
+              findDevelopmentActorMember: () => Promise.resolve(
+                preflight ? 'member-a' : undefined,
+              ),
+              findMembership: () => Promise.resolve(preflight
+                ? {
+                    displayName: 'Member A',
+                    memberId: 'member-a',
+                    revision: 1n,
+                    role: 'member' as const,
+                    status: 'active' as const,
+                  }
+                : undefined),
               getNonterminalDevelopmentBootstrapAttempt: () => Promise.resolve(
-                recoveryShape === 'attempt'
+                !preflight && recoveryShape === 'attempt'
                   ? ({ state: 'recovery-required' } as never)
                   : undefined,
               ),
@@ -237,13 +262,22 @@ describe('ProjectPersonalRefAuthority', () => {
                 managerSetGeneration: 1,
                 projectId,
                 projectName: projectId,
-                serviceState: recoveryShape === 'service'
+                serviceState: !preflight && recoveryShape === 'service'
                   ? 'recovery-required' as const
                   : 'active' as const,
               }),
+              getRepositoryPlacement: () => Promise.resolve(
+                createRepositoryPlacementLease({
+                  active: true,
+                  generation: 1,
+                  projectId,
+                  repositoryStorageKey: 'repository-project-a',
+                  storageNodeId: 'node-a',
+                }),
+              ),
             } as unknown as ProjectScope),
-          })
-        ),
+          });
+        },
         withProjectReadScope: <T>(
           _projectId: CollabProjectId,
           operation: (scope: ProjectReadScope) => Promise<T>,
@@ -284,7 +318,7 @@ describe('ProjectPersonalRefAuthority', () => {
     }
   });
 
-  it('releases receive capacity when cancellation stops waiting for recovery', async () => {
+  it('does not reserve receive capacity when preflight recovery is cancelled', async () => {
     for (const settlement of ['abort', 'close'] as const) {
       let recoveryEntered!: () => void;
       const entered = new Promise<void>(resolve => { recoveryEntered = resolve; });
@@ -357,10 +391,7 @@ describe('ProjectPersonalRefAuthority', () => {
       );
       if (closing !== undefined) await within(closing, 'recovery-close');
       else await authority.close();
-      assert.deepEqual(events, [
-        'resource:project-a',
-        'resource-release:project-a',
-      ]);
+      assert.deepEqual(events, []);
     }
   });
 
@@ -402,9 +433,18 @@ describe('ProjectPersonalRefAuthority', () => {
       );
       while (!repository.entered.includes('project-b')) await Promise.resolve();
       assert.deepEqual(repository.entered, ['project-a', 'project-b']);
+      const projectALockRequests = events.flatMap((event, index) => (
+        event === 'lock-request:project-a' ? [index] : []
+      ));
+      const projectAResource = events.indexOf('resource:project-a');
       assert.equal(
-        events.indexOf('resource:project-a')
-          < events.indexOf('lock-request:project-a'),
+        (projectALockRequests[0] ?? Number.POSITIVE_INFINITY)
+          < projectAResource,
+        true,
+      );
+      assert.equal(
+        projectAResource
+          < (projectALockRequests[1] ?? Number.NEGATIVE_INFINITY),
         true,
       );
 

@@ -74,6 +74,21 @@ export interface ProjectRecoveryPort {
   recoverProject(projectId: CollabProjectId): Promise<void>;
 }
 
+export type ProjectRecoveryErrorCode =
+  | 'closed'
+  | 'dependency-failed'
+  | 'recovery-required';
+
+export class ProjectRecoveryError extends Error {
+  readonly code: ProjectRecoveryErrorCode;
+
+  constructor(code: ProjectRecoveryErrorCode) {
+    super(`project-recovery.error.${code}`);
+    this.name = 'ProjectRecoveryError';
+    this.code = code;
+  }
+}
+
 export interface ProjectWriteAdmissionOptions {
   readonly coordination: ProjectWriteAdmissionCoordination;
   readonly recovery: ProjectRecoveryPort;
@@ -139,14 +154,12 @@ export class ProjectWriteAdmission {
     projectId: CollabProjectId,
     options: AcquireProjectLeaseOptions = {},
   ): Promise<void> {
-    return this.#track(options, signal => {
-      this.#assertAvailable(signal);
-      return this.#coordination.withProjectReadScope(
-        projectId,
-        scope => this.#authorizeMember(scope, principal).then(() => undefined),
-        { signal },
-      );
-    });
+    return this.#track(options, signal => this.#run(
+      principal,
+      projectId,
+      () => Promise.resolve(),
+      signal,
+    ));
   }
 
   #track<T>(
@@ -295,6 +308,11 @@ export class ProjectWriteAdmission {
           if (signal.aborted) abortListener();
         }),
       ]);
+    } catch (error: unknown) {
+      if (!(error instanceof ProjectRecoveryError)) throw error;
+      if (error.code === 'recovery-required') return fail('recovery-required');
+      if (error.code === 'closed') return fail('closed');
+      return fail('dependency-failed');
     } finally {
       if (abortListener !== undefined) {
         signal.removeEventListener('abort', abortListener);
