@@ -566,8 +566,9 @@ export class ProjectAcceptCoordinator implements ProjectRecoveryPort {
     ) {
       throw new ProjectAcceptCoordinatorError('recovery-required');
     }
+    const expectedPhase = record.phase;
     await lease.withProjectScope(scope => scope.accept.markRecoveryRequired({
-      expectedPhase: record.phase,
+      expectedPhase,
       operationId: record.operationId,
       updatedAt: operationTime(this.#clock),
     }));
