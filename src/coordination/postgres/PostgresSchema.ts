@@ -10,7 +10,14 @@ export const DEVELOPMENT_BOOTSTRAP_SCHEMA = Object.freeze({
   version: 2,
 });
 
+export const PROJECT_READ_EVENTS_SCHEMA = Object.freeze({
+  checksum: 'd490c9083abc5e0294c9d144d832b5070040276d716555d398ca80456aecf9d8',
+  name: 'project-read-events',
+  version: 3,
+});
+
 export const POSTGRES_SCHEMAS = Object.freeze([
   FOUNDATION_SCHEMA,
   DEVELOPMENT_BOOTSTRAP_SCHEMA,
+  PROJECT_READ_EVENTS_SCHEMA,
 ]);

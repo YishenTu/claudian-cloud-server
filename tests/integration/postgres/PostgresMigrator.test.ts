@@ -14,6 +14,7 @@ import {
 
 const FOUNDATION_CHECKSUM = '5e883d93536b2569f3655cc9f3982c4ad7e8e3daf7871500dc5d4f471e8504bb';
 const DEVELOPMENT_BOOTSTRAP_CHECKSUM = '18d367c9ef8a0d39d0d072bc2ed89b1b6f75bf306585adb6138c66b3e5a9afe6';
+const PROJECT_READ_EVENTS_CHECKSUM = 'd490c9083abc5e0294c9d144d832b5070040276d716555d398ca80456aecf9d8';
 
 async function execute(connectionString: string, sql: string): Promise<void> {
   const client = new Client({ connectionString });
@@ -108,6 +109,12 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
         state: 'applied',
         version: 2,
       },
+      {
+        checksum: PROJECT_READ_EVENTS_CHECKSUM,
+        name: 'project-read-events',
+        state: 'applied',
+        version: 3,
+      },
     ]);
 
     const relations = await client.query<{ readonly relation: string }>(
@@ -127,6 +134,8 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
         'development_bootstrap_reports',
         'development_bootstrap_settlements',
         'development_bootstrap_uploads',
+        'project_event_sequences',
+        'project_events',
         'project_memberships',
         'projects',
         'recovery_candidates',
@@ -151,10 +160,10 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
     await client.query(
       `INSERT INTO claudian_cloud.schema_migrations
         (version, name, checksum, state, applied_at)
-       VALUES (3, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
+       VALUES (4, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
     );
-    await expectMigrationError(migrator, 'schema-newer', 3);
-    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 3');
+    await expectMigrationError(migrator, 'schema-newer', 4);
+    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 4');
 
     await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 1');
     await expectMigrationError(migrator, 'schema-gap', 2);
@@ -184,10 +193,18 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
          FROM pg_class c
          JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = 'claudian_cloud'
-          AND c.relname IN ('projects', 'project_memberships', 'repository_placements')
+          AND c.relname IN (
+            'project_event_sequences',
+            'project_events',
+            'projects',
+            'project_memberships',
+            'repository_placements'
+          )
         ORDER BY c.relname`,
     );
     assert.deepEqual(rls.rows, [
+      { forced: true, relation: 'project_event_sequences', row_security: true },
+      { forced: true, relation: 'project_events', row_security: true },
       { forced: true, relation: 'project_memberships', row_security: true },
       { forced: true, relation: 'projects', row_security: true },
       { forced: true, relation: 'repository_placements', row_security: true },
@@ -213,6 +230,8 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       { owner: 'claudian_cloud_migration', relation: 'development_bootstrap_reports' },
       { owner: 'claudian_cloud_migration', relation: 'development_bootstrap_settlements' },
       { owner: 'claudian_cloud_migration', relation: 'development_bootstrap_uploads' },
+      { owner: 'claudian_cloud_migration', relation: 'project_event_sequences' },
+      { owner: 'claudian_cloud_migration', relation: 'project_events' },
       { owner: 'claudian_cloud_migration', relation: 'project_memberships' },
       { owner: 'claudian_cloud_migration', relation: 'projects' },
       { owner: 'claudian_cloud_migration', relation: 'recovery_candidates' },
@@ -265,7 +284,19 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       'repository_placements',
     ];
     assert.deepEqual(tablePrivileges.rows, [
-      ...mutableRelations.flatMap(relation => (
+      ...mutableRelations.slice(0, 7).flatMap(relation => (
+        ['DELETE', 'INSERT', 'SELECT', 'UPDATE'].map(privilege => ({
+          privilege,
+          relation,
+        }))
+      )),
+      { privilege: 'INSERT', relation: 'project_event_sequences' },
+      { privilege: 'SELECT', relation: 'project_event_sequences' },
+      { privilege: 'UPDATE', relation: 'project_event_sequences' },
+      { privilege: 'DELETE', relation: 'project_events' },
+      { privilege: 'INSERT', relation: 'project_events' },
+      { privilege: 'SELECT', relation: 'project_events' },
+      ...mutableRelations.slice(7).flatMap(relation => (
         ['DELETE', 'INSERT', 'SELECT', 'UPDATE'].map(privilege => ({
           privilege,
           relation,
@@ -303,6 +334,14 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       {
         policy_name: 'development_bootstrap_uploads_project_scope',
         relation: 'development_bootstrap_uploads',
+      },
+      {
+        policy_name: 'project_event_sequences_project_scope',
+        relation: 'project_event_sequences',
+      },
+      {
+        policy_name: 'project_events_project_scope',
+        relation: 'project_events',
       },
       {
         policy_name: 'project_memberships_project_scope',

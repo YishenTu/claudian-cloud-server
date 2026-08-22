@@ -16,9 +16,19 @@ export type { ConfigErrorCode, ConfigSource } from './configDecoder.js';
 export interface GitAdmissionConfig {
   readonly maxChildren: number;
   readonly maxChildrenPerProject: number;
+  readonly maxQueuedReads: number;
+  readonly maxQueuedWrites: number;
+  readonly maxReadChildren: number;
+  readonly maxWriteChildren: number;
   readonly queueMax: number;
   readonly queueMaxPerProject: number;
   readonly queueTimeoutMs: number;
+}
+
+export interface EventAdmissionConfig {
+  readonly maxConnections: number;
+  readonly maxConnectionsPerProject: number;
+  readonly maxPendingAuthorizations: number;
 }
 
 export interface DevelopmentBootstrapConfig {
@@ -59,6 +69,7 @@ export interface RepositoryConfig {
 
 export interface ServerConfig {
   readonly developmentBootstrap: DevelopmentBootstrapConfig;
+  readonly eventAdmission: EventAdmissionConfig;
   readonly gitAdmission: GitAdmissionConfig;
   readonly http: HttpConfig;
   readonly postgres: PostgresConfig;
@@ -83,11 +94,18 @@ const CONFIG_FIELDS = new Set([
   'CLAUDIAN_CLOUD_GIT_EXECUTABLE',
   'CLAUDIAN_CLOUD_GIT_MAX_CHILDREN',
   'CLAUDIAN_CLOUD_GIT_MAX_CHILDREN_PER_PROJECT',
+  'CLAUDIAN_CLOUD_GIT_MAX_QUEUED_READS',
+  'CLAUDIAN_CLOUD_GIT_MAX_QUEUED_WRITES',
+  'CLAUDIAN_CLOUD_GIT_MAX_READ_CHILDREN',
+  'CLAUDIAN_CLOUD_GIT_MAX_WRITE_CHILDREN',
   'CLAUDIAN_CLOUD_GIT_OPERATION_TIMEOUT_MS',
   'CLAUDIAN_CLOUD_GIT_OUTPUT_MAX_BYTES',
   'CLAUDIAN_CLOUD_GIT_QUEUE_MAX',
   'CLAUDIAN_CLOUD_GIT_QUEUE_MAX_PER_PROJECT',
   'CLAUDIAN_CLOUD_GIT_QUEUE_TIMEOUT_MS',
+  'CLAUDIAN_CLOUD_EVENT_MAX_CONNECTIONS',
+  'CLAUDIAN_CLOUD_EVENT_MAX_CONNECTIONS_PER_PROJECT',
+  'CLAUDIAN_CLOUD_EVENT_MAX_PENDING_AUTHORIZATIONS',
   'CLAUDIAN_CLOUD_PORT',
   'CLAUDIAN_CLOUD_POSTGRES_ORDINARY_POOL_MAX',
   'CLAUDIAN_CLOUD_POSTGRES_PINNED_POOL_MAX',
@@ -277,6 +295,28 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
     maxChildrenPerProject >= maxChildren,
     'CLAUDIAN_CLOUD_GIT_MAX_CHILDREN_PER_PROJECT',
   );
+  const maxReadChildren = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_GIT_MAX_READ_CHILDREN',
+    1,
+    63,
+    maxChildren - 1,
+  );
+  invalidWhen(
+    maxReadChildren >= maxChildren,
+    'CLAUDIAN_CLOUD_GIT_MAX_READ_CHILDREN',
+  );
+  const maxWriteChildren = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_GIT_MAX_WRITE_CHILDREN',
+    1,
+    63,
+    maxChildren - 1,
+  );
+  invalidWhen(
+    maxWriteChildren >= maxChildren,
+    'CLAUDIAN_CLOUD_GIT_MAX_WRITE_CHILDREN',
+  );
 
   const queueMax = parseInteger(
     source,
@@ -296,10 +336,36 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
     queueMaxPerProject >= queueMax,
     'CLAUDIAN_CLOUD_GIT_QUEUE_MAX_PER_PROJECT',
   );
+  const maxQueuedReads = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_GIT_MAX_QUEUED_READS',
+    1,
+    1_023,
+    queueMax - 1,
+  );
+  invalidWhen(
+    maxQueuedReads >= queueMax,
+    'CLAUDIAN_CLOUD_GIT_MAX_QUEUED_READS',
+  );
+  const maxQueuedWrites = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_GIT_MAX_QUEUED_WRITES',
+    1,
+    1_023,
+    queueMax - 1,
+  );
+  invalidWhen(
+    maxQueuedWrites >= queueMax,
+    'CLAUDIAN_CLOUD_GIT_MAX_QUEUED_WRITES',
+  );
 
   const gitAdmission = Object.freeze({
     maxChildren,
     maxChildrenPerProject,
+    maxQueuedReads,
+    maxQueuedWrites,
+    maxReadChildren,
+    maxWriteChildren,
     queueMax,
     queueMaxPerProject,
     queueTimeoutMs: parseInteger(
@@ -309,6 +375,41 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
       300_000,
       10_000,
     ),
+  });
+
+  const maxEventConnections = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_EVENT_MAX_CONNECTIONS',
+    2,
+    10_000,
+    64,
+  );
+  const maxEventConnectionsPerProject = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_EVENT_MAX_CONNECTIONS_PER_PROJECT',
+    1,
+    9_999,
+    16,
+  );
+  invalidWhen(
+    maxEventConnectionsPerProject >= maxEventConnections,
+    'CLAUDIAN_CLOUD_EVENT_MAX_CONNECTIONS_PER_PROJECT',
+  );
+  const maxPendingEventAuthorizations = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_EVENT_MAX_PENDING_AUTHORIZATIONS',
+    1,
+    9_999,
+    16,
+  );
+  invalidWhen(
+    maxPendingEventAuthorizations >= maxEventConnections,
+    'CLAUDIAN_CLOUD_EVENT_MAX_PENDING_AUTHORIZATIONS',
+  );
+  const eventAdmission = Object.freeze({
+    maxConnections: maxEventConnections,
+    maxConnectionsPerProject: maxEventConnectionsPerProject,
+    maxPendingAuthorizations: maxPendingEventAuthorizations,
   });
 
   const http = Object.freeze({
@@ -373,6 +474,7 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
 
   return Object.freeze({
     developmentBootstrap,
+    eventAdmission,
     gitAdmission,
     http,
     postgres,

@@ -61,9 +61,18 @@ function config(options: {
       uploadDeadlineMs: 900_000,
       uploadIdleTimeoutMs: 30_000,
     }),
+    eventAdmission: Object.freeze({
+      maxConnections: 8,
+      maxConnectionsPerProject: 4,
+      maxPendingAuthorizations: 4,
+    }),
     gitAdmission: Object.freeze({
       maxChildren: 2,
       maxChildrenPerProject: 1,
+      maxQueuedReads: 5,
+      maxQueuedWrites: 5,
+      maxReadChildren: 1,
+      maxWriteChildren: 1,
       queueMax: 6,
       queueMaxPerProject: 4,
       queueTimeoutMs: 1_000,

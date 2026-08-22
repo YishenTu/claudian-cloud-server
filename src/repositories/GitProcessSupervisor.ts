@@ -32,7 +32,8 @@ export interface GitProcessCommand {
   readonly captureOutput: boolean;
   readonly cwd: string;
   readonly failureCode: GitProcessErrorCode;
-  readonly input?: string;
+  readonly gitProtocol?: 'version=1' | 'version=2';
+  readonly input?: Buffer | string;
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
 }
@@ -41,8 +42,12 @@ export interface GitProcessStreamingCommand {
   readonly arguments: readonly string[];
   readonly cwd: string;
   readonly failureCode: GitProcessErrorCode;
-  readonly input?: string;
-  readonly onStdoutChunk: (chunk: Buffer) => void;
+  readonly gitProtocol?: 'version=1' | 'version=2';
+  readonly input?: Buffer | string;
+  readonly onStdoutChunk: (
+    chunk: Buffer,
+    signal: AbortSignal,
+  ) => Promise<void> | void;
   readonly signal?: AbortSignal;
   readonly stdoutMaxBytes: number;
   readonly timeoutMs?: number;
@@ -135,6 +140,9 @@ export class GitProcessSupervisor {
       cwd: command.cwd,
       failureCode: command.failureCode,
       ...(command.input === undefined ? {} : { input: command.input }),
+      ...(command.gitProtocol === undefined
+        ? {}
+        : { gitProtocol: command.gitProtocol }),
       signal: command.signal,
       ...(command.timeoutMs === undefined ? {} : { timeoutMs: command.timeoutMs }),
     });
@@ -147,6 +155,9 @@ export class GitProcessSupervisor {
       cwd: command.cwd,
       failureCode: command.failureCode,
       ...(command.input === undefined ? {} : { input: command.input }),
+      ...(command.gitProtocol === undefined
+        ? {}
+        : { gitProtocol: command.gitProtocol }),
       signal: command.signal,
       stdoutStream: {
         maximumBytes: command.stdoutMaxBytes,
@@ -201,11 +212,12 @@ export class GitProcessSupervisor {
     readonly captureOutput: boolean;
     readonly cwd: string | undefined;
     readonly failureCode: GitProcessErrorCode;
-    readonly input?: string;
+    readonly gitProtocol?: 'version=1' | 'version=2';
+    readonly input?: Buffer | string;
     readonly signal: AbortSignal | undefined;
     readonly stdoutStream?: Readonly<{
       maximumBytes: number;
-      onChunk: (chunk: Buffer) => void;
+      onChunk: (chunk: Buffer, signal: AbortSignal) => Promise<void> | void;
     }>;
     readonly timeoutMs?: number;
   }): Promise<Buffer> {
@@ -222,7 +234,12 @@ export class GitProcessSupervisor {
         {
           ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
           detached: true,
-          env: GIT_ENVIRONMENT,
+          env: {
+            ...GIT_ENVIRONMENT,
+            ...(options.gitProtocol === undefined
+              ? {}
+              : { GIT_PROTOCOL: options.gitProtocol }),
+          },
           stdio: ['pipe', 'pipe', 'pipe'],
         },
       );
@@ -239,9 +256,14 @@ export class GitProcessSupervisor {
     let terminationCode: GitProcessErrorCode | undefined;
     let terminationTimer: ReturnType<typeof setTimeout> | undefined;
     let outputBytes = 0;
+    let pendingStreamWrites = 0;
     let streamedStdoutBytes = 0;
+    let childClosed = false;
+    let successfulClose = false;
     let settled = false;
+    let streamQueue = Promise.resolve();
     const capturedOutput: Buffer[] = [];
+    const streamController = new AbortController();
 
     const settledPromise = new Promise<Buffer>((resolve, reject) => {
       resolveSettled = resolve;
@@ -259,20 +281,36 @@ export class GitProcessSupervisor {
       cleanup();
       resolveSettled(Buffer.concat(capturedOutput));
     };
+    const settleSuccessfulClose = (): void => {
+      if (successfulClose && pendingStreamWrites === 0) settleSuccess();
+    };
     const settleFailure = (code: GitProcessErrorCode): void => {
       if (settled) return;
       settled = true;
       cleanup();
       rejectSettled(new GitProcessError(code));
     };
+    const settleTerminated = (): void => {
+      if (
+        terminationCode !== undefined
+        && childClosed
+        && pendingStreamWrites === 0
+      ) {
+        settleFailure(terminationCode);
+      }
+    };
     const terminate = (code: GitProcessErrorCode): void => {
       if (settled || terminationCode !== undefined) return;
       terminationCode = code;
-      signalProcessGroup(child, 'SIGTERM');
-      terminationTimer = setTimeout(() => {
-        if (!settled) signalProcessGroup(child, 'SIGKILL');
-      }, TERMINATION_GRACE_MS);
-      terminationTimer.unref();
+      streamController.abort();
+      if (!childClosed) {
+        signalProcessGroup(child, 'SIGTERM');
+        terminationTimer = setTimeout(() => {
+          if (!settled && !childClosed) signalProcessGroup(child, 'SIGKILL');
+        }, TERMINATION_GRACE_MS);
+        terminationTimer.unref();
+      }
+      settleTerminated();
     };
     const onAbort = (): void => terminate('cancelled');
     const countOutput = (chunk: Buffer, capture: boolean): void => {
@@ -307,27 +345,50 @@ export class GitProcessSupervisor {
         return;
       }
       child.stdout.pause();
-      try {
-        options.stdoutStream.onChunk(chunk);
-      } catch {
-        terminate(options.failureCode);
-      } finally {
-        if (terminationCode === undefined) child.stdout.resume();
-      }
+      pendingStreamWrites += 1;
+      streamQueue = streamQueue
+        .then(() => {
+          if (terminationCode !== undefined) return;
+          return options.stdoutStream?.onChunk(chunk, streamController.signal);
+        })
+        .then(
+          () => {
+            pendingStreamWrites -= 1;
+            if (terminationCode === undefined) {
+              if (pendingStreamWrites === 0) child.stdout.resume();
+              settleSuccessfulClose();
+            } else {
+              settleTerminated();
+            }
+          },
+          () => {
+            pendingStreamWrites -= 1;
+            terminate(options.failureCode);
+            settleTerminated();
+          },
+        );
     });
     child.stderr.on('data', (chunk: Buffer) => {
       countOutput(chunk, false);
     });
-    child.once('error', () => settleFailure('git-unavailable'));
+    child.once('error', () => {
+      childClosed = true;
+      terminate('git-unavailable');
+      settleTerminated();
+    });
     child.once('close', (code, processSignal) => {
+      childClosed = true;
       if (terminationCode !== undefined) {
-        settleFailure(terminationCode);
+        settleTerminated();
       } else if (processSignal !== null) {
-        settleFailure('process-failed');
+        terminate('process-failed');
+        settleTerminated();
       } else if (code === 0) {
-        settleSuccess();
+        successfulClose = true;
+        settleSuccessfulClose();
       } else {
-        settleFailure(options.failureCode);
+        terminate(options.failureCode);
+        settleTerminated();
       }
     });
     return settledPromise;

@@ -327,6 +327,7 @@ class MemoryCoordination implements ProjectActivationCoordination {
         });
         return Promise.resolve('created');
       },
+      appendProjectEvent: () => Promise.reject(new Error('unused')),
       findDevelopmentActorMember: () => Promise.resolve(undefined),
       findMembership: () => Promise.resolve(undefined),
       listMemberships: () => Promise.resolve([]),
@@ -353,6 +354,7 @@ class MemoryCoordination implements ProjectActivationCoordination {
           ? undefined
           : owner.attempt,
       ),
+      getProjectEventSequence: () => Promise.resolve(0),
       getProject: () => Promise.resolve(undefined),
       getRepositoryPlacement: () => Promise.resolve(undefined),
       insertActivatedDevelopmentProject(input) {
@@ -376,6 +378,8 @@ class MemoryCoordination implements ProjectActivationCoordination {
       putDevelopmentBootstrapAttempt: () => Promise.reject(new Error('unused')),
       putDevelopmentBootstrapReport: () => Promise.reject(new Error('unused')),
       putDevelopmentBootstrapUpload: () => Promise.reject(new Error('unused')),
+      pruneProjectEvents: () => Promise.reject(new Error('unused')),
+      readProjectEvents: () => Promise.reject(new Error('unused')),
       transitionDevelopmentBootstrapAttempt: () => Promise.reject(new Error('unused')),
     };
   }

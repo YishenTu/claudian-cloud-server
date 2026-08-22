@@ -42,9 +42,18 @@ describe('decodeServerConfig', () => {
         uploadDeadlineMs: 900_000,
         uploadIdleTimeoutMs: 30_000,
       },
+      eventAdmission: {
+        maxConnections: 64,
+        maxConnectionsPerProject: 16,
+        maxPendingAuthorizations: 16,
+      },
       gitAdmission: {
         maxChildren: 2,
         maxChildrenPerProject: 1,
+        maxQueuedReads: 5,
+        maxQueuedWrites: 5,
+        maxReadChildren: 1,
+        maxWriteChildren: 1,
         queueMax: 6,
         queueMaxPerProject: 4,
         queueTimeoutMs: 10_000,
@@ -71,6 +80,7 @@ describe('decodeServerConfig', () => {
     });
     assert.equal(Object.isFrozen(config), true);
     assert.equal(Object.isFrozen(config.developmentBootstrap), true);
+    assert.equal(Object.isFrozen(config.eventAdmission), true);
     assert.equal(Object.isFrozen(config.gitAdmission), true);
     assert.equal(Object.isFrozen(config.http), true);
     assert.equal(Object.isFrozen(config.postgres), true);
@@ -219,6 +229,10 @@ describe('decodeServerConfig', () => {
       ...validSource,
       CLAUDIAN_CLOUD_GIT_MAX_CHILDREN: '8',
       CLAUDIAN_CLOUD_GIT_MAX_CHILDREN_PER_PROJECT: '2',
+      CLAUDIAN_CLOUD_GIT_MAX_QUEUED_READS: '12',
+      CLAUDIAN_CLOUD_GIT_MAX_QUEUED_WRITES: '10',
+      CLAUDIAN_CLOUD_GIT_MAX_READ_CHILDREN: '6',
+      CLAUDIAN_CLOUD_GIT_MAX_WRITE_CHILDREN: '4',
       CLAUDIAN_CLOUD_GIT_OPERATION_TIMEOUT_MS: '600000',
       CLAUDIAN_CLOUD_GIT_OUTPUT_MAX_BYTES: '2097152',
       CLAUDIAN_CLOUD_GIT_QUEUE_MAX: '20',
@@ -236,14 +250,26 @@ describe('decodeServerConfig', () => {
       CLAUDIAN_CLOUD_POSTGRES_PINNED_POOL_MAX: '4',
       CLAUDIAN_CLOUD_POSTGRES_RESERVED_POOL_MAX: '4',
       CLAUDIAN_CLOUD_PROJECT_LOCK_TIMEOUT_MS: '3000',
+      CLAUDIAN_CLOUD_EVENT_MAX_CONNECTIONS: '200',
+      CLAUDIAN_CLOUD_EVENT_MAX_CONNECTIONS_PER_PROJECT: '40',
+      CLAUDIAN_CLOUD_EVENT_MAX_PENDING_AUTHORIZATIONS: '20',
     });
 
     assert.deepEqual(config.gitAdmission, {
       maxChildren: 8,
       maxChildrenPerProject: 2,
+      maxQueuedReads: 12,
+      maxQueuedWrites: 10,
+      maxReadChildren: 6,
+      maxWriteChildren: 4,
       queueMax: 20,
       queueMaxPerProject: 8,
       queueTimeoutMs: 5_000,
+    });
+    assert.deepEqual(config.eventAdmission, {
+      maxConnections: 200,
+      maxConnectionsPerProject: 40,
+      maxPendingAuthorizations: 20,
     });
     assert.deepEqual(config.developmentBootstrap, {
       attemptTtlMs: 86_400_000,
@@ -279,11 +305,18 @@ describe('decodeServerConfig', () => {
     for (const [field, value] of [
       ['CLAUDIAN_CLOUD_GIT_MAX_CHILDREN', '1'],
       ['CLAUDIAN_CLOUD_GIT_MAX_CHILDREN_PER_PROJECT', '64'],
+      ['CLAUDIAN_CLOUD_GIT_MAX_QUEUED_READS', '6'],
+      ['CLAUDIAN_CLOUD_GIT_MAX_QUEUED_WRITES', '6'],
+      ['CLAUDIAN_CLOUD_GIT_MAX_READ_CHILDREN', '2'],
+      ['CLAUDIAN_CLOUD_GIT_MAX_WRITE_CHILDREN', '2'],
       ['CLAUDIAN_CLOUD_GIT_OPERATION_TIMEOUT_MS', '999'],
       ['CLAUDIAN_CLOUD_GIT_OUTPUT_MAX_BYTES', '1023'],
       ['CLAUDIAN_CLOUD_GIT_QUEUE_MAX', '1'],
       ['CLAUDIAN_CLOUD_GIT_QUEUE_MAX_PER_PROJECT', '1024'],
       ['CLAUDIAN_CLOUD_GIT_QUEUE_TIMEOUT_MS', '99'],
+      ['CLAUDIAN_CLOUD_EVENT_MAX_CONNECTIONS', '1'],
+      ['CLAUDIAN_CLOUD_EVENT_MAX_CONNECTIONS_PER_PROJECT', '64'],
+      ['CLAUDIAN_CLOUD_EVENT_MAX_PENDING_AUTHORIZATIONS', '0'],
       ['CLAUDIAN_CLOUD_BOOTSTRAP_ATTEMPT_TTL_MS', '7200000'],
       ['CLAUDIAN_CLOUD_BOOTSTRAP_ATTEMPT_TTL_MS', '899999'],
       ['CLAUDIAN_CLOUD_BOOTSTRAP_MAX_BUNDLE_BYTES', '1073741825'],
@@ -321,10 +354,28 @@ describe('decodeServerConfig', () => {
         'CLAUDIAN_CLOUD_GIT_QUEUE_MAX',
         'CLAUDIAN_CLOUD_GIT_QUEUE_MAX_PER_PROJECT',
       ],
+      [
+        'CLAUDIAN_CLOUD_GIT_MAX_CHILDREN',
+        'CLAUDIAN_CLOUD_GIT_MAX_READ_CHILDREN',
+      ],
+      [
+        'CLAUDIAN_CLOUD_GIT_MAX_CHILDREN',
+        'CLAUDIAN_CLOUD_GIT_MAX_WRITE_CHILDREN',
+      ],
+      [
+        'CLAUDIAN_CLOUD_GIT_QUEUE_MAX',
+        'CLAUDIAN_CLOUD_GIT_MAX_QUEUED_READS',
+      ],
+      [
+        'CLAUDIAN_CLOUD_GIT_QUEUE_MAX',
+        'CLAUDIAN_CLOUD_GIT_MAX_QUEUED_WRITES',
+      ],
     ] as const) {
       assert.throws(
         () => decodeServerConfig({
           ...validSource,
+          CLAUDIAN_CLOUD_GIT_MAX_CHILDREN_PER_PROJECT: '1',
+          CLAUDIAN_CLOUD_GIT_QUEUE_MAX_PER_PROJECT: '3',
           [globalField]: '4',
           [perProjectField]: '4',
         }),
@@ -336,6 +387,25 @@ describe('decodeServerConfig', () => {
         },
       );
     }
+  });
+
+  it('reserves event connection capacity for another Project', () => {
+    assert.throws(
+      () => decodeServerConfig({
+        ...validSource,
+        CLAUDIAN_CLOUD_EVENT_MAX_CONNECTIONS: '4',
+        CLAUDIAN_CLOUD_EVENT_MAX_CONNECTIONS_PER_PROJECT: '4',
+      }),
+      (error: unknown) => {
+        assert.equal(error instanceof ConfigError, true);
+        assert.equal((error as ConfigError).code, 'invalid-field');
+        assert.equal(
+          (error as ConfigError).field,
+          'CLAUDIAN_CLOUD_EVENT_MAX_CONNECTIONS_PER_PROJECT',
+        );
+        return true;
+      },
+    );
   });
 
   it('rejects malformed URLs, operational IDs, and ambiguous paths safely', () => {

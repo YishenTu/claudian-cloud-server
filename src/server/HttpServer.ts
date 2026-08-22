@@ -4,6 +4,7 @@ import {
   type Server,
   type ServerResponse,
 } from 'node:http';
+import type { Duplex } from 'node:stream';
 
 import type { HttpConfig } from '../config/ServerConfig.js';
 import { HealthRoutes } from './health/HealthRoutes.js';
@@ -17,10 +18,19 @@ export interface HttpRouteHandler {
   handle(request: IncomingMessage, response: ServerResponse): boolean;
 }
 
+export interface HttpUpgradeHandler {
+  handleUpgrade(
+    request: IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+  ): boolean;
+}
+
 export interface HttpServerOptions {
   readonly config: HttpConfig;
   readonly isReady: () => boolean;
   readonly routes?: readonly HttpRouteHandler[];
+  readonly upgradeRoutes?: readonly HttpUpgradeHandler[];
 }
 
 export class HttpServer {
@@ -28,6 +38,7 @@ export class HttpServer {
   readonly #healthRoutes: HealthRoutes;
   readonly #routes: readonly HttpRouteHandler[];
   readonly #server: Server;
+  readonly #upgradeRoutes: readonly HttpUpgradeHandler[];
   #address: HttpServerAddress | undefined;
   #closePromise: Promise<void> | undefined;
   #startPromise: Promise<HttpServerAddress> | undefined;
@@ -36,8 +47,17 @@ export class HttpServer {
     this.#config = options.config;
     this.#healthRoutes = new HealthRoutes({ isReady: options.isReady });
     this.#routes = Object.freeze([...(options.routes ?? [])]);
+    this.#upgradeRoutes = Object.freeze([...(options.upgradeRoutes ?? [])]);
     this.#server = createServer((request, response) => {
       this.#handleRequest(request, response);
+    });
+    this.#server.on('upgrade', (request, socket, head) => {
+      for (const route of this.#upgradeRoutes) {
+        if (route.handleUpgrade(request, socket, head)) return;
+      }
+      socket.end(
+        'HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n',
+      );
     });
   }
 

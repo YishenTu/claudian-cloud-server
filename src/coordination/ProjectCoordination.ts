@@ -4,6 +4,10 @@ import type {
 } from '@claudian/collab-protocol';
 
 import type { DevelopmentBootstrapProjectPersistence } from './DevelopmentBootstrapPersistence.js';
+import type {
+  ProjectEventPersistence,
+  ProjectEventReader,
+} from './ProjectEventPersistence.js';
 import type { ProjectPersistence } from './ProjectPersistence.js';
 import type { RepositoryPlacementLease } from '../repositories/RepositoryPlacement.js';
 
@@ -19,8 +23,28 @@ export interface ProjectMembershipRecord {
   readonly status: 'active' | 'left' | 'pending' | 'revoked';
 }
 
+export interface ProjectSnapshotMembershipRecord extends ProjectMembershipRecord {
+  readonly activatedAt: string;
+  readonly createdAt: string;
+  readonly status: 'active';
+}
+
+export interface ProjectReadScope
+  extends Pick<
+    DevelopmentBootstrapProjectPersistence,
+    'getNonterminalDevelopmentBootstrapAttempt'
+  >,
+  ProjectEventReader,
+  ProjectPersistence {
+  findMembership(memberId: CollabMemberId): Promise<ProjectMembershipRecord | undefined>;
+  getRepositoryPlacement(): Promise<RepositoryPlacementLease | undefined>;
+  listActiveSnapshotMemberships(): Promise<readonly ProjectSnapshotMembershipRecord[]>;
+}
+
 export interface ProjectScope
-  extends DevelopmentBootstrapProjectPersistence, ProjectPersistence {
+  extends DevelopmentBootstrapProjectPersistence,
+  ProjectEventPersistence,
+  ProjectPersistence {
   findMembership(memberId: CollabMemberId): Promise<ProjectMembershipRecord | undefined>;
   getRepositoryPlacement(): Promise<RepositoryPlacementLease | undefined>;
   listMemberships(): Promise<readonly ProjectMembershipRecord[]>;
