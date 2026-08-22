@@ -9,11 +9,13 @@ import { PostgresCoordination } from '../coordination/postgres/PostgresCoordinat
 import { DevelopmentBootstrapProfile } from '../onboarding/development/DevelopmentBootstrapProfile.js';
 import { DevelopmentBootstrapExpiryReconciler } from '../onboarding/development/DevelopmentBootstrapExpiryReconciler.js';
 import type { SafeLogger } from '../observability/SafeLogger.js';
+import { ProjectAcceptCoordinator } from '../project-authority/acceptance/ProjectAcceptCoordinator.js';
 import { ProjectActivationCoordinator } from '../project-authority/lifecycle/ProjectActivationCoordinator.js';
 import { ProjectReadAuthority } from '../project-authority/reads/ProjectReadAuthority.js';
 import { ProjectRequestAuthority } from '../project-authority/requests/ProjectRequestAuthority.js';
 import { ProjectTicketAuthority } from '../project-authority/tickets/ProjectTicketAuthority.js';
 import { ProjectPersonalRefAuthority } from '../project-authority/writes/ProjectPersonalRefAuthority.js';
+import { ProjectRecoveryCoordinator } from '../project-authority/recovery/ProjectRecoveryCoordinator.js';
 import { ProjectEventWakeup } from '../project-authority/reads/ProjectEventWakeup.js';
 import { ActiveRepositoryIntegrityGate } from '../project-authority/lifecycle/ActiveRepositoryIntegrityGate.js';
 import { GitBundleImporter } from '../repositories/GitBundleImporter.js';
@@ -107,7 +109,7 @@ function startupFailureReason(
     ) return error.code;
     return 'repository-unavailable';
   }
-  if (phase === 'recovery') return 'activation-recovery-failed';
+  if (phase === 'recovery') return 'project-recovery-failed';
   return 'http-listen-failed';
 }
 
@@ -136,6 +138,7 @@ async function settleBefore(
 class CloudApplication implements Application {
   readonly #config: ServerConfig;
   readonly #coordination: PostgresCoordination;
+  readonly #acceptCoordinator: ProjectAcceptCoordinator;
   readonly #activationCoordinator: ProjectActivationCoordinator;
   readonly #activeRepositoryIntegrity: ActiveRepositoryIntegrityGate;
   readonly #authorityVolumePair: AuthorityVolumePairVerifier;
@@ -154,6 +157,7 @@ class CloudApplication implements Application {
   readonly #projectTicketAuthority: ProjectTicketAuthority;
   readonly #repositoryAuthority: GitRepositoryAuthority;
   readonly #repositoryPublication: RepositoryPublication;
+  readonly #recoveryCoordinator: ProjectRecoveryCoordinator;
   readonly #resourceAdmission: ResourceAdmission;
   #address: HttpServerAddress | undefined;
   #closePromise: Promise<void> | undefined;
@@ -257,18 +261,27 @@ class CloudApplication implements Application {
       publication: this.#repositoryPublication,
       uploadGate: developmentBootstrapUploadGate,
     });
+    this.#acceptCoordinator = new ProjectAcceptCoordinator({
+      coordination: this.#coordination,
+      repository: this.#repositoryAuthority,
+    });
+    this.#recoveryCoordinator = new ProjectRecoveryCoordinator({
+      accept: this.#acceptCoordinator,
+      activation: this.#activationCoordinator,
+      catalog: this.#coordination,
+    });
     this.#projectRequestAuthority = new ProjectRequestAuthority({
       coordination: this.#coordination,
-      recovery: this.#activationCoordinator,
+      recovery: this.#recoveryCoordinator,
       repository: this.#repositoryAuthority,
     });
     this.#projectTicketAuthority = new ProjectTicketAuthority({
       coordination: this.#coordination,
-      recovery: this.#activationCoordinator,
+      recovery: this.#recoveryCoordinator,
     });
     this.#projectPersonalRefAuthority = new ProjectPersonalRefAuthority({
       coordination: this.#coordination,
-      recovery: this.#activationCoordinator,
+      recovery: this.#recoveryCoordinator,
       repository: this.#repositoryAuthority,
     });
     this.#activeRepositoryIntegrity = new ActiveRepositoryIntegrityGate({
@@ -289,6 +302,7 @@ class CloudApplication implements Application {
     const capabilitiesRoute = new CloudCapabilitiesRoute({
       enabledCapabilities: new Set([
         'development-bootstrap',
+        'accept',
         'git-receive-pack-personal-ref',
         'git-upload-pack',
         'project-events',
@@ -324,6 +338,7 @@ class CloudApplication implements Application {
       principalAdapter,
     });
     const projectCollaborationRoutes = new ProjectCollaborationRoutes({
+      acceptAuthority: this.#acceptCoordinator,
       maximumJsonBytes: COLLAB_LIMITS.maxJsonPayloadUtf8Bytes,
       operationTimeoutMs: options.config.repository.operationTimeoutMs,
       principalAdapter,
@@ -407,7 +422,7 @@ class CloudApplication implements Application {
       this.#assertStarting();
 
       phase = 'recovery';
-      await this.#activationCoordinator.recoverAll();
+      await this.#recoveryCoordinator.recoverAll();
       await this.#bootstrapExpiryReconciler.reconcileAll();
       phase = 'repository';
       await this.#activeRepositoryIntegrity.verifyAll();
@@ -479,17 +494,20 @@ class CloudApplication implements Application {
     const results: boolean[] = [];
 
     const httpClose = this.#httpServer.close(Math.max(1, deadline - Date.now()));
+    this.#recoveryCoordinator.close();
     const eventAdmissionClose = this.#projectEventAdmission.close();
     const eventClose = this.#projectEventRoutes.close();
     this.#projectEventWakeup.close();
     const readClose = this.#projectReadAuthority.close();
     const requestClose = this.#projectRequestAuthority.close();
+    const acceptClose = this.#acceptCoordinator.close();
     const personalRefClose = this.#projectPersonalRefAuthority.close();
     const ticketClose = this.#projectTicketAuthority.close();
     results.push(await settleBefore(eventClose, deadline));
     results.push(await settleBefore(eventAdmissionClose, deadline));
     results.push(await settleBefore(readClose, deadline));
     results.push(await settleBefore(requestClose, deadline));
+    results.push(await settleBefore(acceptClose, deadline));
     results.push(await settleBefore(personalRefClose, deadline));
     results.push(await settleBefore(ticketClose, deadline));
     results.push(await settleBefore(httpClose, deadline));

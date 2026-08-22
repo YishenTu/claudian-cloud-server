@@ -422,7 +422,7 @@ describe('collaboration operation gate', { concurrency: false }, () => {
       );
       assert.equal(capabilities.capabilities.includes('requests'), true);
       assert.equal(capabilities.capabilities.includes('tickets'), true);
-      assert.equal(capabilities.capabilities.includes('accept'), false);
+      assert.equal(capabilities.capabilities.includes('accept'), true);
 
       const ticketCreateInput = {
         body: 'Initial ticket body mentioning @member-bob',
