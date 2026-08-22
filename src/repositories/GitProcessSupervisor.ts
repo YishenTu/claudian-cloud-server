@@ -29,6 +29,7 @@ export interface GitProcessSupervisorOptions {
 }
 
 export interface GitProcessCommand {
+  readonly acceptedExitCodes?: readonly number[];
   readonly arguments: readonly string[];
   readonly captureOutput: boolean;
   readonly cwd: string;
@@ -222,6 +223,9 @@ export class GitProcessSupervisor {
 
   runCommand(command: GitProcessCommand): Promise<Buffer> {
     return this.#runProcess({
+      ...(command.acceptedExitCodes === undefined
+        ? {}
+        : { acceptedExitCodes: command.acceptedExitCodes }),
       arguments: command.arguments,
       captureOutput: command.captureOutput,
       cwd: command.cwd,
@@ -307,6 +311,7 @@ export class GitProcessSupervisor {
   }
 
   #runProcess(options: {
+    readonly acceptedExitCodes?: readonly number[];
     readonly arguments: readonly string[];
     readonly captureOutput: boolean;
     readonly cwd: string | undefined;
@@ -325,6 +330,18 @@ export class GitProcessSupervisor {
     if (this.#closed) return Promise.reject(new GitProcessError('closed'));
     if (options.signal?.aborted === true) {
       return Promise.reject(new GitProcessError('cancelled'));
+    }
+    if (
+      options.acceptedExitCodes !== undefined
+      && (
+        options.acceptedExitCodes.length === 0
+        || options.acceptedExitCodes.some(code => (
+          !Number.isSafeInteger(code) || code < 0 || code > 255
+        ))
+        || new Set(options.acceptedExitCodes).size !== options.acceptedExitCodes.length
+      )
+    ) {
+      return Promise.reject(new GitProcessError('process-failed'));
     }
 
     let child: ChildProcessWithoutNullStreams;
@@ -546,7 +563,7 @@ export class GitProcessSupervisor {
       } else if (processSignal !== null) {
         terminate('process-failed');
         settleTerminated();
-      } else if (code === 0) {
+      } else if ((options.acceptedExitCodes ?? [0]).includes(code ?? -1)) {
         successfulClose = true;
         settleSuccessfulClose();
       } else {

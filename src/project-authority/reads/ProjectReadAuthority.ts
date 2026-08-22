@@ -18,6 +18,7 @@ import type {
   ProjectReadScope,
   ProjectSnapshotMembershipRecord,
 } from '../../coordination/ProjectCoordination.js';
+import type { CollaborationSnapshot } from '../../coordination/CollaborationPersistence.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
 import type { RepositoryPlacementLease } from '../../repositories/RepositoryPlacement.js';
 
@@ -128,6 +129,7 @@ interface AdmissionFacts {
 }
 
 interface SnapshotFacts extends AdmissionFacts {
+  readonly collaboration: CollaborationSnapshot;
   readonly eventSequence: number;
   readonly project: {
     readonly createdAt: string;
@@ -172,6 +174,7 @@ function sameAdmission(left: AdmissionFacts, right: AdmissionFacts): boolean {
 
 function sameSnapshotFacts(left: SnapshotFacts, right: SnapshotFacts): boolean {
   return sameAdmission(left, right)
+    && JSON.stringify(left.collaboration) === JSON.stringify(right.collaboration)
     && left.project.createdAt === right.project.createdAt
     && left.project.projectId === right.project.projectId
     && left.project.projectName === right.project.projectName
@@ -368,8 +371,11 @@ export class ProjectReadAuthority {
       const admission = await this.#admit(scope, principal, projectId);
       const project = await scope.getProject();
       if (project === undefined) return fail('state-conflict');
+      const collaboration = await scope.collaboration.snapshot.read();
+      if (collaboration.kind === 'too-large') return fail('project-too-large');
       return Object.freeze({
         ...admission,
+        collaboration: collaboration.snapshot,
         eventSequence: await scope.getProjectEventSequence(),
         project: Object.freeze({
           createdAt: project.createdAt,
@@ -419,8 +425,8 @@ export class ProjectReadAuthority {
         currentMember,
         eventSequence: current.eventSequence,
         members,
-        openRequests: [],
-        openTicketCount: 0,
+        openRequests: current.collaboration.openRequests,
+        openTicketCount: current.collaboration.openTicketCount,
         project: {
           createdAt: current.project.createdAt,
           expectedMainOid: current.project.expectedMainOid,
@@ -428,7 +434,7 @@ export class ProjectReadAuthority {
           mainRef: COLLAB_MAIN_REF,
           name: current.project.projectName,
         },
-        ticketHighlights: [],
+        ticketHighlights: current.collaboration.ticketHighlights,
       });
     } catch {
       return fail('dependency-failed');

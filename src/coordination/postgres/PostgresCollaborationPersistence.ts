@@ -429,9 +429,9 @@ class PostgresCollaborationRequests implements CollaborationRequestPersistence {
       `INSERT INTO claudian_cloud.request_comments (
          project_id, comment_id, request_id, author_member_id, body, created_at
        )
-       SELECT $1, $2, request.request_id, $3, $4, $5::timestamptz
+       SELECT $1::varchar(64), $2, request.request_id, $3, $4, $5::timestamptz
          FROM claudian_cloud.change_requests request
-        WHERE request.project_id = $1
+        WHERE request.project_id = $1::varchar(64)
           AND request.request_id = $6
           AND request.status = 'open'
           AND (
@@ -792,9 +792,9 @@ class PostgresCollaborationTickets implements CollaborationTicketPersistence {
       `INSERT INTO claudian_cloud.ticket_comments (
          project_id, comment_id, ticket_id, author_member_id, body, created_at
        )
-       SELECT $1, $2, ticket.ticket_id, $3, $4, $5::timestamptz
+       SELECT $1::varchar(64), $2, ticket.ticket_id, $3, $4, $5::timestamptz
          FROM claudian_cloud.tickets ticket
-        WHERE ticket.project_id = $1
+        WHERE ticket.project_id = $1::varchar(64)
           AND ticket.ticket_id = $6
           AND ticket.comment_count < $7
        RETURNING comment_id, ticket_id, author_member_id, body, created_at`,

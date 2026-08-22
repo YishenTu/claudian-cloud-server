@@ -62,7 +62,18 @@ class MemoryCoordination implements ProjectReadAuthorityCoordination {
       .filter(member => member.status === 'active')
       .map(member => Object.freeze({ ...member, status: 'active' as const }));
     const scope: ProjectReadScope = {
-      collaboration: undefined as never,
+      collaboration: {
+        snapshot: {
+          read: () => Promise.resolve({
+            kind: 'snapshot' as const,
+            snapshot: {
+              openRequests: [],
+              openTicketCount: 0,
+              ticketHighlights: [],
+            },
+          }),
+        },
+      } as never,
       findDevelopmentActorMember: actorId => Promise.resolve(
         actorId === 'member-001' ? 'member-001' : undefined,
       ),
