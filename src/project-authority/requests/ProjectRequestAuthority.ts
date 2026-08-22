@@ -7,11 +7,7 @@ import {
   collabMemberRef,
   parseCollabTicketReferences,
   type CollabCommentPage,
-  type CollabGitOid,
-  type CollabMemberId,
-  type CollabProjectId,
   type CollabRequestDetail,
-  type CollabReviewCondition,
   type CreateCommentRequest,
   type CreateCommentResponse,
   type EnsureMyRequestRequest,
@@ -25,7 +21,6 @@ import {
 import { CoordinationError } from '../../coordination/CoordinationError.js';
 import type { ProjectScope } from '../../coordination/ProjectCoordination.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
-import type { RepositoryPlacementLease } from '../../repositories/RepositoryPlacement.js';
 import {
   ProjectCollaborationReadAdmission,
   ProjectCollaborationReadAdmissionError,
@@ -41,42 +36,19 @@ import {
   decodeProjectAuthorityCursor,
   projectAuthorityCommentDetailBudget,
 } from '../ProjectAuthorityPage.js';
+import {
+  ProjectRequestRepositoryError,
+  type ProjectRequestRepository,
+} from './ProjectRequestRepository.js';
+
+export type {
+  ProjectRequestInspection,
+  ProjectRequestInspectionInput,
+  ProjectRequestHeadValidationInput,
+  ProjectRequestRepository,
+} from './ProjectRequestRepository.js';
 
 export type ProjectRequestAuthorityCoordination = ProjectWriteAdmissionCoordination;
-
-export interface ProjectRequestInspection {
-  readonly currentMainOid: CollabGitOid;
-  readonly reviewCondition: CollabReviewCondition;
-  readonly reviewedHeadOid: CollabGitOid;
-}
-
-export interface ProjectRequestInspectionInput {
-  readonly expectedMainOid: CollabGitOid;
-  readonly firstBaseOid: CollabGitOid;
-  readonly latestHeadOid: CollabGitOid;
-  readonly memberId: CollabMemberId;
-  readonly personalRef: string;
-  readonly placement: RepositoryPlacementLease;
-  readonly projectId: CollabProjectId;
-  readonly revalidateAuthority: () => Promise<void>;
-  readonly signal: AbortSignal;
-}
-
-export interface ProjectRequestHeadValidationInput {
-  readonly expectedMainOid: CollabGitOid;
-  readonly headOid: CollabGitOid;
-  readonly memberId: CollabMemberId;
-  readonly personalRef: string;
-  readonly placement: RepositoryPlacementLease;
-  readonly projectId: CollabProjectId;
-  readonly revalidateAuthority: () => Promise<void>;
-  readonly signal: AbortSignal;
-}
-
-export interface ProjectRequestRepository {
-  inspectRequest(input: ProjectRequestInspectionInput): Promise<ProjectRequestInspection>;
-  validateRequestHead(input: ProjectRequestHeadValidationInput): Promise<void>;
-}
 
 export interface ProjectRequestAuthorityOptions {
   readonly coordination: ProjectRequestAuthorityCoordination;
@@ -187,6 +159,18 @@ function decodeMetadataResponse(value: unknown): UpdateMyRequestMetadataResponse
 
 function mapInfrastructureError(error: unknown): never {
   if (error instanceof CollabError) throw error;
+  if (error instanceof ProjectRequestRepositoryError) {
+    if (error.code === 'head-not-pushed') {
+      throw domainError('request-head-not-pushed', 'request-head-not-pushed');
+    }
+    if (error.code === 'stale-main') {
+      throw domainError('stale-main', 'request-main-not-expected', true);
+    }
+    if (error.code === 'state-conflict') {
+      throw domainError('authority-not-synchronized', 'request-git-state-stale', true);
+    }
+    throw domainError('operation-failed', 'request-repository-unavailable', true);
+  }
   if (error instanceof ProjectCollaborationReadAdmissionError) {
     if (error.code === 'authorization-denied') {
       throw domainError('authorization-denied', 'request-member-not-authorized');

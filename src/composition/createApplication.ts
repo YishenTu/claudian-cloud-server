@@ -11,6 +11,8 @@ import { DevelopmentBootstrapExpiryReconciler } from '../onboarding/development/
 import type { SafeLogger } from '../observability/SafeLogger.js';
 import { ProjectActivationCoordinator } from '../project-authority/lifecycle/ProjectActivationCoordinator.js';
 import { ProjectReadAuthority } from '../project-authority/reads/ProjectReadAuthority.js';
+import { ProjectRequestAuthority } from '../project-authority/requests/ProjectRequestAuthority.js';
+import { ProjectTicketAuthority } from '../project-authority/tickets/ProjectTicketAuthority.js';
 import { ProjectPersonalRefAuthority } from '../project-authority/writes/ProjectPersonalRefAuthority.js';
 import { ProjectEventWakeup } from '../project-authority/reads/ProjectEventWakeup.js';
 import { ActiveRepositoryIntegrityGate } from '../project-authority/lifecycle/ActiveRepositoryIntegrityGate.js';
@@ -33,6 +35,7 @@ import { ResourceAdmission } from '../resource-admission/ResourceAdmission.js';
 import { CloudCapabilitiesRoute } from '../server/CloudCapabilitiesRoute.js';
 import { DevelopmentBootstrapRoutes } from '../server/DevelopmentBootstrapRoutes.js';
 import { ProjectSnapshotRoutes } from '../server/control/ProjectSnapshotRoutes.js';
+import { ProjectCollaborationRoutes } from '../server/control/ProjectCollaborationRoutes.js';
 import { ProjectEventRoutes } from '../server/events/ProjectEventRoutes.js';
 import { GitUploadPackRoutes } from '../server/git/GitUploadPackRoutes.js';
 import { GitReceivePackRoutes } from '../server/git/GitReceivePackRoutes.js';
@@ -146,7 +149,9 @@ class CloudApplication implements Application {
   readonly #projectEventAdmission: ProjectEventAdmission;
   readonly #projectEventWakeup: ProjectEventWakeup;
   readonly #projectReadAuthority: ProjectReadAuthority;
+  readonly #projectRequestAuthority: ProjectRequestAuthority;
   readonly #projectPersonalRefAuthority: ProjectPersonalRefAuthority;
+  readonly #projectTicketAuthority: ProjectTicketAuthority;
   readonly #repositoryAuthority: GitRepositoryAuthority;
   readonly #repositoryPublication: RepositoryPublication;
   readonly #resourceAdmission: ResourceAdmission;
@@ -252,6 +257,15 @@ class CloudApplication implements Application {
       publication: this.#repositoryPublication,
       uploadGate: developmentBootstrapUploadGate,
     });
+    this.#projectRequestAuthority = new ProjectRequestAuthority({
+      coordination: this.#coordination,
+      recovery: this.#activationCoordinator,
+      repository: this.#repositoryAuthority,
+    });
+    this.#projectTicketAuthority = new ProjectTicketAuthority({
+      coordination: this.#coordination,
+      recovery: this.#activationCoordinator,
+    });
     this.#projectPersonalRefAuthority = new ProjectPersonalRefAuthority({
       coordination: this.#coordination,
       recovery: this.#activationCoordinator,
@@ -279,6 +293,8 @@ class CloudApplication implements Application {
         'git-upload-pack',
         'project-events',
         'project-snapshot',
+        'requests',
+        'tickets',
       ]),
       limits: {
         maxDevelopmentBootstrapGitBundleBytes:
@@ -306,6 +322,13 @@ class CloudApplication implements Application {
       maximumJsonBytes: COLLAB_LIMITS.maxJsonPayloadUtf8Bytes,
       operationTimeoutMs: options.config.repository.operationTimeoutMs,
       principalAdapter,
+    });
+    const projectCollaborationRoutes = new ProjectCollaborationRoutes({
+      maximumJsonBytes: COLLAB_LIMITS.maxJsonPayloadUtf8Bytes,
+      operationTimeoutMs: options.config.repository.operationTimeoutMs,
+      principalAdapter,
+      requestAuthority: this.#projectRequestAuthority,
+      ticketAuthority: this.#projectTicketAuthority,
     });
     this.#projectEventRoutes = new ProjectEventRoutes({
       admission: this.#projectEventAdmission,
@@ -335,6 +358,7 @@ class CloudApplication implements Application {
         capabilitiesRoute,
         bootstrapRoutes,
         projectSnapshotRoutes,
+        projectCollaborationRoutes,
         gitReceivePackRoutes,
         gitUploadPackRoutes,
       ],
@@ -459,11 +483,15 @@ class CloudApplication implements Application {
     const eventClose = this.#projectEventRoutes.close();
     this.#projectEventWakeup.close();
     const readClose = this.#projectReadAuthority.close();
+    const requestClose = this.#projectRequestAuthority.close();
     const personalRefClose = this.#projectPersonalRefAuthority.close();
+    const ticketClose = this.#projectTicketAuthority.close();
     results.push(await settleBefore(eventClose, deadline));
     results.push(await settleBefore(eventAdmissionClose, deadline));
     results.push(await settleBefore(readClose, deadline));
+    results.push(await settleBefore(requestClose, deadline));
     results.push(await settleBefore(personalRefClose, deadline));
+    results.push(await settleBefore(ticketClose, deadline));
     results.push(await settleBefore(httpClose, deadline));
     results.push(await settleBefore(this.#bootstrapExpiryReconciler.close(), deadline));
     results.push(await settleBefore(this.#activationCoordinator.close(), deadline));

@@ -520,7 +520,7 @@ describe('GitBundleImporter', () => {
     const fixture = await createBundleFixture();
     const owners = createImporter(fixture, {
       uploadIdleTimeoutMs: 20,
-      uploadTotalTimeoutMs: 200,
+      uploadTotalTimeoutMs: 1_000,
     });
     const attemptPath = (attemptId: string): string => join(
       fixture.stagingRoot,

@@ -664,6 +664,8 @@ describe('development bootstrap gate', { concurrency: false }, () => {
       'git-upload-pack',
       'project-events',
       'project-snapshot',
+      'requests',
+      'tickets',
     ]);
 
     const cancelledManifest = manifest(

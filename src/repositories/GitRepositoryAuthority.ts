@@ -20,6 +20,12 @@ import {
   type GitChildPermit,
 } from '../resource-admission/ResourceAdmission.js';
 import {
+  ProjectRequestRepositoryError,
+  type ProjectRequestHeadValidationInput,
+  type ProjectRequestInspection,
+  type ProjectRequestInspectionInput,
+} from '../project-authority/requests/ProjectRequestRepository.js';
+import {
   GitReceivePackPolicy,
   GitReceivePackPolicyError,
   type GitReceivePackPolicyOptions,
@@ -500,6 +506,72 @@ export class GitRepositoryAuthority {
     });
   }
 
+  inspectRequest(
+    input: ProjectRequestInspectionInput,
+  ): Promise<ProjectRequestInspection> {
+    return this.#runRequestRead(input, async (repositoryPath, refs) => {
+      if (refs.get(COLLAB_MAIN_REF) !== input.expectedMainOid) {
+        throw new ProjectRequestRepositoryError('stale-main');
+      }
+      const personalOid = refs.get(input.personalRef);
+      if (personalOid === undefined) {
+        throw new ProjectRequestRepositoryError('state-conflict');
+      }
+      const mergeBase = await this.#supervisor.runCommand({
+        arguments: ['merge-base', input.firstBaseOid, input.latestHeadOid],
+        captureOutput: true,
+        cwd: repositoryPath,
+        failureCode: 'repository-corrupt',
+        signal: input.signal,
+      });
+      if (mergeBase.toString('utf8').trim() !== input.firstBaseOid) {
+        throw new ProjectRequestRepositoryError('state-conflict');
+      }
+      if (personalOid !== input.latestHeadOid) {
+        return Object.freeze({
+          currentMainOid: input.expectedMainOid,
+          reviewCondition: 'stale' as const,
+          reviewedHeadOid: input.latestHeadOid,
+        });
+      }
+      const mergeTree = await this.#supervisor.runCommand({
+        acceptedExitCodes: [0, 1],
+        arguments: ['merge-tree', '--write-tree', input.expectedMainOid, input.latestHeadOid],
+        captureOutput: true,
+        cwd: repositoryPath,
+        failureCode: 'repository-corrupt',
+        signal: input.signal,
+      });
+      const lines = mergeTree.toString('utf8').trimEnd().split('\n');
+      if (!isCollabGitOid(lines[0] ?? '')) {
+        throw new ProjectRequestRepositoryError('state-conflict');
+      }
+      return Object.freeze({
+        currentMainOid: input.expectedMainOid,
+        reviewCondition: lines.length === 1 ? 'clean' as const : 'conflicting' as const,
+        reviewedHeadOid: input.latestHeadOid,
+      });
+    });
+  }
+
+  validateRequestHead(input: ProjectRequestHeadValidationInput): Promise<void> {
+    return this.#runRequestRead(input, async (repositoryPath, refs) => {
+      if (refs.get(COLLAB_MAIN_REF) !== input.expectedMainOid) {
+        throw new ProjectRequestRepositoryError('stale-main');
+      }
+      if (refs.get(input.personalRef) !== input.headOid) {
+        throw new ProjectRequestRepositoryError('head-not-pushed');
+      }
+      await this.#supervisor.runCommand({
+        arguments: ['cat-file', '-e', `${input.headOid}^{commit}`],
+        captureOutput: false,
+        cwd: repositoryPath,
+        failureCode: 'repository-corrupt',
+        signal: input.signal,
+      });
+    });
+  }
+
   async reserveReceivePack(
     projectId: CollabProjectId,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
@@ -857,6 +929,76 @@ export class GitRepositoryAuthority {
         if (error instanceof GitProcessError) throw mapProcessError(error);
         throw error;
       }
+    } finally {
+      permit.release();
+    }
+  }
+
+  async #runRequestRead<T>(
+    input: Pick<
+      ProjectRequestHeadValidationInput,
+      'memberId' | 'personalRef' | 'placement' | 'projectId' | 'revalidateAuthority' | 'signal'
+    >,
+    operation: (
+      repositoryPath: string,
+      refs: ReadonlyMap<string, CollabGitOid>,
+    ) => Promise<T>,
+  ): Promise<T> {
+    this.#assertOpen();
+    if (
+      input.personalRef !== collabMemberRef(input.memberId)
+      || input.placement.projectId !== input.projectId
+    ) {
+      throw new ProjectRequestRepositoryError('state-conflict');
+    }
+    let placement: RepositoryPlacementLease;
+    try {
+      placement = createRepositoryPlacementLease(input.placement);
+    } catch {
+      throw new ProjectRequestRepositoryError('state-conflict');
+    }
+    let permit: GitChildPermit;
+    try {
+      permit = await this.#resourceAdmission.acquireGitChild({
+        classification: 'read',
+        projectId: input.projectId,
+        signal: input.signal,
+      });
+    } catch (error: unknown) {
+      if (
+        error instanceof ResourceAdmissionError
+        && error.code === 'cancelled'
+      ) {
+        throw new ProjectRequestRepositoryError('cancelled');
+      }
+      throw new ProjectRequestRepositoryError('unavailable');
+    }
+    try {
+      this.#assertOpen();
+      assertNotAborted(input.signal);
+      let resolved = await this.#pathPolicy.resolveExisting(placement);
+      await this.#pathPolicy.revalidate(placement);
+      const before = await this.#readRefs(resolved.repositoryPath, input.signal);
+      const result = await operation(resolved.repositoryPath, before);
+      resolved = await this.#pathPolicy.resolveExisting(placement);
+      await this.#pathPolicy.revalidate(placement);
+      await input.revalidateAuthority();
+      this.#assertOpen();
+      assertNotAborted(input.signal);
+      const after = await this.#readRefs(resolved.repositoryPath, input.signal);
+      if (!sameRefs(before, after)) {
+        throw new ProjectRequestRepositoryError('state-conflict');
+      }
+      return result;
+    } catch (error: unknown) {
+      if (error instanceof ProjectRequestRepositoryError) throw error;
+      if (error instanceof GitRepositoryError && error.code === 'cancelled') {
+        throw new ProjectRequestRepositoryError('cancelled');
+      }
+      if (error instanceof GitProcessError && error.code === 'cancelled') {
+        throw new ProjectRequestRepositoryError('cancelled');
+      }
+      throw new ProjectRequestRepositoryError('unavailable');
     } finally {
       permit.release();
     }
