@@ -69,6 +69,7 @@ import {
   projectLockKey,
 } from '../ProjectLockKey.js';
 import { PostgresDevelopmentBootstrapPersistence } from './PostgresDevelopmentBootstrapPersistence.js';
+import { PostgresCollaborationPersistence } from './PostgresCollaborationPersistence.js';
 import { POSTGRES_SCHEMAS } from './PostgresSchema.js';
 
 export interface PostgresCoordinationOptions {
@@ -474,6 +475,7 @@ async function checkout(
 class PostgresProjectScope
   extends PostgresDevelopmentBootstrapPersistence
   implements ProjectScope {
+  readonly collaboration: PostgresCollaborationPersistence;
   readonly #client: PoolClient;
   readonly #markBroken: MarkBroken;
   readonly #projectId: CollabProjectId;
@@ -485,6 +487,12 @@ class PostgresProjectScope
     markBroken: MarkBroken,
   ) {
     super(
+      projectId,
+      <Row extends QueryResultRow>(text: string, values: readonly unknown[]) => (
+        safeQuery<Row>(client, text, values, markBroken)
+      ),
+    );
+    this.collaboration = new PostgresCollaborationPersistence(
       projectId,
       <Row extends QueryResultRow>(text: string, values: readonly unknown[]) => (
         safeQuery<Row>(client, text, values, markBroken)

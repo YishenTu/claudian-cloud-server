@@ -16,8 +16,15 @@ export const PROJECT_READ_EVENTS_SCHEMA = Object.freeze({
   version: 3,
 });
 
+export const COLLABORATION_SCHEMA = Object.freeze({
+  checksum: '13ee2c7de2b189fb502a6610bff250f9de9133a82d79c153658251cf7f5a5780',
+  name: 'collaboration',
+  version: 4,
+});
+
 export const POSTGRES_SCHEMAS = Object.freeze([
   FOUNDATION_SCHEMA,
   DEVELOPMENT_BOOTSTRAP_SCHEMA,
   PROJECT_READ_EVENTS_SCHEMA,
+  COLLABORATION_SCHEMA,
 ]);

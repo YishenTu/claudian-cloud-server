@@ -15,6 +15,7 @@ import {
 const FOUNDATION_CHECKSUM = '5e883d93536b2569f3655cc9f3982c4ad7e8e3daf7871500dc5d4f471e8504bb';
 const DEVELOPMENT_BOOTSTRAP_CHECKSUM = '18d367c9ef8a0d39d0d072bc2ed89b1b6f75bf306585adb6138c66b3e5a9afe6';
 const PROJECT_READ_EVENTS_CHECKSUM = 'd490c9083abc5e0294c9d144d832b5070040276d716555d398ca80456aecf9d8';
+const COLLABORATION_CHECKSUM = '13ee2c7de2b189fb502a6610bff250f9de9133a82d79c153658251cf7f5a5780';
 
 async function execute(connectionString: string, sql: string): Promise<void> {
   const client = new Client({ connectionString });
@@ -115,6 +116,12 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
         state: 'applied',
         version: 3,
       },
+      {
+        checksum: COLLABORATION_CHECKSUM,
+        name: 'collaboration',
+        state: 'applied',
+        version: 4,
+      },
     ]);
 
     const relations = await client.query<{ readonly relation: string }>(
@@ -127,6 +134,7 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
       relations.rows.map(row => row.relation),
       [
         'active_repository_placement_catalog',
+        'change_requests',
         'development_actor_mappings',
         'development_bootstrap_attempt_routes',
         'development_bootstrap_attempts',
@@ -134,13 +142,19 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
         'development_bootstrap_reports',
         'development_bootstrap_settlements',
         'development_bootstrap_uploads',
+        'idempotency_results',
         'project_event_sequences',
         'project_events',
         'project_memberships',
         'projects',
         'recovery_candidates',
         'repository_placements',
+        'request_comments',
+        'request_ticket_relations',
         'schema_migrations',
+        'ticket_comments',
+        'ticket_mentions',
+        'tickets',
       ],
     );
 
@@ -160,10 +174,10 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
     await client.query(
       `INSERT INTO claudian_cloud.schema_migrations
         (version, name, checksum, state, applied_at)
-       VALUES (4, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
+       VALUES (5, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
     );
-    await expectMigrationError(migrator, 'schema-newer', 4);
-    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 4');
+    await expectMigrationError(migrator, 'schema-newer', 5);
+    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 5');
 
     await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 1');
     await expectMigrationError(migrator, 'schema-gap', 2);
@@ -223,6 +237,7 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
     );
     assert.deepEqual(ownership.rows, [
       { owner: 'claudian_cloud_migration', relation: 'active_repository_placement_catalog' },
+      { owner: 'claudian_cloud_migration', relation: 'change_requests' },
       { owner: 'claudian_cloud_migration', relation: 'development_actor_mappings' },
       { owner: 'claudian_cloud_migration', relation: 'development_bootstrap_attempt_routes' },
       { owner: 'claudian_cloud_migration', relation: 'development_bootstrap_attempts' },
@@ -230,13 +245,19 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       { owner: 'claudian_cloud_migration', relation: 'development_bootstrap_reports' },
       { owner: 'claudian_cloud_migration', relation: 'development_bootstrap_settlements' },
       { owner: 'claudian_cloud_migration', relation: 'development_bootstrap_uploads' },
+      { owner: 'claudian_cloud_migration', relation: 'idempotency_results' },
       { owner: 'claudian_cloud_migration', relation: 'project_event_sequences' },
       { owner: 'claudian_cloud_migration', relation: 'project_events' },
       { owner: 'claudian_cloud_migration', relation: 'project_memberships' },
       { owner: 'claudian_cloud_migration', relation: 'projects' },
       { owner: 'claudian_cloud_migration', relation: 'recovery_candidates' },
       { owner: 'claudian_cloud_migration', relation: 'repository_placements' },
+      { owner: 'claudian_cloud_migration', relation: 'request_comments' },
+      { owner: 'claudian_cloud_migration', relation: 'request_ticket_relations' },
       { owner: 'claudian_cloud_migration', relation: 'schema_migrations' },
+      { owner: 'claudian_cloud_migration', relation: 'ticket_comments' },
+      { owner: 'claudian_cloud_migration', relation: 'ticket_mentions' },
+      { owner: 'claudian_cloud_migration', relation: 'tickets' },
     ]);
 
     const schemaPrivileges = await migrationClient.query<{
@@ -270,40 +291,35 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
           AND grantee = 'claudian_cloud_runtime'
         ORDER BY table_name, privilege_type`,
     );
-    const mutableRelations = [
-      'active_repository_placement_catalog',
-      'development_actor_mappings',
-      'development_bootstrap_attempts',
-      'development_bootstrap_expiry_candidates',
-      'development_bootstrap_reports',
-      'development_bootstrap_settlements',
-      'development_bootstrap_uploads',
-      'project_memberships',
-      'projects',
-      'recovery_candidates',
-      'repository_placements',
-    ];
-    assert.deepEqual(tablePrivileges.rows, [
-      ...mutableRelations.slice(0, 7).flatMap(relation => (
-        ['DELETE', 'INSERT', 'SELECT', 'UPDATE'].map(privilege => ({
-          privilege,
-          relation,
-        }))
+    const privilegesByRelation: Readonly<Record<string, readonly string[]>> = {
+      active_repository_placement_catalog: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      change_requests: ['INSERT', 'SELECT', 'UPDATE'],
+      development_actor_mappings: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      development_bootstrap_attempts: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      development_bootstrap_expiry_candidates: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      development_bootstrap_reports: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      development_bootstrap_settlements: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      development_bootstrap_uploads: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      idempotency_results: ['INSERT', 'SELECT'],
+      project_event_sequences: ['INSERT', 'SELECT', 'UPDATE'],
+      project_events: ['DELETE', 'INSERT', 'SELECT'],
+      project_memberships: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      projects: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      recovery_candidates: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      repository_placements: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      request_comments: ['INSERT', 'SELECT'],
+      request_ticket_relations: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      schema_migrations: ['SELECT'],
+      ticket_comments: ['INSERT', 'SELECT'],
+      ticket_mentions: ['DELETE', 'INSERT', 'SELECT'],
+      tickets: ['INSERT', 'SELECT', 'UPDATE'],
+    };
+    assert.deepEqual(
+      tablePrivileges.rows,
+      Object.entries(privilegesByRelation).flatMap(([relation, privileges]) => (
+        privileges.map(privilege => ({ privilege, relation }))
       )),
-      { privilege: 'INSERT', relation: 'project_event_sequences' },
-      { privilege: 'SELECT', relation: 'project_event_sequences' },
-      { privilege: 'UPDATE', relation: 'project_event_sequences' },
-      { privilege: 'DELETE', relation: 'project_events' },
-      { privilege: 'INSERT', relation: 'project_events' },
-      { privilege: 'SELECT', relation: 'project_events' },
-      ...mutableRelations.slice(7).flatMap(relation => (
-        ['DELETE', 'INSERT', 'SELECT', 'UPDATE'].map(privilege => ({
-          privilege,
-          relation,
-        }))
-      )),
-      { privilege: 'SELECT', relation: 'schema_migrations' },
-    ]);
+    );
 
     const policies = await migrationClient.query<{
       readonly policy_name: string;
@@ -315,6 +331,10 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
         ORDER BY tablename`,
     );
     assert.deepEqual(policies.rows, [
+      {
+        policy_name: 'change_requests_project_scope',
+        relation: 'change_requests',
+      },
       {
         policy_name: 'development_actor_mappings_project_scope',
         relation: 'development_actor_mappings',
@@ -336,6 +356,10 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
         relation: 'development_bootstrap_uploads',
       },
       {
+        policy_name: 'idempotency_results_project_scope',
+        relation: 'idempotency_results',
+      },
+      {
         policy_name: 'project_event_sequences_project_scope',
         relation: 'project_event_sequences',
       },
@@ -352,6 +376,23 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
         policy_name: 'repository_placements_project_scope',
         relation: 'repository_placements',
       },
+      {
+        policy_name: 'request_comments_project_scope',
+        relation: 'request_comments',
+      },
+      {
+        policy_name: 'request_ticket_relations_project_scope',
+        relation: 'request_ticket_relations',
+      },
+      {
+        policy_name: 'ticket_comments_project_scope',
+        relation: 'ticket_comments',
+      },
+      {
+        policy_name: 'ticket_mentions_project_scope',
+        relation: 'ticket_mentions',
+      },
+      { policy_name: 'tickets_project_scope', relation: 'tickets' },
     ]);
 
     for (const projectId of ['project-a', 'project-b']) {

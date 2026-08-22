@@ -50,6 +50,8 @@ export interface AuthorizedProjectWrite {
   readonly projectId: CollabProjectId;
   readonly revalidate: () => Promise<void>;
   readonly role: CollabRole;
+  readonly signal: AbortSignal;
+  transact<T>(operation: (scope: ProjectScope) => Promise<T>): Promise<T>;
 }
 
 export interface ProjectWriteAdmissionCoordination {
@@ -228,6 +230,14 @@ export class ProjectWriteAdmission {
               ));
             },
             role: facts.role,
+            signal,
+            transact: <T>(operation: (scope: ProjectScope) => Promise<T>) => {
+              this.#assertAvailable(signal);
+              return lease.withProjectScope(async scope => {
+                await this.#revalidate(scope, principal, projectId, facts);
+                return operation(scope);
+              });
+            },
           });
           return await operation(write);
         }
