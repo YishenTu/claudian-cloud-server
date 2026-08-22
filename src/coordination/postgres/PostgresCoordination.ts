@@ -1,10 +1,14 @@
 import {
   COLLAB_LIMITS,
+  COLLAB_CLOUD_BINDING_LIMITS,
+  COLLAB_PROTOCOL_VERSION,
+  decodeCollabCloudProjectEventMessage,
   isCollabGitOid,
   isCollabMemberId,
   isCollabOpaqueId,
   isCollabProjectId,
   type CollabMemberId,
+  type CollabCloudProjectEvent,
   type CollabProjectId,
 } from '@claudian/collab-protocol';
 import { Pool, type PoolClient, type QueryResultRow } from 'pg';
@@ -26,13 +30,21 @@ import {
   type ProjectRecord,
 } from '../ProjectPersistence.js';
 import type {
+  AppendProjectEvent,
+  ProjectEventReplayFacts,
+  PruneProjectEventsOptions,
+  ReadProjectEventsOptions,
+} from '../ProjectEventPersistence.js';
+import type {
   AcquireProjectLeaseOptions,
   ActiveRepositoryPlacementPage,
   DevelopmentBootstrapUploadLease,
   ListActiveRepositoryPlacementsOptions,
   PinnedProjectLease,
   ProjectMembershipRecord,
+  ProjectReadScope,
   ProjectScope,
+  ProjectSnapshotMembershipRecord,
 } from '../ProjectCoordination.js';
 export type {
   AcquireProjectLeaseOptions,
@@ -41,7 +53,9 @@ export type {
   ListActiveRepositoryPlacementsOptions,
   PinnedProjectLease,
   ProjectMembershipRecord,
+  ProjectReadScope,
   ProjectScope,
+  ProjectSnapshotMembershipRecord,
 } from '../ProjectCoordination.js';
 import {
   assertRepositoryPlacementLease,
@@ -58,6 +72,7 @@ import { PostgresDevelopmentBootstrapPersistence } from './PostgresDevelopmentBo
 import { POSTGRES_SCHEMAS } from './PostgresSchema.js';
 
 export interface PostgresCoordinationOptions {
+  readonly onProjectEventCommitted?: (projectId: CollabProjectId) => void;
   readonly ordinaryPoolMax: number;
   readonly pinnedPoolMax: number;
   readonly projectLockTimeoutMs: number;
@@ -67,11 +82,13 @@ export interface PostgresCoordinationOptions {
 }
 
 interface MembershipRow {
+  readonly created_at?: Date;
   readonly display_name: string;
   readonly member_id: string;
   readonly revision: string;
   readonly role: string;
   readonly status: string;
+  readonly updated_at?: Date;
 }
 
 interface PlacementRow {
@@ -99,6 +116,19 @@ interface MigrationRow {
   readonly version: number;
 }
 
+interface ProjectEventRow {
+  readonly kind: string;
+  readonly occurred_at: Date;
+  readonly payload: unknown;
+  readonly project_id: string;
+  readonly sequence: string;
+}
+
+interface ProjectEventSequenceRow {
+  readonly current_sequence: string;
+  readonly retained_from_sequence: string;
+}
+
 interface RecoveryCandidateRow {
   readonly kind: string;
   readonly operation_id: string;
@@ -124,6 +154,40 @@ const AUTHORITY_VOLUME_ID_PATTERN = /^[0-9a-f]{32}$/u;
 
 function dependencyFailure(): CoordinationError {
   return new CoordinationError('dependency-failed');
+}
+
+function safeSequence(value: string): number {
+  const sequence = Number(value);
+  if (!Number.isSafeInteger(sequence) || sequence < 0) {
+    throw dependencyFailure();
+  }
+  return sequence;
+}
+
+function projectEvent(row: ProjectEventRow): CollabCloudProjectEvent {
+  const sequence = safeSequence(row.sequence);
+  if (
+    sequence < 1
+    || !isCollabProjectId(row.project_id)
+    || !(row.occurred_at instanceof Date)
+    || Number.isNaN(row.occurred_at.valueOf())
+  ) {
+    throw dependencyFailure();
+  }
+  try {
+    const decoded = decodeCollabCloudProjectEventMessage({
+      kind: row.kind,
+      occurredAt: row.occurred_at.toISOString(),
+      payload: row.payload,
+      projectId: row.project_id,
+      protocolVersion: COLLAB_PROTOCOL_VERSION,
+      sequence,
+    });
+    if (decoded.kind === 'snapshot.required') throw dependencyFailure();
+    return decoded;
+  } catch {
+    throw dependencyFailure();
+  }
 }
 
 function handleIdlePoolError(_error: Error): void {
@@ -413,6 +477,7 @@ class PostgresProjectScope
   readonly #client: PoolClient;
   readonly #markBroken: MarkBroken;
   readonly #projectId: CollabProjectId;
+  #projectEventAppended = false;
 
   constructor(
     client: PoolClient,
@@ -428,6 +493,160 @@ class PostgresProjectScope
     this.#client = client;
     this.#projectId = projectId;
     this.#markBroken = markBroken;
+  }
+
+  async appendProjectEvent(
+    event: AppendProjectEvent,
+  ): Promise<CollabCloudProjectEvent> {
+    this.assertActive();
+    validateIsoTimestamp(event.occurredAt);
+    let validated: CollabCloudProjectEvent;
+    try {
+      const decoded = decodeCollabCloudProjectEventMessage({
+        ...event,
+        projectId: this.#projectId,
+        protocolVersion: COLLAB_PROTOCOL_VERSION,
+        sequence: 1,
+      });
+      if (decoded.kind === 'snapshot.required') {
+        throw new CoordinationError('invalid-record');
+      }
+      validated = decoded;
+    } catch (error: unknown) {
+      if (error instanceof CoordinationError) throw error;
+      throw new CoordinationError('invalid-record');
+    }
+    const sequences = await safeQuery<{ readonly current_sequence: string }>(
+      this.#client,
+      `INSERT INTO claudian_cloud.project_event_sequences (
+         project_id, current_sequence, updated_at
+       ) VALUES ($1, 1, $2::timestamptz)
+       ON CONFLICT (project_id) DO UPDATE
+         SET current_sequence =
+               claudian_cloud.project_event_sequences.current_sequence + 1,
+             updated_at = EXCLUDED.updated_at
+         WHERE claudian_cloud.project_event_sequences.current_sequence
+               < 9007199254740991
+       RETURNING current_sequence`,
+      [this.#projectId, validated.occurredAt],
+      this.#markBroken,
+    );
+    const sequence = sequences[0] === undefined
+      ? undefined
+      : safeSequence(sequences[0].current_sequence);
+    if (sequence === undefined || sequence < 1) {
+      throw new CoordinationError('state-conflict');
+    }
+    const rows = await safeQuery<ProjectEventRow>(
+      this.#client,
+      `INSERT INTO claudian_cloud.project_events (
+         project_id, sequence, kind, payload, occurred_at
+       ) VALUES ($1, $2, $3, $4::jsonb, $5::timestamptz)
+       RETURNING project_id, sequence, kind, payload, occurred_at`,
+      [
+        this.#projectId,
+        sequence,
+        validated.kind,
+        JSON.stringify(validated.payload),
+        validated.occurredAt,
+      ],
+      this.#markBroken,
+    );
+    const row = rows[0];
+    if (row === undefined) throw dependencyFailure();
+    await this.pruneProjectEvents({ now: validated.occurredAt });
+    this.#projectEventAppended = true;
+    return projectEvent(row);
+  }
+
+  didAppendProjectEvent(): boolean {
+    return this.#projectEventAppended;
+  }
+
+  async getProjectEventSequence(): Promise<number> {
+    this.assertActive();
+    const rows = await safeQuery<{ readonly current_sequence: string }>(
+      this.#client,
+      `SELECT current_sequence
+         FROM claudian_cloud.project_event_sequences
+        WHERE project_id = $1`,
+      [this.#projectId],
+      this.#markBroken,
+    );
+    return rows[0] === undefined ? 0 : safeSequence(rows[0].current_sequence);
+  }
+
+  async pruneProjectEvents(options: PruneProjectEventsOptions): Promise<number> {
+    this.assertActive();
+    validateIsoTimestamp(options.now);
+    const rows = await safeQuery<{ readonly sequence: string }>(
+      this.#client,
+      `DELETE FROM claudian_cloud.project_events AS event
+        USING claudian_cloud.project_event_sequences AS counter
+        WHERE event.project_id = $1
+          AND counter.project_id = event.project_id
+          AND event.sequence <= counter.current_sequence - $2
+          AND event.occurred_at < $3::timestamptz - ($4 * interval '1 day')
+       RETURNING event.sequence`,
+      [
+        this.#projectId,
+        COLLAB_CLOUD_BINDING_LIMITS.minRetainedEventCount,
+        options.now,
+        COLLAB_CLOUD_BINDING_LIMITS.minEventRetentionDays,
+      ],
+      this.#markBroken,
+    );
+    return rows.length;
+  }
+
+  async readProjectEvents(
+    options: ReadProjectEventsOptions,
+  ): Promise<ProjectEventReplayFacts> {
+    this.assertActive();
+    if (
+      !Number.isSafeInteger(options.afterSequence)
+      || options.afterSequence < 0
+      || !Number.isSafeInteger(options.limit)
+      || options.limit < 1
+      || options.limit > COLLAB_CLOUD_BINDING_LIMITS.maxEventReplay
+    ) {
+      throw new CoordinationError('invalid-record');
+    }
+    const facts = await safeQuery<ProjectEventSequenceRow>(
+      this.#client,
+      `SELECT counter.current_sequence,
+              COALESCE(MIN(event.sequence), counter.current_sequence + 1)
+                AS retained_from_sequence
+         FROM claudian_cloud.project_event_sequences AS counter
+         LEFT JOIN claudian_cloud.project_events AS event
+           ON event.project_id = counter.project_id
+        WHERE counter.project_id = $1
+        GROUP BY counter.current_sequence`,
+      [this.#projectId],
+      this.#markBroken,
+    );
+    const fact = facts[0];
+    const latestSequence = fact === undefined
+      ? 0
+      : safeSequence(fact.current_sequence);
+    const retainedFromSequence = fact === undefined
+      ? 1
+      : safeSequence(fact.retained_from_sequence);
+    const rows = await safeQuery<ProjectEventRow>(
+      this.#client,
+      `SELECT project_id, sequence, kind, payload, occurred_at
+         FROM claudian_cloud.project_events
+        WHERE project_id = $1 AND sequence > $2
+        ORDER BY sequence
+        LIMIT $3`,
+      [this.#projectId, options.afterSequence, options.limit],
+      this.#markBroken,
+    );
+    return Object.freeze({
+      events: Object.freeze(rows.map(projectEvent)),
+      latestSequence,
+      retainedFromSequence,
+    });
   }
 
   async findMembership(
@@ -494,6 +713,53 @@ class PostgresProjectScope
         revision,
         role: row.role,
         status: row.status as ProjectMembershipRecord['status'],
+      });
+    }));
+  }
+
+  async listActiveSnapshotMemberships(): Promise<
+    readonly ProjectSnapshotMembershipRecord[]
+  > {
+    this.assertActive();
+    const rows = await safeQuery<MembershipRow>(
+      this.#client,
+      `SELECT display_name, member_id, role, status, revision,
+              created_at, updated_at
+         FROM claudian_cloud.project_memberships
+        WHERE project_id = $1 AND status = 'active'
+        ORDER BY member_id
+        LIMIT $2`,
+      [
+        this.#projectId,
+        COLLAB_CLOUD_BINDING_LIMITS.maxCloudProjectMembers + 1,
+      ],
+      this.#markBroken,
+    );
+    return Object.freeze(rows.map(row => {
+      const revision = BigInt(row.revision);
+      if (
+        !isCollabMemberId(row.member_id)
+        || row.display_name.length === 0
+        || row.display_name.length > COLLAB_LIMITS.maxMemberDisplayNameUtf16
+        || (row.role !== 'manager' && row.role !== 'member')
+        || row.status !== 'active'
+        || revision < 0n
+        || !(row.created_at instanceof Date)
+        || Number.isNaN(row.created_at.valueOf())
+        || !(row.updated_at instanceof Date)
+        || Number.isNaN(row.updated_at.valueOf())
+        || row.updated_at < row.created_at
+      ) {
+        throw dependencyFailure();
+      }
+      return Object.freeze({
+        activatedAt: row.updated_at.toISOString(),
+        createdAt: row.created_at.toISOString(),
+        displayName: row.display_name,
+        memberId: row.member_id,
+        revision,
+        role: row.role,
+        status: 'active' as const,
       });
     }));
   }
@@ -610,6 +876,8 @@ async function runProjectTransaction<T>(
     readonly deadline: number;
     readonly lockKey: bigint | undefined;
     readonly markBroken: MarkBroken;
+    readonly onProjectEventCommitted: ((projectId: CollabProjectId) => void)
+      | undefined;
     readonly signal: AbortSignal | undefined;
   },
 ): Promise<T> {
@@ -635,16 +903,62 @@ async function runProjectTransaction<T>(
     );
     const scope = new PostgresProjectScope(client, projectId, options.markBroken);
     let value: T;
+    let projectEventAppended = false;
     try {
       value = await operation(scope);
+      projectEventAppended = scope.didAppendProjectEvent();
     } finally {
       scope.deactivate();
     }
     await safeQuery(client, 'COMMIT', [], options.markBroken);
     transactionStarted = false;
+    if (projectEventAppended) {
+      try {
+        options.onProjectEventCommitted?.(projectId);
+      } catch {
+        // The committed transaction remains authoritative if notification fails.
+      }
+    }
     return value;
   } catch (error: unknown) {
     if (transactionStarted) await rollback(client, options.markBroken);
+    throw error;
+  }
+}
+
+async function runProjectReadTransaction<T>(
+  client: PoolClient,
+  projectId: CollabProjectId,
+  operation: (scope: ProjectReadScope) => Promise<T>,
+  markBroken: MarkBroken,
+): Promise<T> {
+  let transactionStarted = false;
+  try {
+    await safeQuery(
+      client,
+      'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY',
+      [],
+      markBroken,
+    );
+    transactionStarted = true;
+    await safeQuery(
+      client,
+      "SELECT set_config('claudian_cloud.project_id', $1, true)",
+      [projectId],
+      markBroken,
+    );
+    const scope = new PostgresProjectScope(client, projectId, markBroken);
+    let value: T;
+    try {
+      value = await operation(scope);
+    } finally {
+      scope.deactivate();
+    }
+    await safeQuery(client, 'COMMIT', [], markBroken);
+    transactionStarted = false;
+    return value;
+  } catch (error: unknown) {
+    if (transactionStarted) await rollback(client, markBroken);
     throw error;
   }
 }
@@ -653,6 +967,8 @@ class PostgresPinnedProjectLease implements PinnedProjectLease {
   readonly #checkedOutClient: CheckedOutPoolClient;
   readonly #client: PoolClient;
   readonly #lockKey: bigint;
+  readonly #onProjectEventCommitted: ((projectId: CollabProjectId) => void)
+    | undefined;
   readonly #projectId: CollabProjectId;
   #activeOperation: Promise<void> | undefined;
   #closePromise: Promise<void> | undefined;
@@ -664,11 +980,13 @@ class PostgresPinnedProjectLease implements PinnedProjectLease {
     checkedOutClient: CheckedOutPoolClient,
     projectId: CollabProjectId,
     lockKey: bigint,
+    onProjectEventCommitted: ((projectId: CollabProjectId) => void) | undefined,
   ) {
     this.#checkedOutClient = checkedOutClient;
     this.#client = checkedOutClient.client;
     this.#projectId = projectId;
     this.#lockKey = lockKey;
+    this.#onProjectEventCommitted = onProjectEventCommitted;
   }
 
   close(): Promise<void> {
@@ -696,6 +1014,7 @@ class PostgresPinnedProjectLease implements PinnedProjectLease {
         deadline: Number.POSITIVE_INFINITY,
         lockKey: undefined,
         markBroken: this.#checkedOutClient.markBroken,
+        onProjectEventCommitted: this.#onProjectEventCommitted,
         signal: undefined,
       },
     );
@@ -864,6 +1183,8 @@ export class PostgresCoordination
   RepositoryPlacementValidator {
   readonly #checkedOutClients = new CheckedOutPoolClients();
   readonly #ordinaryPool: Pool;
+  readonly #onProjectEventCommitted: ((projectId: CollabProjectId) => void)
+    | undefined;
   readonly #pinnedPool: Pool;
   readonly #projectLockTimeoutMs: number;
   readonly #reservedPool: Pool;
@@ -871,6 +1192,7 @@ export class PostgresCoordination
   #closed = false;
 
   constructor(options: PostgresCoordinationOptions) {
+    this.#onProjectEventCommitted = options.onProjectEventCommitted;
     this.#projectLockTimeoutMs = options.projectLockTimeoutMs;
     const dependencyTimeoutMs = Math.min(
       options.projectLockTimeoutMs,
@@ -1255,8 +1577,35 @@ export class PostgresCoordination
         deadline,
         lockKey,
         markBroken: checkedOut.markBroken,
+        onProjectEventCommitted: this.#onProjectEventCommitted,
         signal: options.signal,
       });
+    } finally {
+      checkedOut.release();
+    }
+  }
+
+  async withProjectReadScope<T>(
+    projectId: CollabProjectId,
+    operation: (scope: ProjectReadScope) => Promise<T>,
+    options: AcquireProjectLeaseOptions = {},
+  ): Promise<T> {
+    this.#assertOpen();
+    ensureProjectId(projectId);
+    const deadline = Date.now() + this.#projectLockTimeoutMs;
+    const checkedOut = await checkout(
+      this.#ordinaryPool,
+      deadline,
+      options.signal,
+      this.#checkedOutClients,
+    );
+    try {
+      return await runProjectReadTransaction(
+        checkedOut.client,
+        projectId,
+        operation,
+        checkedOut.markBroken,
+      );
     } finally {
       checkedOut.release();
     }
@@ -1292,7 +1641,12 @@ export class PostgresCoordination
       acquired = true;
       if (signal?.aborted === true) throw new CoordinationError('cancelled');
       if (this.#closed) throw new CoordinationError('closed');
-      return new PostgresPinnedProjectLease(checkedOut, projectId, lockKey);
+      return new PostgresPinnedProjectLease(
+        checkedOut,
+        projectId,
+        lockKey,
+        this.#onProjectEventCommitted,
+      );
     } catch (error: unknown) {
       if (acquired) {
         try {
@@ -1329,6 +1683,7 @@ export class PostgresCoordination
         deadline,
         lockKey: undefined,
         markBroken: checkedOut.markBroken,
+        onProjectEventCommitted: this.#onProjectEventCommitted,
         signal: undefined,
       });
     } finally {

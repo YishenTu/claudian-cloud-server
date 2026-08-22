@@ -45,6 +45,10 @@ export interface AcquireGitChildOptions {
 export interface ResourceAdmissionOptions {
   readonly maxChildren: number;
   readonly maxChildrenPerProject: number;
+  readonly maxQueuedReads?: number;
+  readonly maxQueuedWrites?: number;
+  readonly maxReadChildren?: number;
+  readonly maxWriteChildren?: number;
   readonly queueMax: number;
   readonly queueMaxPerProject: number;
   readonly queueTimeoutMs: number;
@@ -70,44 +74,80 @@ function total(count: ClassificationCount): number {
   return count.read + count.write;
 }
 
-function assertOptions(options: ResourceAdmissionOptions): void {
+interface NormalizedResourceAdmissionOptions extends ResourceAdmissionOptions {
+  readonly maxQueuedReads: number;
+  readonly maxQueuedWrites: number;
+  readonly maxReadChildren: number;
+  readonly maxWriteChildren: number;
+}
+
+function normalizeOptions(
+  options: ResourceAdmissionOptions,
+): NormalizedResourceAdmissionOptions {
+  const normalized = {
+    ...options,
+    maxQueuedReads: options.maxQueuedReads ?? options.queueMax - 1,
+    maxQueuedWrites: options.maxQueuedWrites ?? options.queueMax - 1,
+    maxReadChildren: options.maxReadChildren ?? options.maxChildren - 1,
+    maxWriteChildren: options.maxWriteChildren ?? options.maxChildren - 1,
+  };
   const integers = [
-    options.maxChildren,
-    options.maxChildrenPerProject,
-    options.queueMax,
-    options.queueMaxPerProject,
-    options.queueTimeoutMs,
+    normalized.maxChildren,
+    normalized.maxChildrenPerProject,
+    normalized.maxQueuedReads,
+    normalized.maxQueuedWrites,
+    normalized.maxReadChildren,
+    normalized.maxWriteChildren,
+    normalized.queueMax,
+    normalized.queueMaxPerProject,
+    normalized.queueTimeoutMs,
   ];
   if (
     integers.some(value => !Number.isSafeInteger(value) || value <= 0)
-    || options.maxChildrenPerProject >= options.maxChildren
-    || options.queueMaxPerProject >= options.queueMax
+    || normalized.maxChildrenPerProject >= normalized.maxChildren
+    || normalized.maxReadChildren >= normalized.maxChildren
+    || normalized.maxWriteChildren >= normalized.maxChildren
+    || normalized.maxQueuedReads >= normalized.queueMax
+    || normalized.maxQueuedWrites >= normalized.queueMax
+    || normalized.queueMaxPerProject >= normalized.queueMax
   ) {
     throw new TypeError('resource-admission.options-invalid');
   }
+  return normalized;
 }
 
 export class ResourceAdmission {
   readonly #maxChildren: number;
   readonly #maxChildrenPerProject: number;
+  readonly #maxQueued: ClassificationCount;
+  readonly #maxActive: ClassificationCount;
   readonly #queueMax: number;
   readonly #queueMaxPerProject: number;
   readonly #queueTimeoutMs: number;
   readonly #active: ClassificationCount = { read: 0, write: 0 };
   readonly #activeByProject = new Map<CollabProjectId, ClassificationCount>();
   readonly #queuedByProject = new Map<CollabProjectId, number>();
+  readonly #queued: ClassificationCount = { read: 0, write: 0 };
   readonly #queue: Waiter[] = [];
   readonly #closePromise: Promise<void>;
   readonly #resolveClose: () => void;
   #closed = false;
 
   constructor(options: ResourceAdmissionOptions) {
-    assertOptions(options);
-    this.#maxChildren = options.maxChildren;
-    this.#maxChildrenPerProject = options.maxChildrenPerProject;
-    this.#queueMax = options.queueMax;
-    this.#queueMaxPerProject = options.queueMaxPerProject;
-    this.#queueTimeoutMs = options.queueTimeoutMs;
+    const normalized = normalizeOptions(options);
+    this.#maxChildren = normalized.maxChildren;
+    this.#maxChildrenPerProject = normalized.maxChildrenPerProject;
+    this.#maxQueued = {
+      read: normalized.maxQueuedReads,
+      write: normalized.maxQueuedWrites,
+    };
+    this.#maxActive = {
+      read: normalized.maxReadChildren,
+      write: normalized.maxWriteChildren,
+    };
+    this.#queueMax = normalized.queueMax;
+    this.#queueMaxPerProject = normalized.queueMaxPerProject;
+    this.#queueTimeoutMs = normalized.queueTimeoutMs;
 
     let resolveClose!: () => void;
     this.#closePromise = new Promise(resolve => {
@@ -127,7 +167,7 @@ export class ResourceAdmission {
       return Promise.reject(new ResourceAdmissionError('cancelled'));
     }
 
-    if (this.#canGrant(options.projectId)) {
+    if (this.#canGrant(options.projectId, options.classification)) {
       return Promise.resolve(this.#createPermit(
         options.projectId,
         options.classification,
@@ -137,6 +177,7 @@ export class ResourceAdmission {
     const projectQueueCount = this.#queuedByProject.get(options.projectId) ?? 0;
     if (
       this.#queue.length >= this.#queueMax
+      || this.#queued[options.classification] >= this.#maxQueued[options.classification]
       || projectQueueCount >= this.#queueMaxPerProject
     ) {
       return Promise.reject(new ResourceAdmissionError('busy'));
@@ -174,6 +215,7 @@ export class ResourceAdmission {
       timeout: undefined,
     };
     this.#queue.push(waiter);
+    this.#queued[options.classification] += 1;
     this.#queuedByProject.set(
       options.projectId,
       (this.#queuedByProject.get(options.projectId) ?? 0) + 1,
@@ -198,9 +240,13 @@ export class ResourceAdmission {
     return promise;
   }
 
-  #canGrant(projectId: CollabProjectId): boolean {
+  #canGrant(
+    projectId: CollabProjectId,
+    classification: GitOperationClassification,
+  ): boolean {
     const projectActive = this.#activeByProject.get(projectId);
     return total(this.#active) < this.#maxChildren
+      && this.#active[classification] < this.#maxActive[classification]
       && (projectActive === undefined || total(projectActive) < this.#maxChildrenPerProject);
   }
 
@@ -235,7 +281,7 @@ export class ResourceAdmission {
     if (this.#closed) return;
     while (total(this.#active) < this.#maxChildren) {
       const index = this.#queue.findIndex(waiter => (
-        !waiter.settled && this.#canGrant(waiter.projectId)
+        !waiter.settled && this.#canGrant(waiter.projectId, waiter.classification)
       ));
       if (index < 0) return;
       const waiter = this.#queue[index];
@@ -262,6 +308,7 @@ export class ResourceAdmission {
   #settleWaiter(waiter: Waiter): void {
     if (waiter.settled) return;
     waiter.settled = true;
+    this.#queued[waiter.classification] -= 1;
     if (waiter.timeout !== undefined) clearTimeout(waiter.timeout);
     if (waiter.signal !== undefined && waiter.abortListener !== undefined) {
       waiter.signal.removeEventListener('abort', waiter.abortListener);

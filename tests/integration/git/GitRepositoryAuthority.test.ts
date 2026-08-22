@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import {
+  COLLAB_MAIN_REF,
+} from '@claudian/collab-protocol';
+
+import {
   access,
   chmod,
   mkdir,
@@ -77,7 +81,7 @@ function repositoryPath(
 
 function admission(): ResourceAdmission {
   return new ResourceAdmission({
-    maxChildren: 2,
+    maxChildren: 3,
     maxChildrenPerProject: 1,
     queueMax: 2,
     queueMaxPerProject: 1,
@@ -340,15 +344,46 @@ describe('GitRepositoryAuthority', () => {
       await execFileAsync(GIT_EXECUTABLE, ['branch', 'members/Member-B'], { cwd: work });
       await execFileAsync(GIT_EXECUTABLE, ['clone', '--bare', work, bare]);
 
-      assert.deepEqual(await authority.verifyIntegrity(accepted, {
-        expectedRefs: [{ name: 'refs/heads/main', oid }, {
+      const expectedRefs = [{ name: 'refs/heads/main', oid }, {
           name: 'refs/heads/members/member-a',
           oid,
         }, {
           name: 'refs/heads/members/Member-B',
           oid,
-        }],
+        }];
+      assert.deepEqual(await authority.verifyIntegrity(accepted, {
+        expectedRefs,
       }), { status: 'valid' });
+      await authority.verifyProjectRead({
+        expectedRefs,
+        expectedMainOid: oid,
+        placement: accepted,
+      });
+      await expectGitError(
+        authority.verifyProjectRead({
+          expectedRefs: expectedRefs.map(ref => (
+            ref.name === COLLAB_MAIN_REF ? { ...ref, oid: 'f'.repeat(40) } : ref
+          )),
+          expectedMainOid: 'f'.repeat(40),
+          placement: accepted,
+        }),
+        'repository-corrupt',
+      );
+      await execFileAsync(GIT_EXECUTABLE, [
+        `--git-dir=${bare}`,
+        'update-ref',
+        'refs/tags/private-drift',
+        oid,
+      ]);
+      await expectGitError(
+        authority.verifyProjectRead({
+          expectedRefs,
+          expectedMainOid: oid,
+          placement: accepted,
+        }),
+        'repository-corrupt',
+      );
+      assert.equal(COLLAB_MAIN_REF, 'refs/heads/main');
     } finally {
       await authority.close();
       await resourceAdmission.close();
@@ -431,6 +466,139 @@ describe('GitRepositoryAuthority', () => {
         authority.verifyIntegrity(wrongNode),
         'placement-rejected',
       );
+      await assert.rejects(access(marker), { code: 'ENOENT' });
+    } finally {
+      await authority.close();
+      await resourceAdmission.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it('revalidates placement immediately before advertising upload-pack', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'claudian-upload-pack-revalidation-'));
+    const marker = join(root, 'spawned.marker');
+    const executable = await writeExecutable(
+      root,
+      'fake-git',
+      `printf spawned > '${marker}'`,
+    );
+    const accepted = placement('repository');
+    await mkdir(repositoryPath(root, accepted), { recursive: true });
+    const resourceAdmission = admission();
+    const authority = new GitRepositoryAuthority({
+      gitExecutable: executable,
+      operationTimeoutMs: 2_000,
+      outputMaxBytes: 4_096,
+      placementValidator: new SequencedPlacementValidator([true, false]),
+      repositoryRoot: root,
+      resourceAdmission,
+      storageNodeId: 'node-a',
+    });
+    try {
+      await expectGitError(
+        authority.advertiseUploadPack(accepted, {
+          expectedRefs: [],
+          revalidateAuthority: () => Promise.resolve(),
+        }),
+        'placement-rejected',
+      );
+      await assert.rejects(access(marker), { code: 'ENOENT' });
+    } finally {
+      await authority.close();
+      await resourceAdmission.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it('revalidates Project authority after queued Git admission before upload-pack starts', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'claudian-upload-pack-authorization-'));
+    const marker = join(root, 'upload-pack.marker');
+    const executable = await writeExecutable(
+      root,
+      'fake-git',
+      `if [ "\${1-}" = "for-each-ref" ]; then
+  exit 0
+fi
+printf upload-pack > '${marker}'`,
+    );
+    const accepted = placement('repository');
+    await mkdir(repositoryPath(root, accepted), { recursive: true });
+    const resourceAdmission = admission();
+    const blocker = await resourceAdmission.acquireGitChild({
+      classification: 'read',
+      projectId: accepted.projectId,
+    });
+    const authority = new GitRepositoryAuthority({
+      gitExecutable: executable,
+      operationTimeoutMs: 2_000,
+      outputMaxBytes: 4_096,
+      placementValidator: new CurrentPlacementValidator(),
+      repositoryRoot: root,
+      resourceAdmission,
+      storageNodeId: 'node-a',
+    });
+    let revalidationCount = 0;
+    try {
+      const queued = authority.advertiseUploadPack(accepted, {
+        expectedRefs: [],
+        revalidateAuthority: () => {
+          revalidationCount += 1;
+          return Promise.reject(new Error('authorization-revoked'));
+        },
+      });
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(revalidationCount, 0);
+      blocker.release();
+      await assert.rejects(queued, /authorization-revoked/u);
+      assert.equal(revalidationCount, 1);
+      await assert.rejects(access(marker), { code: 'ENOENT' });
+    } finally {
+      blocker.release();
+      await authority.close();
+      await resourceAdmission.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it('revalidates Project authority after the final placement check before spawn', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'claudian-upload-pack-final-auth-'));
+    const marker = join(root, 'upload-pack.marker');
+    const executable = await writeExecutable(
+      root,
+      'fake-git',
+      `if [ "\${1-}" = "for-each-ref" ]; then
+  exit 0
+fi
+printf upload-pack > '${marker}'`,
+    );
+    const accepted = placement('repository');
+    await mkdir(repositoryPath(root, accepted), { recursive: true });
+    let authorized = true;
+    let placementChecks = 0;
+    const resourceAdmission = admission();
+    const authority = new GitRepositoryAuthority({
+      gitExecutable: executable,
+      operationTimeoutMs: 2_000,
+      outputMaxBytes: 4_096,
+      placementValidator: {
+        isCurrent: () => {
+          placementChecks += 1;
+          if (placementChecks === 3) authorized = false;
+          return Promise.resolve(true);
+        },
+      },
+      repositoryRoot: root,
+      resourceAdmission,
+      storageNodeId: 'node-a',
+    });
+    try {
+      await assert.rejects(authority.advertiseUploadPack(accepted, {
+        expectedRefs: [],
+        revalidateAuthority: () => authorized
+          ? Promise.resolve()
+          : Promise.reject(new Error('authorization-revoked')),
+      }), /authorization-revoked/u);
+      assert.equal(placementChecks >= 3, true);
       await assert.rejects(access(marker), { code: 'ENOENT' });
     } finally {
       await authority.close();

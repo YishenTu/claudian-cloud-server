@@ -72,6 +72,7 @@ describe('development bootstrap persistence', () => {
         assert.deepEqual(history.rows, [
           { name: 'foundation', state: 'applied', version: 1 },
           { name: 'development-bootstrap', state: 'applied', version: 2 },
+          { name: 'project-read-events', state: 'applied', version: 3 },
         ]);
 
         const relations = await migration.query<{

@@ -10,6 +10,8 @@ import { DevelopmentBootstrapProfile } from '../onboarding/development/Developme
 import { DevelopmentBootstrapExpiryReconciler } from '../onboarding/development/DevelopmentBootstrapExpiryReconciler.js';
 import type { SafeLogger } from '../observability/SafeLogger.js';
 import { ProjectActivationCoordinator } from '../project-authority/lifecycle/ProjectActivationCoordinator.js';
+import { ProjectReadAuthority } from '../project-authority/reads/ProjectReadAuthority.js';
+import { ProjectEventWakeup } from '../project-authority/reads/ProjectEventWakeup.js';
 import { ActiveRepositoryIntegrityGate } from '../project-authority/lifecycle/ActiveRepositoryIntegrityGate.js';
 import { GitBundleImporter } from '../repositories/GitBundleImporter.js';
 import { BootstrapRepositoryIntegrityVerifier } from '../repositories/BootstrapRepositoryIntegrityVerifier.js';
@@ -24,9 +26,13 @@ import {
 } from '../repositories/RepositoryPublication.js';
 import { DevelopmentPrincipalAdapter } from '../request-context/DevelopmentPrincipalAdapter.js';
 import { BootstrapUploadAdmission } from '../resource-admission/BootstrapUploadAdmission.js';
+import { ProjectEventAdmission } from '../resource-admission/ProjectEventAdmission.js';
 import { ResourceAdmission } from '../resource-admission/ResourceAdmission.js';
 import { CloudCapabilitiesRoute } from '../server/CloudCapabilitiesRoute.js';
 import { DevelopmentBootstrapRoutes } from '../server/DevelopmentBootstrapRoutes.js';
+import { ProjectSnapshotRoutes } from '../server/control/ProjectSnapshotRoutes.js';
+import { ProjectEventRoutes } from '../server/events/ProjectEventRoutes.js';
+import { GitUploadPackRoutes } from '../server/git/GitUploadPackRoutes.js';
 import {
   HttpServer,
   type HttpServerAddress,
@@ -133,6 +139,10 @@ class CloudApplication implements Application {
   readonly #bootstrapExpiryReconciler: DevelopmentBootstrapExpiryReconciler;
   readonly #httpServer: HttpServer;
   readonly #logger: SafeLogger;
+  readonly #projectEventRoutes: ProjectEventRoutes;
+  readonly #projectEventAdmission: ProjectEventAdmission;
+  readonly #projectEventWakeup: ProjectEventWakeup;
+  readonly #projectReadAuthority: ProjectReadAuthority;
   readonly #repositoryAuthority: GitRepositoryAuthority;
   readonly #repositoryPublication: RepositoryPublication;
   readonly #resourceAdmission: ResourceAdmission;
@@ -146,7 +156,9 @@ class CloudApplication implements Application {
     this.#config = options.config;
     this.#logger = options.logger;
     this.#resourceAdmission = new ResourceAdmission(options.config.gitAdmission);
+    this.#projectEventWakeup = new ProjectEventWakeup();
     this.#coordination = new PostgresCoordination({
+      onProjectEventCommitted: projectId => this.#projectEventWakeup.notify(projectId),
       ordinaryPoolMax: options.config.postgres.ordinaryPoolMax,
       pinnedPoolMax: options.config.postgres.pinnedPoolMax,
       projectLockTimeoutMs: options.config.postgres.projectLockTimeoutMs,
@@ -163,6 +175,11 @@ class CloudApplication implements Application {
       resourceAdmission: this.#resourceAdmission,
       storageNodeId: options.config.repository.storageNodeId,
     });
+    this.#projectReadAuthority = new ProjectReadAuthority({
+      coordination: this.#coordination,
+      repository: this.#repositoryAuthority,
+    });
+    this.#projectEventAdmission = new ProjectEventAdmission(options.config.eventAdmission);
     this.#authorityVolumePair = new AuthorityVolumePairVerifier({
       coordination: this.#coordination,
       repositoryRoot: options.config.repository.root,
@@ -229,7 +246,12 @@ class CloudApplication implements Application {
       uploadGate: developmentBootstrapUploadGate,
     });
     const capabilitiesRoute = new CloudCapabilitiesRoute({
-      enabledCapabilities: new Set(['development-bootstrap']),
+      enabledCapabilities: new Set([
+        'development-bootstrap',
+        'git-upload-pack',
+        'project-events',
+        'project-snapshot',
+      ]),
       limits: {
         maxDevelopmentBootstrapGitBundleBytes:
           options.config.developmentBootstrap.maxBundleBytes,
@@ -243,17 +265,44 @@ class CloudApplication implements Application {
         maxRepositoryBytes: options.config.developmentBootstrap.maxRepositoryBytes,
       },
     });
+    const principalAdapter = new DevelopmentPrincipalAdapter({
+      profile: 'loopback-development',
+    });
     const bootstrapRoutes = new DevelopmentBootstrapRoutes({
       maximumJsonBytes: COLLAB_LIMITS.maxJsonPayloadUtf8Bytes,
-      principalAdapter: new DevelopmentPrincipalAdapter({
-        profile: 'loopback-development',
-      }),
+      principalAdapter,
       profile: bootstrapProfile,
+    });
+    const projectSnapshotRoutes = new ProjectSnapshotRoutes({
+      authority: this.#projectReadAuthority,
+      maximumJsonBytes: COLLAB_LIMITS.maxJsonPayloadUtf8Bytes,
+      operationTimeoutMs: options.config.repository.operationTimeoutMs,
+      principalAdapter,
+    });
+    this.#projectEventRoutes = new ProjectEventRoutes({
+      admission: this.#projectEventAdmission,
+      authority: this.#projectReadAuthority,
+      maximumBufferedBytes: options.config.repository.outputMaxBytes,
+      principalAdapter,
+      wakeup: this.#projectEventWakeup,
+    });
+    const gitUploadPackRoutes = new GitUploadPackRoutes({
+      authority: this.#projectReadAuthority,
+      maximumRequestBytes: options.config.repository.outputMaxBytes,
+      maximumResponseBytes: options.config.developmentBootstrap.maxRepositoryBytes,
+      operationTimeoutMs: options.config.repository.operationTimeoutMs,
+      principalAdapter,
     });
     this.#httpServer = new HttpServer({
       config: options.config.http,
       isReady: () => this.#state === 'ready',
-      routes: [capabilitiesRoute, bootstrapRoutes],
+      routes: [
+        capabilitiesRoute,
+        bootstrapRoutes,
+        projectSnapshotRoutes,
+        gitUploadPackRoutes,
+      ],
+      upgradeRoutes: [this.#projectEventRoutes],
     });
   }
 
@@ -369,10 +418,15 @@ class CloudApplication implements Application {
     const deadline = Date.now() + this.#config.shutdownTimeoutMs;
     const results: boolean[] = [];
 
-    results.push(await settleBefore(
-      this.#httpServer.close(Math.max(1, deadline - Date.now())),
-      deadline,
-    ));
+    const httpClose = this.#httpServer.close(Math.max(1, deadline - Date.now()));
+    const eventAdmissionClose = this.#projectEventAdmission.close();
+    const eventClose = this.#projectEventRoutes.close();
+    this.#projectEventWakeup.close();
+    const readClose = this.#projectReadAuthority.close();
+    results.push(await settleBefore(eventClose, deadline));
+    results.push(await settleBefore(eventAdmissionClose, deadline));
+    results.push(await settleBefore(readClose, deadline));
+    results.push(await settleBefore(httpClose, deadline));
     results.push(await settleBefore(this.#bootstrapExpiryReconciler.close(), deadline));
     results.push(await settleBefore(this.#activationCoordinator.close(), deadline));
     results.push(await settleBefore(this.#bundleImporter.close(), deadline));

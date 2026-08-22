@@ -6,6 +6,7 @@ import { Client } from 'pg';
 import {
   DEVELOPMENT_BOOTSTRAP_SCHEMA,
   FOUNDATION_SCHEMA,
+  PROJECT_READ_EVENTS_SCHEMA,
 } from './PostgresSchema.js';
 
 export type PostgresMigrationErrorCode =
@@ -80,6 +81,15 @@ const MIGRATION_RESOURCES = Object.freeze([
       import.meta.url,
     ),
     version: DEVELOPMENT_BOOTSTRAP_SCHEMA.version,
+  }),
+  Object.freeze({
+    checksum: PROJECT_READ_EVENTS_SCHEMA.checksum,
+    name: PROJECT_READ_EVENTS_SCHEMA.name,
+    resource: new URL(
+      './migrations/0003_project_read_events.sql',
+      import.meta.url,
+    ),
+    version: PROJECT_READ_EVENTS_SCHEMA.version,
   }),
 ]);
 

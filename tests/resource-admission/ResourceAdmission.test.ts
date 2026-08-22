@@ -10,6 +10,10 @@ function createAdmission(queueTimeoutMs = 100): ResourceAdmission {
   return new ResourceAdmission({
     maxChildren: 3,
     maxChildrenPerProject: 2,
+    maxQueuedReads: 3,
+    maxQueuedWrites: 3,
+    maxReadChildren: 2,
+    maxWriteChildren: 2,
     queueMax: 4,
     queueMaxPerProject: 2,
     queueTimeoutMs,
@@ -37,6 +41,40 @@ async function expectAdmissionError(
 }
 
 describe('ResourceAdmission', () => {
+  it('reserves active and queued capacity across read and write classifications', async () => {
+    const admission = createAdmission();
+    const firstRead = await admission.acquireGitChild({
+      classification: 'read',
+      projectId: 'project-a',
+    });
+    const secondRead = await admission.acquireGitChild({
+      classification: 'read',
+      projectId: 'project-b',
+    });
+    let thirdReadGranted = false;
+    const thirdRead = admission.acquireGitChild({
+      classification: 'read',
+      projectId: 'project-c',
+    }).then(permit => {
+      thirdReadGranted = true;
+      return permit;
+    });
+    await Promise.resolve();
+    assert.equal(thirdReadGranted, false);
+
+    const reservedWrite = await admission.acquireGitChild({
+      classification: 'write',
+      projectId: 'project-d',
+    });
+    reservedWrite.release();
+    firstRead.release();
+    const admittedRead = await thirdRead;
+
+    secondRead.release();
+    admittedRead.release();
+    await admission.close();
+  });
+
   it('preserves Project headroom and eligible FIFO progress', async () => {
     const admission = createAdmission();
     const projectARead = await admission.acquireGitChild({

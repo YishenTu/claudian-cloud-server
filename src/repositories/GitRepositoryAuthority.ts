@@ -1,4 +1,8 @@
-import { isCollabGitOid } from '@claudian/collab-protocol';
+import {
+  COLLAB_MAIN_REF,
+  isCollabGitOid,
+  type CollabGitOid,
+} from '@claudian/collab-protocol';
 
 import {
   ResourceAdmissionError,
@@ -63,6 +67,34 @@ export interface GitRepositoryAuthorityOptions {
 
 export interface VerifyRepositoryIntegrityOptions {
   readonly expectedRefs?: readonly ExpectedRepositoryRef[];
+  readonly requiredRefs?: readonly ExpectedRepositoryRef[];
+  readonly signal?: AbortSignal;
+}
+
+export interface VerifyProjectReadOptions {
+  readonly expectedRefs: readonly ExpectedRepositoryRef[];
+  readonly expectedMainOid: CollabGitOid;
+  readonly placement: RepositoryPlacementLease;
+  readonly signal?: AbortSignal;
+}
+
+export interface GitUploadPackOptions {
+  readonly expectedRefs: readonly ExpectedRepositoryRef[];
+  readonly gitProtocol?: 'version=1' | 'version=2';
+  readonly maximumResponseBytes: number;
+  readonly onResponseChunk: (
+    chunk: Buffer,
+    signal: AbortSignal,
+  ) => Promise<void> | void;
+  readonly request: Buffer;
+  readonly revalidateAuthority: () => Promise<void>;
+  readonly signal?: AbortSignal;
+}
+
+export interface GitUploadPackAdvertisementOptions {
+  readonly expectedRefs: readonly ExpectedRepositoryRef[];
+  readonly gitProtocol?: 'version=1' | 'version=2';
+  readonly revalidateAuthority: () => Promise<void>;
   readonly signal?: AbortSignal;
 }
 
@@ -73,6 +105,10 @@ export interface ExpectedRepositoryRef {
 
 export interface RepositoryIntegrityResult {
   readonly status: 'valid';
+}
+
+function assertNotAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) throw new GitRepositoryError('cancelled');
 }
 
 function mapPlacementError(error: RepositoryPlacementError): GitRepositoryError {
@@ -128,6 +164,34 @@ function assertExactRefs(
       const actualOid = actualByName.get(expectedRef.name);
       return actualOid === undefined
         || (expectedRef.oid !== undefined && actualOid !== expectedRef.oid);
+    })
+  ) {
+    throw new GitRepositoryError('repository-corrupt');
+  }
+}
+
+function assertRequiredRefs(
+  output: Buffer,
+  requiredRefs: readonly ExpectedRepositoryRef[],
+): void {
+  const actual = output.toString('utf8').split('\n').filter(Boolean).map(line => {
+    const separator = line.indexOf('\0');
+    if (separator <= 0 || line.indexOf('\0', separator + 1) !== -1) {
+      throw new GitRepositoryError('repository-corrupt');
+    }
+    return Object.freeze({
+      name: line.slice(0, separator),
+      oid: line.slice(separator + 1),
+    });
+  });
+  const actualByName = new Map(actual.map(ref => [ref.name, ref.oid]));
+  if (
+    actualByName.size !== actual.length
+    || actual.some(ref => !isCollabGitOid(ref.oid))
+    || requiredRefs.some(requiredRef => {
+      const oid = actualByName.get(requiredRef.name);
+      return oid === undefined
+        || (requiredRef.oid !== undefined && oid !== requiredRef.oid);
     })
   ) {
     throw new GitRepositoryError('repository-corrupt');
@@ -226,19 +290,27 @@ export class GitRepositoryAuthority {
         );
         resolved = await this.#pathPolicy.resolveExisting(placementSnapshot);
         await this.#pathPolicy.revalidate(placementSnapshot);
-        if (options.expectedRefs !== undefined) {
+        if (
+          options.expectedRefs !== undefined
+          || options.requiredRefs !== undefined
+        ) {
           const refs = await this.#supervisor.runCommand({
             arguments: [
               'for-each-ref',
               '--format=%(refname)%00%(objectname)',
-              'refs/heads',
+              'refs',
             ],
             captureOutput: true,
             cwd: resolved.repositoryPath,
             failureCode: 'repository-corrupt',
             ...(options.signal === undefined ? {} : { signal: options.signal }),
           });
-          assertExactRefs(refs, options.expectedRefs);
+          if (options.expectedRefs !== undefined) {
+            assertExactRefs(refs, options.expectedRefs);
+          }
+          if (options.requiredRefs !== undefined) {
+            assertRequiredRefs(refs, options.requiredRefs);
+          }
         }
         await this.#supervisor.runIntegrityCheck(
           resolved.repositoryPath,
@@ -253,6 +325,138 @@ export class GitRepositoryAuthority {
         throw new GitRepositoryError('process-failed');
       }
       return Object.freeze({ status: 'valid' as const });
+    } finally {
+      permit.release();
+    }
+  }
+
+  async verifyProjectRead(options: VerifyProjectReadOptions): Promise<void> {
+    if (!options.expectedRefs.some(ref => (
+      ref.name === COLLAB_MAIN_REF && ref.oid === options.expectedMainOid
+    ))) {
+      throw new GitRepositoryError('repository-corrupt');
+    }
+    await this.verifyIntegrity(options.placement, {
+      expectedRefs: options.expectedRefs,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
+  }
+
+  advertiseUploadPack(
+    placement: RepositoryPlacementLease,
+    options: GitUploadPackAdvertisementOptions,
+  ): Promise<Buffer> {
+    return this.#runUploadPackOperation(
+      placement,
+      options.expectedRefs,
+      options.revalidateAuthority,
+      options.signal,
+      repositoryPath => this.#supervisor.runCommand({
+        arguments: ['upload-pack', '--stateless-rpc', '--advertise-refs', '.'],
+        captureOutput: true,
+        cwd: repositoryPath,
+        failureCode: 'process-failed',
+        ...(options.gitProtocol === undefined ? {} : { gitProtocol: options.gitProtocol }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      }),
+    );
+  }
+
+  runUploadPack(
+    placement: RepositoryPlacementLease,
+    options: GitUploadPackOptions,
+  ): Promise<void> {
+    if (
+      !Number.isSafeInteger(options.maximumResponseBytes)
+      || options.maximumResponseBytes < 1
+    ) {
+      return Promise.reject(new GitRepositoryError('output-limit'));
+    }
+    return this.#runUploadPackOperation(
+      placement,
+      options.expectedRefs,
+      options.revalidateAuthority,
+      options.signal,
+      repositoryPath => this.#supervisor.runStreamingCommand({
+        arguments: ['upload-pack', '--stateless-rpc', '.'],
+        cwd: repositoryPath,
+        failureCode: 'process-failed',
+        ...(options.gitProtocol === undefined
+          ? {}
+          : { gitProtocol: options.gitProtocol }),
+        input: options.request,
+        onStdoutChunk: options.onResponseChunk,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        stdoutMaxBytes: options.maximumResponseBytes,
+      }),
+    );
+  }
+
+  async #runUploadPackOperation<T>(
+    placement: RepositoryPlacementLease,
+    expectedRefs: readonly ExpectedRepositoryRef[],
+    revalidateAuthority: () => Promise<void>,
+    signal: AbortSignal | undefined,
+    operation: (repositoryPath: string) => Promise<T>,
+  ): Promise<T> {
+    if (this.#closed) throw new GitRepositoryError('closed');
+    let placementSnapshot: RepositoryPlacementLease;
+    try {
+      placementSnapshot = createRepositoryPlacementLease(placement);
+    } catch (error: unknown) {
+      if (error instanceof RepositoryPlacementError) {
+        throw mapPlacementError(error);
+      }
+      throw new GitRepositoryError('placement-rejected');
+    }
+    let permit;
+    try {
+      permit = await this.#resourceAdmission.acquireGitChild({
+        classification: 'read',
+        projectId: placementSnapshot.projectId,
+        ...(signal === undefined ? {} : { signal }),
+      });
+    } catch (error: unknown) {
+      if (error instanceof ResourceAdmissionError) throw mapAdmissionError(error);
+      throw new GitRepositoryError('process-failed');
+    }
+    try {
+      this.#assertOpen();
+      if (signal?.aborted === true) throw new GitRepositoryError('cancelled');
+      let resolved;
+      try {
+        resolved = await this.#pathPolicy.resolveExisting(placementSnapshot);
+        await this.#pathPolicy.revalidate(placementSnapshot);
+      } catch (error: unknown) {
+        if (error instanceof RepositoryPlacementError) {
+          throw mapPlacementError(error);
+        }
+        throw new GitRepositoryError('repository-unavailable');
+      }
+      try {
+        const refs = await this.#supervisor.runCommand({
+          arguments: [
+            'for-each-ref',
+            '--format=%(refname)%00%(objectname)',
+            'refs',
+          ],
+          captureOutput: true,
+          cwd: resolved.repositoryPath,
+          failureCode: 'repository-corrupt',
+          ...(signal === undefined ? {} : { signal }),
+        });
+        assertExactRefs(refs, expectedRefs);
+        resolved = await this.#pathPolicy.resolveExisting(placementSnapshot);
+        await this.#pathPolicy.revalidate(placementSnapshot);
+        await revalidateAuthority();
+        this.#assertOpen();
+        assertNotAborted(signal);
+        return await operation(resolved.repositoryPath);
+      } catch (error: unknown) {
+        if (error instanceof GitRepositoryError) throw error;
+        if (error instanceof GitProcessError) throw mapProcessError(error);
+        throw error;
+      }
     } finally {
       permit.release();
     }
