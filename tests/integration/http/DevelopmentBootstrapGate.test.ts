@@ -660,6 +660,7 @@ describe('development bootstrap gate', { concurrency: false }, () => {
     );
     assert.deepEqual(capabilities.capabilities, [
       'development-bootstrap',
+      'git-receive-pack-personal-ref',
       'git-upload-pack',
       'project-events',
       'project-snapshot',

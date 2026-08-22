@@ -72,6 +72,10 @@ describe('ActiveRepositoryIntegrityGate', () => {
       }),
     };
     const repository: ActiveRepositoryIntegrityRepository = {
+      cleanupReceivePackState: accepted => {
+        calls.push({ cleanup: accepted });
+        return Promise.resolve();
+      },
       verifyIntegrity: (accepted, options) => {
         calls.push({ accepted, options });
         return Promise.resolve({ status: 'valid' });
@@ -81,6 +85,8 @@ describe('ActiveRepositoryIntegrityGate', () => {
       .verifyAll();
 
     assert.deepEqual(calls, [{
+      cleanup: placement,
+    }, {
       accepted: placement,
       options: {
         expectedRefs: [{
@@ -111,6 +117,7 @@ describe('ActiveRepositoryIntegrityGate', () => {
       }),
     };
     const repository: ActiveRepositoryIntegrityRepository = {
+      cleanupReceivePackState: () => Promise.resolve(),
       verifyIntegrity: () => Promise.resolve({ status: 'valid' }),
     };
 

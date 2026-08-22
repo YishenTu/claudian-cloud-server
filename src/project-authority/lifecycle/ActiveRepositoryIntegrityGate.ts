@@ -24,6 +24,7 @@ export interface ActiveRepositoryIntegrityCoordination {
 }
 
 export interface ActiveRepositoryIntegrityRepository {
+  cleanupReceivePackState(placement: RepositoryPlacementLease): Promise<void>;
   verifyIntegrity(
     placement: RepositoryPlacementLease,
     options: Readonly<{ expectedRefs: readonly ExpectedRepositoryRef[] }>,
@@ -107,6 +108,7 @@ export class ActiveRepositoryIntegrityGate {
           placement,
         });
       });
+      await this.#repository.cleanupReceivePackState(authority.placement);
       await this.#repository.verifyIntegrity(authority.placement, {
         expectedRefs: authority.expectedRefs,
       });
