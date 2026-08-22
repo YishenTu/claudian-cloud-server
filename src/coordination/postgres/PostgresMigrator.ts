@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { Client } from 'pg';
 
 import {
+  ACCEPT_RECOVERY_SCHEMA,
   COLLABORATION_SCHEMA,
   DEVELOPMENT_BOOTSTRAP_SCHEMA,
   FOUNDATION_SCHEMA,
@@ -100,6 +101,15 @@ const MIGRATION_RESOURCES = Object.freeze([
       import.meta.url,
     ),
     version: COLLABORATION_SCHEMA.version,
+  }),
+  Object.freeze({
+    checksum: ACCEPT_RECOVERY_SCHEMA.checksum,
+    name: ACCEPT_RECOVERY_SCHEMA.name,
+    resource: new URL(
+      './migrations/0005_accept_recovery.sql',
+      import.meta.url,
+    ),
+    version: ACCEPT_RECOVERY_SCHEMA.version,
   }),
 ]);
 

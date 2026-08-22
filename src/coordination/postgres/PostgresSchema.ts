@@ -22,9 +22,16 @@ export const COLLABORATION_SCHEMA = Object.freeze({
   version: 4,
 });
 
+export const ACCEPT_RECOVERY_SCHEMA = Object.freeze({
+  checksum: '0f0e91dd7be0ac961222c8802925425b87d6b540f87f1eebca89bde3efb4a1bd',
+  name: 'accept-recovery',
+  version: 5,
+});
+
 export const POSTGRES_SCHEMAS = Object.freeze([
   FOUNDATION_SCHEMA,
   DEVELOPMENT_BOOTSTRAP_SCHEMA,
   PROJECT_READ_EVENTS_SCHEMA,
   COLLABORATION_SCHEMA,
+  ACCEPT_RECOVERY_SCHEMA,
 ]);

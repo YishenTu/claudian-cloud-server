@@ -254,6 +254,7 @@ class MemoryCoordination implements ProjectActivationCoordination {
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const owner = this;
     return {
+      accept: undefined as never,
       collaboration: undefined as never,
       advanceDevelopmentBootstrapActivation(input) {
         const settlement = owner.attempt.settlement;

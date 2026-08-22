@@ -86,6 +86,7 @@ describe('Collaboration persistence', () => {
           { name: 'development-bootstrap', state: 'applied', version: 2 },
           { name: 'project-read-events', state: 'applied', version: 3 },
           { name: 'collaboration', state: 'applied', version: 4 },
+          { name: 'accept-recovery', state: 'applied', version: 5 },
         ]);
 
         const relations = [

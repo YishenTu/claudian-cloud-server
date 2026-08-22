@@ -5,6 +5,10 @@ import type {
 
 import type { DevelopmentBootstrapProjectPersistence } from './DevelopmentBootstrapPersistence.js';
 import type {
+  AcceptPersistence,
+  AcceptPersistenceReader,
+} from './AcceptPersistence.js';
+import type {
   CollaborationProjectPersistence,
   CollaborationReadPersistence,
 } from './CollaborationPersistence.js';
@@ -40,6 +44,7 @@ export interface ProjectReadScope
   >,
   ProjectEventReader,
   ProjectPersistence {
+  readonly accept: AcceptPersistenceReader;
   readonly collaboration: CollaborationReadPersistence;
   findMembership(memberId: CollabMemberId): Promise<ProjectMembershipRecord | undefined>;
   getRepositoryPlacement(): Promise<RepositoryPlacementLease | undefined>;
@@ -50,6 +55,7 @@ export interface ProjectScope
   extends DevelopmentBootstrapProjectPersistence,
   ProjectEventPersistence,
   ProjectPersistence {
+  readonly accept: AcceptPersistence;
   readonly collaboration: CollaborationProjectPersistence;
   findMembership(memberId: CollabMemberId): Promise<ProjectMembershipRecord | undefined>;
   getRepositoryPlacement(): Promise<RepositoryPlacementLease | undefined>;
