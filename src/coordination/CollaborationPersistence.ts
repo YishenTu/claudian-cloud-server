@@ -13,7 +13,7 @@ import type {
   CollabTicketId,
   CollabTicketStatus,
   CollabTicketSummary,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 export interface CollaborationKeysetCursor {
   readonly createdAt: string;

@@ -8,7 +8,7 @@ import {
   type CollabGitOid,
   type CollabProjectId,
   isCollabMemberId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 import { lstat, readdir, realpath, rm } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 

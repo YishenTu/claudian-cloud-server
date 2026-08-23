@@ -2,7 +2,7 @@ import {
   COLLAB_MAIN_REF,
   collabMemberRef,
   type CollabProjectId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import type {
   ActiveRepositoryPlacementPage,

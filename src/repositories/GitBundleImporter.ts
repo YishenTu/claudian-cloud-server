@@ -23,7 +23,7 @@ import {
   type CollabProjectId,
   type DevelopmentBootstrapGitRef,
   type DevelopmentBootstrapObjectFormat,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import {
   BootstrapUploadAdmissionError,

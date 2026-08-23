@@ -4,7 +4,7 @@ import {
   isCollabOpaqueId,
   isCollabProjectId,
   type DevelopmentBootstrapActivationResult,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import type { PreparedRepositoryPublication } from '../../repositories/RepositoryPublication.js';
 

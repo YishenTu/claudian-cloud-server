@@ -6,8 +6,8 @@ import type {
   CollabCloudProjectEvent,
   CollabComment,
   CollabProjectId,
-} from '@claudian/collab-protocol';
-import { CollabError } from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
+import { CollabError } from '@claudian-collab/protocol';
 
 import type {
   CollaborationIdempotencyLookup,

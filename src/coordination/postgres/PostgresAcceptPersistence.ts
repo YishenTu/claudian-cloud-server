@@ -11,7 +11,7 @@ import {
   type AcceptResponse,
   type CollabOperationId,
   type CollabProjectId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 import type { QueryResultRow } from 'pg';
 
 import type {

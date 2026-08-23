@@ -1,8 +1,8 @@
 # Claudian Cloud Server Architecture
 
-Status: foundation implemented; the steps 5–8 local Cloud milestone is accepted and frozen for implementation.
+Status: foundation and the steps 5–8 local Cloud milestone are implemented and verified; Step 9 requires exact registry consumers on both merged mainlines and a clean Gomami deployment gate.
 
-Last reconciled: 2026-08-21
+Last reconciled: 2026-08-24
 
 ## 1. Purpose
 
@@ -69,8 +69,9 @@ virtual machine or persistent container per Project.
    Project-sharded Git nodes are introduced only after measured need.
 9. **The Cloud wire contract has one canonical owner.** Shared Cloud protocol
    types, executable codecs, operation definitions, compatibility behavior,
-   and versioning are owned by a package produced from the `claudian`
-   repository. This server implements that contract and does not copy it.
+   and versioning are owned by `@claudian-collab/protocol`, produced from the
+   standalone `claudian-collab-protocol` repository. This server implements
+   that contract and does not copy it.
 10. **LAN HTTP bindings are not the Cloud protocol.** Existing LAN protocol
     DTOs and transport-neutral codecs may be extracted where semantics match,
     but LAN routes, Host admission, invitation trust, and Host-transfer
@@ -95,7 +96,7 @@ virtual machine or persistent container per Project.
 15. **Placement generation is an execution fence.** Every repository operation
     carries a server-derived placement lease. Stale generations and demoted
     nodes fail closed; placement is not merely routing metadata.
-16. **The local milestone has three independent version authorities.** The accepted producer revision is `@claudian/collab-protocol` `0.4.0` with canonical wire version `4`; Cloud binding version `1` defines its routes and capabilities. The Claudian LAN control/event binding remains independently at version `9`. No adapter infers compatibility from package SemVer alone or couples a Cloud version change to the LAN binding.
+16. **The local milestone has three independent version authorities.** The accepted standalone registry release is `@claudian-collab/protocol` `1.0.0` with canonical wire version `4`; Cloud binding version `1` defines its routes and capabilities. The Claudian LAN control/event binding remains independently at version `9`. No adapter infers compatibility from package SemVer alone or couples a Cloud version change to the LAN binding.
 17. **Durable phase records are singular authorities.** Activation, cancellation, client binding, and Accept each have one named journal or transition record. Membership, placement, repository directories, refs, indexes, and marker files are observations used to advance or reject that journal; none becomes a parallel phase authority.
 
 ## 4. System context and trust boundaries
@@ -495,7 +496,7 @@ boundary; neither creates a second domain API or exposes filesystem paths.
 
 ## 8. Protocol ownership and compatibility
 
-The `claudian` repository produces `@claudian/collab-protocol`. The Cloud Server depends on an exact compatible version. The steps 5–8 producer revision advances package version `0.3.0` and canonical wire version `3` to package version `0.4.0` and wire version `4`, and introduces Cloud binding version `1`. Local development consumes the exact packed producer artifact and records its checksum; CI and deployments use those reproducible bytes. Package SemVer, canonical wire version, Cloud binding version, and the independently owned LAN version are never substituted for one another.
+The standalone `claudian-collab-protocol` repository produces `@claudian-collab/protocol`. The Cloud Server depends on the exact `1.0.0` npm registry release. That release carries the steps 5–8 canonical wire version `4` and Cloud binding version `1`; its npm lock entry records the immutable registry artifact integrity used by local development, CI, and deployments. Package SemVer, canonical wire version, Cloud binding version, and the independently owned LAN version are never substituted for one another.
 
 The package exposes curated boundaries only:
 
@@ -521,9 +522,10 @@ from different authentication systems without changing collaboration semantics.
 
 Self-hosted and managed Cloud use the same Cloud protocol. Deployment profile
 does not fork collaboration semantics. Additive or breaking changes follow an
-explicit protocol-version policy and contract tests run in both repositories.
-The server never maintains a second hand-written inventory of the same
-operations or validators.
+explicit protocol-version policy whose canonical tests live in the standalone
+protocol repository. Claudian and Cloud Server retain only consumer-conformance
+fixtures against their exact registry dependency. The server never maintains a
+second hand-written inventory of the same operations or validators.
 
 ## 9. External surfaces
 
@@ -1333,33 +1335,35 @@ Shipped-entry tests also prove:
   deterministic same-intent replay remains available where policy permits;
 - transport disconnect and forced shutdown eventually reap every Git child.
 
-## 21. Initial implementation sequence
+## 21. Completed local sequence and remaining rollout
 
-This is the critical path, not a parallel task assignment:
+The local milestone followed this critical path:
 
-1. extract and version the canonical Cloud protocol package in `claudian`;
-2. scaffold Node.js 24, strict TypeScript, configuration, safe logging, health,
+1. scaffold Node.js 24, strict TypeScript, configuration, safe logging, health,
    version, lifecycle, tests, and one composition root;
-3. add PostgreSQL migrations, runtime/migration roles, Project isolation, and
+2. add PostgreSQL migrations, runtime/migration roles, Project isolation, and
    placement records, plus the canonical advisory Project lock and separate
    ordinary, pinned-lease, and reserved connection budgets;
-4. add the bare repository authority, real Git integration, path containment,
+3. add the bare repository authority, real Git integration, path containment,
    placement-lease generation checks, and bounded process supervision;
-5. implement the private development bootstrap and restart recovery;
-6. prove clone, fetch, personal-ref push, snapshot, and Project events;
-7. implement Publish/request coordination and exact idempotency;
-8. implement Accept with durable cross-store recovery and fault injection;
-9. prove the two-device private-ingress scenario end to end;
+4. implement the private development bootstrap and restart recovery;
+5. prove clone, fetch, personal-ref push, snapshot, and Project events;
+6. implement Publish/request coordination and exact idempotency;
+7. implement Accept with durable cross-store recovery and fault injection;
+8. prove the complete Claudian-to-Cloud localhost scenario.
+
+After that milestone, the protocol ownership migration is a separate sequence: publish the canonical protocol from the standalone `claudian-collab-protocol` repository, then move both consumers to its exact registry version. This is a mandatory pre-Step-9 release gate, not a roadmap step. The remaining roadmap sequence is:
+
+9. prove the two-device private-ingress scenario on Gomami;
 10. select, make decision-complete, and implement at least one production
     Project creation path; define the trusted-ingress principal contract and
     stable Account/device/Project/membership identity, idempotency, and audit
-    mappings, and remove the development actor assertion from every external
-    profile;
-11. integrate the external-Alpha trusted ingress and implement Project
-    authorization, RLS, the target-repository-only Git sandbox, streamed quota
-    enforcement, backup objectives, restore, retention, deletion, and
-    operator-access gates before accepting external Project data;
-12. when existing LAN Projects enter scope, complete the production authority
+    mappings; remove the development actor assertion from every external
+    profile; and integrate the external-Alpha trusted ingress, Project
+    authorization, RLS, target-repository-only Git sandbox, streamed quota,
+    backup, restore, retention, deletion, and operator-access gates before
+    accepting external Project data;
+11. when existing LAN Projects enter scope, complete the production authority
     handoff before enabling their onboarding.
 
 Each phase exits only when its interface-level and real integration tests pass.
@@ -1367,13 +1371,13 @@ Later phases do not bypass missing recovery or isolation from earlier phases.
 
 ### 21.1 Steps 5–8 delivery gates and ownership
 
-The local milestone advances through six ordered proof gates: `G5` bootstrap and persistent activation; `G6R` snapshot, events, upload-pack, and two-client binding; `G6W` personal-ref receive-pack; `G7` Requests, Tickets, comments, and Publish; `G8A` deterministic Accept and server recovery; and `GI` complete localhost integration. A changed contract, phase, owner, or capability reopens its gate and every dependent gate.
+The local milestone advanced through six ordered proof gates: `G5` bootstrap and persistent activation; `G6R` snapshot, events, upload-pack, and two-client binding; `G6W` personal-ref receive-pack; `G7` Requests, Tickets, comments, and Publish; `G8A` deterministic Accept and server recovery; and `GI` complete localhost integration. A changed contract, phase, owner, or capability reopens its gate and every dependent gate.
 
-The mergeable PR order is fixed: Claudian protocol producer; Cloud exact protocol consumer; Cloud bootstrap; Claudian bootstrap; Cloud read plane; Claudian read/binding; Cloud personal write; Cloud collaboration; Claudian Publish; Cloud Accept; Claudian final integration. Every branch starts from the latest merged `origin/main`; Cloud never consumes unmerged Claudian source and capability advertisement occurs only after the complete server path and its gate evidence exist.
+The completed local-milestone merge order was: the original shared protocol producer in Claudian; Cloud foundation; the original Cloud protocol consumer; Cloud bootstrap; Claudian bootstrap; Cloud read plane; Claudian read/binding; Cloud personal write; Cloud collaboration; Claudian Publish; Cloud Accept; and Claudian final integration. After `GI`, the separate ownership migration published the standalone protocol release and converted Claudian and Cloud into exact registry consumers. Step 9 cannot begin until those consumer migrations are present on both merged mainlines. Every branch starts from the latest merged `origin/main`; neither consumer uses unmerged protocol source, and capability advertisement occurs only after the complete server path and its gate evidence exist.
 
 Schema evolution is one serial, checksum-verified lane: `0002_development_bootstrap.sql`, `0003_project_read_events.sql`, `0004_collaboration.sql`, then `0005_accept_recovery.sql`. The task that introduces each migration also owns its checksum/schema registry entry, least-privilege grants, forced-RLS policy, and real PostgreSQL evidence. Gates freeze that ordered catalog; they do not become a second migration owner.
 
-Shared contract files, the Claudian root package manifest and lockfile belong to the producer PR. Cloud's package manifest, lockfile, vendored tarball, checksum metadata, and WebSocket dependency pins belong to the exact-consumer PR. No later transport tranche edits those manifests opportunistically. The exact merged `0.4.0` artifact and checksum are retained for the mandatory npm publication and clean-registry verification gate before the first Gomami deployment.
+Shared contract files, compatibility policy, and releases belong to the standalone protocol repository. Claudian and Cloud own their consumer package manifests and lockfiles; no later transport tranche edits those manifests opportunistically. The published `@claudian-collab/protocol` `1.0.0` registry artifact and lockfile integrity replace every local source, alias, or vendored-tarball path before the first Gomami deployment.
 
 ## 22. Explicit non-goals
 
@@ -1415,10 +1419,10 @@ Shared contract files, the Claudian root package manifest and lockfile belong to
 
 ## 24. Blocking status
 
-The foundation is implemented and the steps 5–8 local milestone is ready for producer-first implementation through the six gates in §21.1. Project mutation implementation must use the one canonical advisory-lock contract and fixed lock order in §11; repository interfaces must carry the placement lease and generation from their first implementation so sharding does not require a domain-API rewrite.
+The foundation and steps 5–8 local milestone are implemented and verified through the six gates in §21.1. The standalone `@claudian-collab/protocol` `1.0.0` release is published. Step 9 admission requires both exact-consumer migrations to be observed on clean merged `origin/main` heads, followed by the separate clean Gomami build/deployment gate. Project mutations continue to use the one canonical advisory-lock contract and fixed lock order in §11; repository interfaces carry the placement lease and generation so future sharding does not require a domain-API rewrite.
 
-The following are intentionally deferred and do not block the private first
-slice:
+The following are intentionally deferred and do not block the Step 9 private
+proof:
 
 - the production trusted-ingress principal contract and stable mappings among
   Account, device attribution, Project, membership, and protocol actor identity;

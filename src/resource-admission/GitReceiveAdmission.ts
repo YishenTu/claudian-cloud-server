@@ -4,7 +4,7 @@ import { isAbsolute, normalize, parse } from 'node:path';
 import {
   isCollabProjectId,
   type CollabProjectId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 export type GitReceiveAdmissionErrorCode =
   | 'busy'

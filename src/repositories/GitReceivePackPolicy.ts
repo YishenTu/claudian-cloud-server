@@ -19,7 +19,7 @@ import {
   isCollabProjectId,
   type CollabGitOid,
   type CollabProjectId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 export type GitReceivePackPolicyErrorCode =
   | 'closed'

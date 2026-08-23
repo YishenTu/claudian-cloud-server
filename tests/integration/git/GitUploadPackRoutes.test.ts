@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { describe, it } from 'node:test';
 
-import { COLLAB_MAIN_REF, collabCloudGitRoute } from '@claudian/collab-protocol';
+import { COLLAB_MAIN_REF, collabCloudGitRoute } from '@claudian-collab/protocol';
 
 import {
   ProjectReadAuthorityError,

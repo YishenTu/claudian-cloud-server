@@ -1,7 +1,7 @@
 import type {
   CollabMemberId,
   CollabProjectId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import type { DevelopmentBootstrapProjectPersistence } from './DevelopmentBootstrapPersistence.js';
 import type {

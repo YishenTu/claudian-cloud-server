@@ -5,7 +5,7 @@ import {
   collabMemberRef,
   type CollabMemberId,
   type CollabProjectId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import type {
   PinnedProjectLease,

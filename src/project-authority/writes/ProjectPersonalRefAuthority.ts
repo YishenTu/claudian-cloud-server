@@ -3,7 +3,7 @@ import {
   type CollabGitOid,
   type CollabMemberId,
   type CollabProjectId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
 import type { RepositoryPlacementLease } from '../../repositories/RepositoryPlacement.js';

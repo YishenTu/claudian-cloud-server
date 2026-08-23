@@ -1,7 +1,7 @@
 import {
   isCollabProjectId,
   type CollabProjectId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 export type ProjectEventWakeListener = () => void;
 

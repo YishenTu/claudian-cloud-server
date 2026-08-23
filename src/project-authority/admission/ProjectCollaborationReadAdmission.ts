@@ -3,7 +3,7 @@ import type {
   CollabMemberId,
   CollabProjectId,
   CollabRole,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import { CoordinationError } from '../../coordination/CoordinationError.js';
 import type {

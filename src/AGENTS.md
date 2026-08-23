@@ -4,7 +4,7 @@
 
 - Keep one modular-monolith composition root. Modules communicate through explicit domain contracts and do not reach through another module to its storage or transport implementation.
 - Dependency direction is transport and infrastructure toward `project-authority`; domain policy never imports HTTP, PostgreSQL, or process implementations.
-- The shared Cloud protocol package is the only wire-contract owner. Do not create a second operation inventory, compatibility policy, or validator map.
+- The exact registry dependency `@claudian-collab/protocol` is the only wire-contract owner. Do not vendor its source or create a second operation inventory, compatibility policy, or validator map.
 - Keep Project, membership, coordination, repository placement, and recovery semantics independent from deployment profile and provider products.
 
 ## Lifecycle

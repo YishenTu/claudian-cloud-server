@@ -11,7 +11,7 @@ import {
   type CollabMemberId,
   type CollabProjectId,
   type CollabRole,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import type {
   AcquireProjectLeaseOptions,

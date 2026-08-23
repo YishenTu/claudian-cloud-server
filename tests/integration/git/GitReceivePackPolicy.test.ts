@@ -7,7 +7,7 @@ import process from 'node:process';
 import { promisify } from 'node:util';
 import { describe, it } from 'node:test';
 
-import { collabMemberRef } from '@claudian/collab-protocol';
+import { collabMemberRef } from '@claudian-collab/protocol';
 
 import { GitReceivePackPolicy } from '../../../src/repositories/GitReceivePackPolicy.js';
 

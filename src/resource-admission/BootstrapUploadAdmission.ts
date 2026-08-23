@@ -1,7 +1,7 @@
 import { statfs } from 'node:fs/promises';
 import { isAbsolute, normalize, parse } from 'node:path';
 
-import { isCollabOpaqueId } from '@claudian/collab-protocol';
+import { isCollabOpaqueId } from '@claudian-collab/protocol';
 
 export type BootstrapUploadAdmissionErrorCode =
   | 'busy'

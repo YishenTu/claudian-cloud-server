@@ -1,16 +1,13 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { promisify } from 'node:util';
-import { readFile, readdir } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
-const execFileAsync = promisify(execFile);
 const repositoryRoot = resolve(import.meta.dirname, '../..');
-const protocolArtifact = 'claudian-collab-protocol-0.4.0.tgz';
-const protocolIntegrity = 'sha512-4IDJr55ohdCcgn/RLpMghevuUxf5vwc3VIEgJr5HowzbmGuUNpGjHbn4wuMkOXGKBD0lvm85D4du5Sfwq8OfbQ==';
-const protocolSha256 = 'e45d8cbe8b4d7558f66547acf5ad6c74bfc1362226a4642562c2d707c25786b1';
+const protocolPackageName = '@claudian-collab/protocol';
+const protocolVersion = '1.0.0';
+const protocolRegistryArtifact = 'https://registry.npmjs.org/@claudian-collab/protocol/-/protocol-1.0.0.tgz';
+const protocolIntegrity = 'sha512-kNq57tIDzcaMl+o+N4lwETN+QPJybzq4nSD4fjhgdhx/H9qMkJGraf4LX5ELqElMmFG+f5QGxnYQMVLh9/XwdQ==';
 
 interface PackageManifest {
   readonly dependencies: Readonly<Record<string, string>>;
@@ -31,7 +28,7 @@ async function readJson<T>(path: string): Promise<T> {
 }
 
 describe('Cloud transport dependency baseline', () => {
-  it('pins the exact merged protocol artifact and WebSocket dependencies', async () => {
+  it('pins the exact registry protocol and WebSocket dependencies', async () => {
     const manifest = await readJson<PackageManifest>(
       resolve(repositoryRoot, 'package.json'),
     );
@@ -39,7 +36,7 @@ describe('Cloud transport dependency baseline', () => {
       resolve(repositoryRoot, 'package-lock.json'),
     );
     const installedProtocol = await readJson<PackageManifest>(
-      resolve(repositoryRoot, 'node_modules/@claudian/collab-protocol/package.json'),
+      resolve(repositoryRoot, `node_modules/${protocolPackageName}/package.json`),
     );
     const installedWs = await readJson<PackageManifest>(
       resolve(repositoryRoot, 'node_modules/ws/package.json'),
@@ -47,72 +44,27 @@ describe('Cloud transport dependency baseline', () => {
     const installedWsTypes = await readJson<PackageManifest>(
       resolve(repositoryRoot, 'node_modules/@types/ws/package.json'),
     );
-    const protocolLock = lock.packages['node_modules/@claudian/collab-protocol'];
+    const protocolLock = lock.packages[`node_modules/${protocolPackageName}`];
 
-    assert.equal(
-      manifest.dependencies['@claudian/collab-protocol'],
-      `file:vendor/${protocolArtifact}`,
-    );
+    assert.equal(manifest.dependencies[protocolPackageName], protocolVersion);
+    assert.equal(manifest.dependencies['@claudian/collab-protocol'], undefined);
     assert.equal(manifest.dependencies.ws, '8.21.3');
     assert.equal(manifest.devDependencies['@types/ws'], '8.18.1');
-    assert.equal(installedProtocol.version, '0.4.0');
+    assert.equal(installedProtocol.version, protocolVersion);
     assert.equal(installedWs.version, '8.21.3');
     assert.equal(installedWsTypes.version, '8.18.1');
     assert.ok(protocolLock);
-    assert.equal(protocolLock.version, '0.4.0');
-    assert.equal(
-      protocolLock.resolved,
-      `file:vendor/${protocolArtifact}`,
-    );
-    assert.equal(
-      protocolLock.integrity,
-      protocolIntegrity,
-    );
+    assert.equal(protocolLock.version, protocolVersion);
+    assert.equal(protocolLock.resolved, protocolRegistryArtifact);
+    assert.equal(protocolLock.integrity, protocolIntegrity);
     assert.equal(lock.packages['node_modules/ws']?.version, '8.21.3');
     assert.equal(lock.packages['node_modules/@types/ws']?.version, '8.18.1');
     assert.equal(lock.packages['node_modules/bufferutil'], undefined);
     assert.equal(lock.packages['node_modules/utf-8-validate'], undefined);
   });
 
-  it('vendors only the exact 34-file producer artifact with recorded provenance', async () => {
-    assert.deepEqual((await readdir(resolve(repositoryRoot, 'vendor'))).sort(), [
-      'README.md',
-      protocolArtifact,
-    ]);
-    const provenance = await readFile(
-      resolve(repositoryRoot, 'vendor/README.md'),
-      'utf8',
-    );
-    assert.match(
-      provenance,
-      /c0522e04ffc083e9e6bda15cfa8411d4784e2205/,
-    );
-    assert.match(
-      provenance,
-      new RegExp(protocolSha256),
-    );
-
-    const artifact = await readFile(
-      resolve(repositoryRoot, 'vendor', protocolArtifact),
-    );
-    assert.equal(createHash('sha256').update(artifact).digest('hex'), protocolSha256);
-
-    const { stdout } = await execFileAsync('tar', [
-      '-tzf',
-      resolve(repositoryRoot, 'vendor', protocolArtifact),
-    ]);
-    const inventory = stdout.trim().split('\n').sort();
-    assert.equal(inventory.length, 34);
-    assert.deepEqual(inventory.slice(0, 4), [
-      'package/README.md',
-      'package/dist/CollabCloudBinding.d.ts',
-      'package/dist/CollabCloudBinding.js',
-      'package/dist/CollabCloudProjectEvent.d.ts',
-    ]);
-    assert.deepEqual(inventory.slice(-2), [
-      'package/dist/types.js',
-      'package/package.json',
-    ]);
+  it('does not retain a vendored protocol package', async () => {
+    await assert.rejects(access(resolve(repositoryRoot, 'vendor')));
   });
 
   it('loads the exact ws server API without optional native accelerators', async () => {

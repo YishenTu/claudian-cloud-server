@@ -1,7 +1,7 @@
 import {
   COLLAB_CLOUD_BINDING_LIMITS,
   COLLAB_LIMITS,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import type { ServerConfig } from '../config/ServerConfig.js';
 import { CoordinationError } from '../coordination/CoordinationError.js';

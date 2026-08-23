@@ -10,7 +10,7 @@ import {
   decodeDevelopmentBootstrapReport,
   encodeDevelopmentBootstrapManifestCanonicalJson,
   type DevelopmentBootstrapManifest,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import type {
   DevelopmentBootstrapAttemptRecord,

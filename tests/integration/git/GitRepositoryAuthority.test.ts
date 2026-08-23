@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import {
   COLLAB_MAIN_REF,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import {
   access,

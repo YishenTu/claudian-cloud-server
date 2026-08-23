@@ -6,7 +6,7 @@ import {
   COLLAB_CLOUD_BINDING_LIMITS,
   COLLAB_LIMITS,
   collabCloudCapabilityDocument,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import { CloudCapabilitiesRoute } from '../../src/server/CloudCapabilitiesRoute.js';
 

@@ -1,7 +1,7 @@
 import {
   COLLAB_LIMITS,
   CollabError,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import type {
   CollaborationKeysetCursor,

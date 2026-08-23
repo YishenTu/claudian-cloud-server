@@ -6,7 +6,7 @@ import {
   matchCollabCloudRoute,
   type CollabCloudProjectSnapshot,
   type CollabProjectId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import {
   ProjectReadAuthorityError,

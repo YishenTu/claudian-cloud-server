@@ -12,7 +12,7 @@ import {
   type DevelopmentBootstrapActivationResult,
   type DevelopmentBootstrapManifest,
   type DevelopmentBootstrapReport,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import type {
   DevelopmentBootstrapAttemptRecord,

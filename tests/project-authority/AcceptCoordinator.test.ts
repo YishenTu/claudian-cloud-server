@@ -9,7 +9,7 @@ import {
   type AcceptResponse,
   type CollabChangeRequest,
   type CollabProjectId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import type {
   AcceptJournalRecord,

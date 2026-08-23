@@ -9,7 +9,7 @@ import { describe, it } from 'node:test';
 import {
   COLLAB_MAIN_REF,
   collabMemberRef,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import type { PrepareAcceptInput } from '../../../src/coordination/AcceptPersistence.js';
 import {

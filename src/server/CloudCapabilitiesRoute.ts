@@ -6,7 +6,7 @@ import {
   type CollabCloudCapability,
   type CollabCloudCapabilityDocument,
   type CollabCloudCapabilityLimits,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 export interface CloudCapabilitiesRouteOptions {
   readonly enabledCapabilities: ReadonlySet<CollabCloudCapability>;

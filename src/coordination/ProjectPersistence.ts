@@ -3,7 +3,7 @@ import type {
   CollabIsoTimestamp,
   CollabMemberId,
   CollabProjectId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 export type ProjectServiceState = 'active' | 'recovery-required';
 

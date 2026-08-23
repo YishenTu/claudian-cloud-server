@@ -9,7 +9,7 @@ import type {
   DevelopmentBootstrapAttemptState,
   DevelopmentBootstrapBundleState,
   DevelopmentBootstrapCancellationPhase,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 export type PersistencePutResult = 'created' | 'replayed';
 export type PersistenceAdvanceResult = 'advanced' | 'replayed';

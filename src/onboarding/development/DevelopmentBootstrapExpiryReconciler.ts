@@ -1,6 +1,6 @@
 import type {
   CollabIsoTimestamp,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import type {
   ExpiredDevelopmentBootstrapAttemptCatalog,

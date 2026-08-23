@@ -8,7 +8,7 @@ import {
   collabCloudSuccessEnvelope,
   decodeCollabProtocolEnvelope,
   isCollabOpaqueId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import {
   DevelopmentPrincipalError,

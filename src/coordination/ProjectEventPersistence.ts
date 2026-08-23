@@ -3,7 +3,7 @@ import type {
   CollabCloudEventPayloadMap,
   CollabCloudProjectEvent,
   CollabIsoTimestamp,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 export type AppendProjectEvent = {
   readonly [Kind in CollabCloudEventKind]: {

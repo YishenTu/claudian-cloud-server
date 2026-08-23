@@ -7,7 +7,7 @@ import {
   COLLAB_MAIN_REF,
   collabCloudProjectOperationRoute,
   collabCloudSuccessEnvelope,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import { ProjectReadAuthorityError } from '../../src/project-authority/reads/ProjectReadAuthority.js';
 import { DevelopmentPrincipalAdapter } from '../../src/request-context/DevelopmentPrincipalAdapter.js';

@@ -16,7 +16,7 @@ import {
   type ListRequestCommentsRequest,
   type UpdateMyRequestMetadataRequest,
   type UpdateMyRequestMetadataResponse,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import { CoordinationError } from '../../coordination/CoordinationError.js';
 import type { ProjectScope } from '../../coordination/ProjectCoordination.js';

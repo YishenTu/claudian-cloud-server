@@ -18,7 +18,7 @@ import {
   collabCloudGitRoute,
   collabMemberRef,
   decodeCollabCloudCapabilityDocument,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 import { Client } from 'pg';
 
 import { createApplication, type Application } from '../../../src/composition/createApplication.js';
