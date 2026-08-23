@@ -69,8 +69,9 @@ virtual machine or persistent container per Project.
    Project-sharded Git nodes are introduced only after measured need.
 9. **The Cloud wire contract has one canonical owner.** Shared Cloud protocol
    types, executable codecs, operation definitions, compatibility behavior,
-   and versioning are owned by a package produced from the `claudian`
-   repository. This server implements that contract and does not copy it.
+   and versioning are owned by `@claudian-collab/protocol`, produced from the
+   standalone `claudian-collab-protocol` repository. This server implements
+   that contract and does not copy it.
 10. **LAN HTTP bindings are not the Cloud protocol.** Existing LAN protocol
     DTOs and transport-neutral codecs may be extracted where semantics match,
     but LAN routes, Host admission, invitation trust, and Host-transfer
