@@ -522,9 +522,10 @@ from different authentication systems without changing collaboration semantics.
 
 Self-hosted and managed Cloud use the same Cloud protocol. Deployment profile
 does not fork collaboration semantics. Additive or breaking changes follow an
-explicit protocol-version policy and contract tests run in both repositories.
-The server never maintains a second hand-written inventory of the same
-operations or validators.
+explicit protocol-version policy whose canonical tests live in the standalone
+protocol repository. Claudian and Cloud Server retain only consumer-conformance
+fixtures against their exact registry dependency. The server never maintains a
+second hand-written inventory of the same operations or validators.
 
 ## 9. External surfaces
 
@@ -1418,10 +1419,10 @@ Shared contract files, compatibility policy, and releases belong to the standalo
 
 ## 24. Blocking status
 
-The foundation is implemented and the steps 5–8 local milestone is ready for producer-first implementation through the six gates in §21.1. Project mutation implementation must use the one canonical advisory-lock contract and fixed lock order in §11; repository interfaces must carry the placement lease and generation from their first implementation so sharding does not require a domain-API rewrite.
+The foundation and steps 5–8 local milestone are implemented and verified through the six gates in §21.1. The standalone `@claudian-collab/protocol` `1.0.0` release is published, and both exact-consumer migrations must land on clean `origin/main` before the separate clean Gomami build/deployment gate and Step 9 real-cloud proof. Project mutations continue to use the one canonical advisory-lock contract and fixed lock order in §11; repository interfaces carry the placement lease and generation so future sharding does not require a domain-API rewrite.
 
-The following are intentionally deferred and do not block the private first
-slice:
+The following are intentionally deferred and do not block the Step 9 private
+proof:
 
 - the production trusted-ingress principal contract and stable mappings among
   Account, device attribution, Project, membership, and protocol actor identity;
