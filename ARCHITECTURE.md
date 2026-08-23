@@ -1,8 +1,8 @@
 # Claudian Cloud Server Architecture
 
-Status: foundation implemented; the steps 5–8 local Cloud milestone is accepted and frozen for implementation.
+Status: foundation and the steps 5–8 local Cloud milestone are implemented and verified; the post-milestone registry-consumer migration is pending merge before Step 9.
 
-Last reconciled: 2026-08-21
+Last reconciled: 2026-08-24
 
 ## 1. Purpose
 
@@ -1335,35 +1335,36 @@ Shipped-entry tests also prove:
   deterministic same-intent replay remains available where policy permits;
 - transport disconnect and forced shutdown eventually reap every Git child.
 
-## 21. Initial implementation sequence
+## 21. Completed local sequence and remaining rollout
 
-This is the critical path, not a parallel task assignment:
+The local milestone followed this critical path. The standalone protocol ownership migration follows that completed milestone and must land before the first Gomami deployment:
 
-1. publish the canonical Cloud protocol from the standalone
-   `claudian-collab-protocol` repository and pin both consumers to its exact
-   registry version;
-2. scaffold Node.js 24, strict TypeScript, configuration, safe logging, health,
+1. scaffold Node.js 24, strict TypeScript, configuration, safe logging, health,
    version, lifecycle, tests, and one composition root;
-3. add PostgreSQL migrations, runtime/migration roles, Project isolation, and
+2. add PostgreSQL migrations, runtime/migration roles, Project isolation, and
    placement records, plus the canonical advisory Project lock and separate
    ordinary, pinned-lease, and reserved connection budgets;
-4. add the bare repository authority, real Git integration, path containment,
+3. add the bare repository authority, real Git integration, path containment,
    placement-lease generation checks, and bounded process supervision;
-5. implement the private development bootstrap and restart recovery;
-6. prove clone, fetch, personal-ref push, snapshot, and Project events;
-7. implement Publish/request coordination and exact idempotency;
-8. implement Accept with durable cross-store recovery and fault injection;
-9. prove the two-device private-ingress scenario end to end;
-10. select, make decision-complete, and implement at least one production
+4. implement the private development bootstrap and restart recovery;
+5. prove clone, fetch, personal-ref push, snapshot, and Project events;
+6. implement Publish/request coordination and exact idempotency;
+7. implement Accept with durable cross-store recovery and fault injection;
+8. prove the complete Claudian-to-Cloud localhost scenario;
+9. publish the canonical protocol from the standalone
+   `claudian-collab-protocol` repository and migrate both consumers to its exact
+   registry version;
+10. prove the two-device private-ingress scenario on Gomami;
+11. select, make decision-complete, and implement at least one production
     Project creation path; define the trusted-ingress principal contract and
     stable Account/device/Project/membership identity, idempotency, and audit
     mappings, and remove the development actor assertion from every external
     profile;
-11. integrate the external-Alpha trusted ingress and implement Project
+12. integrate the external-Alpha trusted ingress and implement Project
     authorization, RLS, the target-repository-only Git sandbox, streamed quota
     enforcement, backup objectives, restore, retention, deletion, and
     operator-access gates before accepting external Project data;
-12. when existing LAN Projects enter scope, complete the production authority
+13. when existing LAN Projects enter scope, complete the production authority
     handoff before enabling their onboarding.
 
 Each phase exits only when its interface-level and real integration tests pass.
@@ -1371,9 +1372,9 @@ Later phases do not bypass missing recovery or isolation from earlier phases.
 
 ### 21.1 Steps 5–8 delivery gates and ownership
 
-The local milestone advances through six ordered proof gates: `G5` bootstrap and persistent activation; `G6R` snapshot, events, upload-pack, and two-client binding; `G6W` personal-ref receive-pack; `G7` Requests, Tickets, comments, and Publish; `G8A` deterministic Accept and server recovery; and `GI` complete localhost integration. A changed contract, phase, owner, or capability reopens its gate and every dependent gate.
+The local milestone advanced through six ordered proof gates: `G5` bootstrap and persistent activation; `G6R` snapshot, events, upload-pack, and two-client binding; `G6W` personal-ref receive-pack; `G7` Requests, Tickets, comments, and Publish; `G8A` deterministic Accept and server recovery; and `GI` complete localhost integration. A changed contract, phase, owner, or capability reopens its gate and every dependent gate.
 
-The mergeable PR order is fixed: standalone protocol release; Cloud and Claudian exact registry consumers; Cloud bootstrap; Claudian bootstrap; Cloud read plane; Claudian read/binding; Cloud personal write; Cloud collaboration; Claudian Publish; Cloud Accept; Claudian final integration. Every branch starts from the latest merged `origin/main`; neither consumer uses unmerged protocol source, and capability advertisement occurs only after the complete server path and its gate evidence exist.
+The completed local-milestone merge order was: the original shared protocol and Cloud foundation; Cloud bootstrap; Claudian bootstrap; Cloud read plane; Claudian read/binding; Cloud personal write; Cloud collaboration; Claudian Publish; Cloud Accept; and Claudian final integration. After `GI`, the separate ownership migration published the standalone protocol release and opened the Claudian and Cloud exact registry-consumer PRs. Those two consumer PRs are the current unmerged gates. Every branch starts from the latest merged `origin/main`; neither consumer uses unmerged protocol source, and capability advertisement occurs only after the complete server path and its gate evidence exist.
 
 Schema evolution is one serial, checksum-verified lane: `0002_development_bootstrap.sql`, `0003_project_read_events.sql`, `0004_collaboration.sql`, then `0005_accept_recovery.sql`. The task that introduces each migration also owns its checksum/schema registry entry, least-privilege grants, forced-RLS policy, and real PostgreSQL evidence. Gates freeze that ordered catalog; they do not become a second migration owner.
 
