@@ -1338,7 +1338,9 @@ Shipped-entry tests also prove:
 
 This is the critical path, not a parallel task assignment:
 
-1. extract and version the canonical Cloud protocol package in `claudian`;
+1. publish the canonical Cloud protocol from the standalone
+   `claudian-collab-protocol` repository and pin both consumers to its exact
+   registry version;
 2. scaffold Node.js 24, strict TypeScript, configuration, safe logging, health,
    version, lifecycle, tests, and one composition root;
 3. add PostgreSQL migrations, runtime/migration roles, Project isolation, and
@@ -1370,7 +1372,7 @@ Later phases do not bypass missing recovery or isolation from earlier phases.
 
 The local milestone advances through six ordered proof gates: `G5` bootstrap and persistent activation; `G6R` snapshot, events, upload-pack, and two-client binding; `G6W` personal-ref receive-pack; `G7` Requests, Tickets, comments, and Publish; `G8A` deterministic Accept and server recovery; and `GI` complete localhost integration. A changed contract, phase, owner, or capability reopens its gate and every dependent gate.
 
-The mergeable PR order is fixed: Claudian protocol producer; Cloud exact protocol consumer; Cloud bootstrap; Claudian bootstrap; Cloud read plane; Claudian read/binding; Cloud personal write; Cloud collaboration; Claudian Publish; Cloud Accept; Claudian final integration. Every branch starts from the latest merged `origin/main`; Cloud never consumes unmerged Claudian source and capability advertisement occurs only after the complete server path and its gate evidence exist.
+The mergeable PR order is fixed: standalone protocol release; Cloud and Claudian exact registry consumers; Cloud bootstrap; Claudian bootstrap; Cloud read plane; Claudian read/binding; Cloud personal write; Cloud collaboration; Claudian Publish; Cloud Accept; Claudian final integration. Every branch starts from the latest merged `origin/main`; neither consumer uses unmerged protocol source, and capability advertisement occurs only after the complete server path and its gate evidence exist.
 
 Schema evolution is one serial, checksum-verified lane: `0002_development_bootstrap.sql`, `0003_project_read_events.sql`, `0004_collaboration.sql`, then `0005_accept_recovery.sql`. The task that introduces each migration also owns its checksum/schema registry entry, least-privilege grants, forced-RLS policy, and real PostgreSQL evidence. Gates freeze that ordered catalog; they do not become a second migration owner.
 
