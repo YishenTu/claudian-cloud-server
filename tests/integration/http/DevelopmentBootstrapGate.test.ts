@@ -38,7 +38,7 @@ import {
   type DevelopmentBootstrapAttemptStatus,
   type DevelopmentBootstrapManifest,
   type DevelopmentBootstrapReport,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 import { Client } from 'pg';
 import { type RawData, WebSocket } from 'ws';
 

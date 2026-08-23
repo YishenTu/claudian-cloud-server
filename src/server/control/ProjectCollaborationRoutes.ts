@@ -5,7 +5,7 @@ import {
   matchCollabCloudRoute,
   type CollabControlOperation,
   type CollabControlOperationMap,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import type { ProjectAcceptCoordinator } from '../../project-authority/acceptance/ProjectAcceptCoordinator.js';
 import type { ProjectRequestAuthority } from '../../project-authority/requests/ProjectRequestAuthority.js';

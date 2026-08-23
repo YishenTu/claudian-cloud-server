@@ -25,7 +25,7 @@ import {
   type ListTicketsRequest,
   type TicketMutationResponse,
   type UpdateTicketContentRequest,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import { CoordinationError } from '../../coordination/CoordinationError.js';
 import type { ProjectScope } from '../../coordination/ProjectCoordination.js';

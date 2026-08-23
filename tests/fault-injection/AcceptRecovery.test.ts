@@ -13,7 +13,7 @@ import {
   collabMemberRef,
   type AcceptRequest,
   type CollabProjectId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 import { Client } from 'pg';
 
 import type {

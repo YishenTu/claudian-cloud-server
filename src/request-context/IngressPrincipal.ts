@@ -1,4 +1,4 @@
-import type { CollabMemberId } from '@claudian/collab-protocol';
+import type { CollabMemberId } from '@claudian-collab/protocol';
 
 export interface IngressPrincipal {
   readonly actorId: CollabMemberId;

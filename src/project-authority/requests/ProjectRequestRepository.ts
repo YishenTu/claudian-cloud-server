@@ -3,7 +3,7 @@ import type {
   CollabMemberId,
   CollabProjectId,
   CollabReviewCondition,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import type { RepositoryPlacementLease } from '../../repositories/RepositoryPlacement.js';
 

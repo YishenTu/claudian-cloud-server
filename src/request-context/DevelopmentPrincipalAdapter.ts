@@ -1,4 +1,4 @@
-import { isCollabMemberId } from '@claudian/collab-protocol';
+import { isCollabMemberId } from '@claudian-collab/protocol';
 
 import {
   createDevelopmentIngressPrincipal,

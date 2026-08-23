@@ -15,8 +15,8 @@ import {
   isCollabGitOid,
   isCollabOpaqueId,
   isCollabProjectId,
-} from '@claudian/collab-protocol';
-import type { DevelopmentBootstrapGitRef } from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
+import type { DevelopmentBootstrapGitRef } from '@claudian-collab/protocol';
 
 import type { ValidatedBootstrapRepository } from './GitBundleImporter.js';
 import {

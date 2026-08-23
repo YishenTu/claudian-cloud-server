@@ -10,7 +10,7 @@ import {
   type CollabMemberId,
   type CollabCloudProjectEvent,
   type CollabProjectId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 import { Pool, type PoolClient, type QueryResultRow } from 'pg';
 
 import {

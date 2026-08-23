@@ -12,7 +12,7 @@ import {
   type CollabChangeRequest,
   type CollabProjectId,
   type CollabResolvingTicketExpectation,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import type {
   AcceptJournalRecord,

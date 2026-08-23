@@ -11,7 +11,7 @@ import {
   COLLAB_MAIN_REF,
   collabCloudGitRoute,
   collabMemberRef,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import { DevelopmentPrincipalAdapter } from '../../../src/request-context/DevelopmentPrincipalAdapter.js';
 import { ProjectWriteAdmissionError } from '../../../src/project-authority/admission/ProjectWriteAdmission.js';

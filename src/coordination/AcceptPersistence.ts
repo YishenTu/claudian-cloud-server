@@ -10,7 +10,7 @@ import type {
   CollabTicketCommitRelationKind,
   CollabTicketId,
   CollabTicketRelationId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 export type AcceptJournalActivePhase =
   | 'prepared'

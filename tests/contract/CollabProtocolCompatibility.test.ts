@@ -18,7 +18,7 @@ import {
   collabDevelopmentBootstrapRoute,
   decodeCollabCloudCapabilityDocument,
   decodeCollabProtocolEnvelope,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 const expectedOperations = [
   'acceptRequest',
@@ -177,7 +177,7 @@ describe('canonical Collab protocol consumer contract', () => {
   it('keeps production imports at the package root and defines no parallel Cloud routes', async () => {
     for await (const path of glob('src/**/*.ts', { cwd: repositoryRoot })) {
       const source = await readFile(resolve(repositoryRoot, path), 'utf8');
-      assert.doesNotMatch(source, /@claudian\/collab-protocol\//u, path);
+      assert.doesNotMatch(source, /@claudian-collab\/protocol\//u, path);
       assert.doesNotMatch(
         source,
         /['"`]\/(?:collab\/capabilities|v1\/(?:development|projects)\/)/u,

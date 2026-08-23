@@ -6,7 +6,7 @@ import {
   decodeCollabCloudProjectEventMessage,
   matchCollabCloudRoute,
   type CollabProjectId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 import { WebSocket, WebSocketServer } from 'ws';
 
 import type {

@@ -13,7 +13,5 @@
 !src/**
 !tests/
 !tests/**
-!vendor/
-!vendor/*.tgz
 !deploy/
 !deploy/Dockerfile

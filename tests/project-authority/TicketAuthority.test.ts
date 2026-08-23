@@ -7,8 +7,8 @@ import type {
   CollabTicketAcceptedRelation,
   CollabTicketComment,
   CollabTicketSummary,
-} from '@claudian/collab-protocol';
-import { CollabError } from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
+import { CollabError } from '@claudian-collab/protocol';
 
 import type {
   CollaborationIdempotencyLookup,

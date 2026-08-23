@@ -2,7 +2,7 @@ import type {
   CollabProjectId,
   DevelopmentBootstrapGitRef,
   DevelopmentBootstrapObjectFormat,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import {
   ResourceAdmissionError,

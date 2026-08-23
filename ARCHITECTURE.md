@@ -95,7 +95,7 @@ virtual machine or persistent container per Project.
 15. **Placement generation is an execution fence.** Every repository operation
     carries a server-derived placement lease. Stale generations and demoted
     nodes fail closed; placement is not merely routing metadata.
-16. **The local milestone has three independent version authorities.** The accepted producer revision is `@claudian/collab-protocol` `0.4.0` with canonical wire version `4`; Cloud binding version `1` defines its routes and capabilities. The Claudian LAN control/event binding remains independently at version `9`. No adapter infers compatibility from package SemVer alone or couples a Cloud version change to the LAN binding.
+16. **The local milestone has three independent version authorities.** The accepted standalone registry release is `@claudian-collab/protocol` `1.0.0` with canonical wire version `4`; Cloud binding version `1` defines its routes and capabilities. The Claudian LAN control/event binding remains independently at version `9`. No adapter infers compatibility from package SemVer alone or couples a Cloud version change to the LAN binding.
 17. **Durable phase records are singular authorities.** Activation, cancellation, client binding, and Accept each have one named journal or transition record. Membership, placement, repository directories, refs, indexes, and marker files are observations used to advance or reject that journal; none becomes a parallel phase authority.
 
 ## 4. System context and trust boundaries
@@ -495,7 +495,7 @@ boundary; neither creates a second domain API or exposes filesystem paths.
 
 ## 8. Protocol ownership and compatibility
 
-The `claudian` repository produces `@claudian/collab-protocol`. The Cloud Server depends on an exact compatible version. The steps 5–8 producer revision advances package version `0.3.0` and canonical wire version `3` to package version `0.4.0` and wire version `4`, and introduces Cloud binding version `1`. Local development consumes the exact packed producer artifact and records its checksum; CI and deployments use those reproducible bytes. Package SemVer, canonical wire version, Cloud binding version, and the independently owned LAN version are never substituted for one another.
+The standalone `claudian-collab-protocol` repository produces `@claudian-collab/protocol`. The Cloud Server depends on the exact `1.0.0` npm registry release. That release carries the steps 5–8 canonical wire version `4` and Cloud binding version `1`; its npm lock entry records the immutable registry artifact integrity used by local development, CI, and deployments. Package SemVer, canonical wire version, Cloud binding version, and the independently owned LAN version are never substituted for one another.
 
 The package exposes curated boundaries only:
 
@@ -1373,7 +1373,7 @@ The mergeable PR order is fixed: Claudian protocol producer; Cloud exact protoco
 
 Schema evolution is one serial, checksum-verified lane: `0002_development_bootstrap.sql`, `0003_project_read_events.sql`, `0004_collaboration.sql`, then `0005_accept_recovery.sql`. The task that introduces each migration also owns its checksum/schema registry entry, least-privilege grants, forced-RLS policy, and real PostgreSQL evidence. Gates freeze that ordered catalog; they do not become a second migration owner.
 
-Shared contract files, the Claudian root package manifest and lockfile belong to the producer PR. Cloud's package manifest, lockfile, vendored tarball, checksum metadata, and WebSocket dependency pins belong to the exact-consumer PR. No later transport tranche edits those manifests opportunistically. The exact merged `0.4.0` artifact and checksum are retained for the mandatory npm publication and clean-registry verification gate before the first Gomami deployment.
+Shared contract files, compatibility policy, and releases belong to the standalone protocol repository. Claudian and Cloud package manifests and lockfiles belong to their exact-consumer PRs; no later transport tranche edits those manifests opportunistically. The published `@claudian-collab/protocol` `1.0.0` registry artifact and lockfile integrity replace every local source, alias, or vendored-tarball path before the first Gomami deployment.
 
 ## 22. Explicit non-goals
 

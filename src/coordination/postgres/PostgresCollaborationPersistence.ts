@@ -14,7 +14,7 @@ import {
   type CollabTicketStatus,
   type CollabTicketSummary,
   type CollabProjectId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 import type { QueryResultRow } from 'pg';
 
 import type {

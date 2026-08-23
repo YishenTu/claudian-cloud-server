@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   matchCollabCloudRoute,
   type CollabProjectId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import { ProjectWriteAdmissionError } from '../../project-authority/admission/ProjectWriteAdmission.js';
 import {

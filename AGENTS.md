@@ -11,6 +11,7 @@
 
 ## Source and deployment boundary
 
+- The standalone `@claudian-collab/protocol` repository owns the shared wire-contract source, compatibility policy, tests, build, and release. This server consumes an exact npm registry version and does not vendor, copy, or recreate that package.
 - Production code capable of reading or transforming Project files, diffs, comments, or Git objects belongs in this auditable server repository.
 - Self-hosted and Claudian-managed deployments share one protocol, repository format, coordination model, and core server implementation. Managed-only systems must not become hidden dependencies of the collaboration data plane.
 - Production secrets, deployment credentials, private incident procedures, billing configuration, and internal operational access stay outside this repository.

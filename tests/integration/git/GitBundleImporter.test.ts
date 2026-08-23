@@ -17,7 +17,7 @@ import { Readable } from 'node:stream';
 import { promisify } from 'node:util';
 import { describe, it } from 'node:test';
 
-import type { DevelopmentBootstrapGitRef } from '@claudian/collab-protocol';
+import type { DevelopmentBootstrapGitRef } from '@claudian-collab/protocol';
 
 import {
   GitBundleImporter,

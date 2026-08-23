@@ -13,7 +13,7 @@
 - `git/` owns Smart HTTP streaming, disconnect detection, response settlement, and child cancellation handoff; receive-pack still enters Project mutation admission and the repository authority.
 - `events/` streams durable Project invalidations. Process-local notification is only a wake-up mechanism, never event authority.
 - `health/` distinguishes liveness, readiness, and version without exposing secrets, storage paths, Project existence, or recovery details.
-- Cloud binding v1 route builders, capability tokens, JSON operation tokens, codecs, and limits come from the exact canonical package. A capability is advertised only after its complete transport-to-owner path and server gate pass; routes never keep a parallel registry or advertise partial work.
+- Cloud binding v1 route builders, capability tokens, JSON operation tokens, codecs, and limits come from the exact `@claudian-collab/protocol` registry dependency. A capability is advertised only after its complete transport-to-owner path and server gate pass; routes never keep a parallel registry or advertise partial work.
 
 ## Lifecycle tests
 

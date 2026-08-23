@@ -15,7 +15,7 @@ import {
   decodeCollabCloudErrorEnvelope,
   decodeCollabCloudSuccessEnvelope,
   type DevelopmentBootstrapAttemptStatus,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import { DevelopmentBootstrapProfileError } from '../../../src/onboarding/development/DevelopmentBootstrapProfile.js';
 import { ProjectActivationCoordinatorError } from '../../../src/project-authority/lifecycle/ProjectActivationCoordinator.js';

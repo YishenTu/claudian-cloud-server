@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import {
   COLLAB_MAIN_REF,
   collabMemberRef,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 import { Client } from 'pg';
 
 import { CoordinationError } from '../../../src/coordination/CoordinationError.js';

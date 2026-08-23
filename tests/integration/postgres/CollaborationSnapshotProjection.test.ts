@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { COLLAB_CLOUD_BINDING_LIMITS } from '@claudian/collab-protocol';
+import { COLLAB_CLOUD_BINDING_LIMITS } from '@claudian-collab/protocol';
 import { Client } from 'pg';
 
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';

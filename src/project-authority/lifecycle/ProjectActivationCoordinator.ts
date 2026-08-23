@@ -8,7 +8,7 @@ import {
   type CollabProjectId,
   type DevelopmentBootstrapActivationResult,
   type DevelopmentBootstrapManifest,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import {
   type DevelopmentBootstrapAttemptRecord,

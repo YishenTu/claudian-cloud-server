@@ -27,7 +27,7 @@ import {
   type AcceptRequest,
   type CollabControlOperation,
   type CollabProjectId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 import { Client } from 'pg';
 
 import {

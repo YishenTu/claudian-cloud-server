@@ -17,7 +17,7 @@ import {
   type DevelopmentBootstrapOperation,
   type GetDevelopmentBootstrapRequest,
   type SubmitDevelopmentBootstrapReportRequest,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import {
   DevelopmentBootstrapProfileError,

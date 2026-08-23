@@ -1,6 +1,6 @@
 import { isAbsolute, normalize, parse } from 'node:path';
 
-import { COLLAB_CLOUD_BINDING_LIMITS } from '@claudian/collab-protocol';
+import { COLLAB_CLOUD_BINDING_LIMITS } from '@claudian-collab/protocol';
 
 import {
   ConfigError,

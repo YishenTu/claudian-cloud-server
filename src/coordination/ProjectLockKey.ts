@@ -4,7 +4,7 @@ import {
   isCollabOpaqueId,
   isCollabProjectId,
   type CollabProjectId,
-} from '@claudian/collab-protocol';
+} from '@claudian-collab/protocol';
 
 import { CoordinationError } from './CoordinationError.js';
 
