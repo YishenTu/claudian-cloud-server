@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
 import {
+  COLLAB_CHECKPOINT_ARTIFACT_LIMITS,
   COLLAB_CLOUD_BINDING_VERSION,
   COLLAB_CLOUD_CAPABILITIES,
   COLLAB_CLOUD_JSON_OPERATIONS,
@@ -21,19 +22,36 @@ import {
 } from '@claudian-collab/protocol';
 
 const expectedOperations = [
+  'acceptCloudToLanTransferTarget',
+  'acceptLanToCloudTransferTarget',
   'acceptRequest',
+  'acknowledgeProjectRetirement',
+  'acknowledgeTransferredMembershipClaimBatch',
+  'acknowledgeTransferredMembershipClaimRedemption',
+  'beginCloudToLanTransfer',
+  'beginLanToCloudTransfer',
+  'cancelProjectAuthorityTransfer',
+  'claimTransferredMembership',
   'closeTicket',
+  'commitLanToCloudRelinquishment',
+  'confirmCloudToLanTargetActive',
   'createComment',
   'createTicket',
   'createTicketComment',
   'ensureMyRequest',
+  'getProjectAuthorityTransfer',
   'getRequest',
   'getTicket',
+  'getTransferredMembershipClaim',
   'listRequestComments',
   'listTicketAcceptedRelations',
   'listTicketComments',
   'listTickets',
   'reopenTicket',
+  'reportCloudToLanTargetStaged',
+  'requestLanToCloudTransfer',
+  'retireProject',
+  'rotateTransferredMembershipClaims',
   'updateMyRequestMetadata',
   'updateTicketContent',
 ] as const;
@@ -41,9 +59,9 @@ const expectedOperations = [
 const repositoryRoot = resolve(import.meta.dirname, '../..');
 
 describe('canonical Collab protocol consumer contract', () => {
-  it('loads wire version 4, Cloud binding 1, and one operation inventory from the package root', () => {
-    assert.equal(COLLAB_PROTOCOL_VERSION, 4);
-    assert.equal(COLLAB_CLOUD_BINDING_VERSION, 1);
+  it('loads wire version 5, Cloud binding 2, and one operation inventory from the package root', () => {
+    assert.equal(COLLAB_PROTOCOL_VERSION, 5);
+    assert.equal(COLLAB_CLOUD_BINDING_VERSION, 2);
     assert.deepEqual(
       Object.keys(COLLAB_CONTROL_OPERATION_CODECS).sort(),
       [...expectedOperations].sort(),
@@ -62,24 +80,32 @@ describe('canonical Collab protocol consumer contract', () => {
     });
     assert.equal(
       collabCloudProjectOperationRoute('project-a', 'getProjectSnapshot').target,
-      '/v1/projects/project-a/operations/getProjectSnapshot',
+      '/v2/projects/project-a/operations/getProjectSnapshot',
     );
     assert.equal(
       collabCloudProjectEventsRoute('project-a', 12).target,
-      '/v1/projects/project-a/events?afterSequence=12',
+      '/v2/projects/project-a/events?afterSequence=12',
     );
     assert.equal(
       collabCloudGitRoute('project-a', 'info-refs', 'git-upload-pack').target,
-      '/v1/projects/project-a/repository.git/info/refs?service=git-upload-pack',
+      '/v2/projects/project-a/repository.git/info/refs?service=git-upload-pack',
     );
     assert.equal(
       collabDevelopmentBootstrapRoute('activateDevelopmentBootstrap', 'attempt-a').target,
-      '/v1/development/bootstrap/attempts/attempt-a/activate',
+      '/v2/development/bootstrap/attempts/attempt-a/activate',
     );
   });
 
   it('builds the exact capability document and fails closed on incompatible versions', () => {
     const limits = {
+      maxCheckpointCoordinationBytes:
+        COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxCoordinationBytes,
+      maxCheckpointManifestUtf8Bytes:
+        COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxManifestBytes,
+      maxCheckpointRepositoryBundleBytes:
+        COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxRepositoryBundleBytes,
+      maxCheckpointStagingBytes:
+        COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxStagingBytes,
       maxDevelopmentBootstrapGitBundleBytes: 1024 * 1024 * 1024,
       maxDevelopmentBootstrapManifestUtf8Bytes: 64 * 1024,
       maxDevelopmentBootstrapReportUtf8Bytes: 64 * 1024,
@@ -93,16 +119,16 @@ describe('canonical Collab protocol consumer contract', () => {
       limits,
     );
     assert.deepEqual(document, {
-      bindingVersions: [1],
+      bindingVersions: [2],
       capabilities: [...COLLAB_CLOUD_CAPABILITIES],
       limits,
-      protocolVersions: [4],
-      schemaVersion: 1,
+      protocolVersions: [5],
+      schemaVersion: 2,
     });
     assert.throws(
       () => decodeCollabCloudCapabilityDocument({
         ...document,
-        bindingVersions: [2],
+        bindingVersions: [1],
       }),
       (error: unknown) => (
         error instanceof Error
@@ -112,7 +138,7 @@ describe('canonical Collab protocol consumer contract', () => {
     assert.throws(
       () => decodeCollabCloudCapabilityDocument({
         ...document,
-        protocolVersions: [3],
+        protocolVersions: [4],
       }),
       (error: unknown) => (
         error instanceof Error
@@ -124,7 +150,7 @@ describe('canonical Collab protocol consumer contract', () => {
   it('decodes the accepted envelope and rejects unknown envelope fields', () => {
     const accepted = {
       data: { projectId: 'project-a' },
-      protocolVersion: 4,
+      protocolVersion: 5,
       requestId: 'request-a',
     };
 
@@ -180,7 +206,7 @@ describe('canonical Collab protocol consumer contract', () => {
       assert.doesNotMatch(source, /@claudian-collab\/protocol\//u, path);
       assert.doesNotMatch(
         source,
-        /['"`]\/(?:collab\/capabilities|v1\/(?:development|projects)\/)/u,
+        /['"`]\/(?:collab\/capabilities|v2\/(?:development|projects)\/)/u,
         path,
       );
     }

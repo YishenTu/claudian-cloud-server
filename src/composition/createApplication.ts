@@ -1,4 +1,5 @@
 import {
+  COLLAB_CHECKPOINT_ARTIFACT_LIMITS,
   COLLAB_CLOUD_BINDING_LIMITS,
   COLLAB_LIMITS,
 } from '@claudian-collab/protocol';
@@ -311,6 +312,14 @@ class CloudApplication implements Application {
         'tickets',
       ]),
       limits: {
+        maxCheckpointCoordinationBytes:
+          COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxCoordinationBytes,
+        maxCheckpointManifestUtf8Bytes:
+          COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxManifestBytes,
+        maxCheckpointRepositoryBundleBytes:
+          COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxRepositoryBundleBytes,
+        maxCheckpointStagingBytes:
+          COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxStagingBytes,
         maxDevelopmentBootstrapGitBundleBytes:
           options.config.developmentBootstrap.maxBundleBytes,
         maxDevelopmentBootstrapManifestUtf8Bytes:

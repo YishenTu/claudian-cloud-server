@@ -265,7 +265,7 @@ describe('GitUploadPackRoutes', () => {
 
       const address = await server.start();
       const origin = `http://${address.host}:${String(address.port)}`;
-      const repositoryUrl = `${origin}/v1/projects/project-a/repository.git`;
+      const repositoryUrl = `${origin}/v2/projects/project-a/repository.git`;
       await execFileAsync(GIT_EXECUTABLE, [
         '-c',
         'http.extraHeader=x-claudian-development-actor: member-a',

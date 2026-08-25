@@ -1,6 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import {
+  COLLAB_AUTHORITY_TRANSFER_OPERATIONS,
+  COLLAB_PROJECT_RETIREMENT_OPERATIONS,
   collabControlOperationCodec,
   matchCollabCloudRoute,
   type CollabControlOperation,
@@ -18,10 +20,25 @@ import {
   type ProjectJsonRequestContext,
 } from './ProjectJsonTransport.js';
 
+type InactiveLifecycleOperation =
+  | typeof COLLAB_AUTHORITY_TRANSFER_OPERATIONS[number]
+  | typeof COLLAB_PROJECT_RETIREMENT_OPERATIONS[number];
+
 type ActiveCollaborationOperation = Exclude<
   CollabControlOperation,
-  'getProjectSnapshot'
+  'getProjectSnapshot' | InactiveLifecycleOperation
 >;
+
+const INACTIVE_LIFECYCLE_OPERATION_SET: ReadonlySet<string> = new Set([
+  ...COLLAB_AUTHORITY_TRANSFER_OPERATIONS,
+  ...COLLAB_PROJECT_RETIREMENT_OPERATIONS,
+]);
+
+function isActiveCollaborationOperation(
+  operation: CollabControlOperation,
+): operation is ActiveCollaborationOperation {
+  return !INACTIVE_LIFECYCLE_OPERATION_SET.has(operation);
+}
 
 function unsupportedOperation(operation: never): never {
   throw new TypeError(`project-collaboration-routes.unsupported.${String(operation)}`);
@@ -74,15 +91,19 @@ export class ProjectCollaborationRoutes {
 
   handle(request: IncomingMessage, response: ServerResponse): boolean {
     const match = matchCollabCloudRoute(request.method ?? '', request.url ?? '');
+    if (match?.kind !== 'project-operation') {
+      return false;
+    }
+    const operation = match.operation;
     if (
-      match?.kind !== 'project-operation'
-      || match.operation === 'getProjectSnapshot'
+      operation === 'getProjectSnapshot'
+      || !isActiveCollaborationOperation(operation)
     ) {
       return false;
     }
     void this.#transport.handle(request, response, context => (
       this.#dispatch(
-        match.operation as ActiveCollaborationOperation,
+        operation,
         match.projectId,
         context,
       )
