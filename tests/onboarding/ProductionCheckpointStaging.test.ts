@@ -361,11 +361,16 @@ describe('ProductionCheckpointStaging', () => {
       const iteratorReturnReleased = new Promise<void>(resolve => {
         releaseIteratorReturn = resolve;
       });
+      let observeIteratorReturn: (() => void) | undefined;
+      const iteratorReturnStarted = new Promise<void>(resolve => {
+        observeIteratorReturn = resolve;
+      });
       const stalledReturn = {
         [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
           return {
             next: () => new Promise(() => undefined),
             return: async () => {
+              observeIteratorReturn?.();
               await iteratorReturnReleased;
               return { done: true, value: undefined };
             },
@@ -382,6 +387,24 @@ describe('ProductionCheckpointStaging', () => {
         () => 'resolved' as const,
         (error: unknown) => error,
       );
+      let iteratorStartTimeout: ReturnType<typeof setTimeout> | undefined;
+      const iteratorStartOutcome = await Promise.race([
+        iteratorReturnStarted.then(() => 'started' as const),
+        stalledReturnResult.then(() => 'settled' as const),
+        new Promise<'not-started'>(resolve => {
+          iteratorStartTimeout = setTimeout(
+            () => resolve('not-started'),
+            1_000,
+          );
+          iteratorStartTimeout.unref();
+        }),
+      ]).finally(() => {
+        if (iteratorStartTimeout !== undefined) {
+          clearTimeout(iteratorStartTimeout);
+        }
+      });
+      if (iteratorStartOutcome !== 'started') releaseIteratorReturn?.();
+      assert.equal(iteratorStartOutcome, 'started');
       const settledBeforeIteratorReturn = await Promise.race([
         stalledReturnResult,
         new Promise<'still-running'>(resolve => {
