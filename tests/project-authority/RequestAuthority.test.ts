@@ -246,6 +246,9 @@ class MemoryCoordination implements ProjectRequestAuthorityCoordination {
           : undefined,
       ),
       getNonterminalDevelopmentBootstrapAttempt: () => Promise.resolve(undefined),
+      portability: {
+        getNonterminalLifecycleJournal: () => Promise.resolve(undefined),
+      },
       getProject: () => Promise.resolve({
         activatedAt: CREATED,
         createdAt: CREATED,

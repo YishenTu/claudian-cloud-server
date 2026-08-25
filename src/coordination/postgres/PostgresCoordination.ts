@@ -24,10 +24,12 @@ import {
   type RecoveryCandidate,
   type RecoveryCandidateCatalog,
   type RecoveryCandidateCursor,
+  type RecoveryCandidateKind,
   type RecoveryCandidatePage,
 } from '../DevelopmentBootstrapPersistence.js';
 import {
   type AdvanceProjectAuthorityStateInput,
+  type IsolateProjectRecoveryInput,
   type ProjectRecord,
   type ProjectServiceState,
 } from '../ProjectPersistence.js';
@@ -172,6 +174,17 @@ type MarkBroken = () => void;
 const LOCK_RETRY_INTERVAL_MS = 5;
 const RUNTIME_ROLE = 'claudian_cloud_runtime';
 const AUTHORITY_VOLUME_ID_PATTERN = /^[0-9a-f]{32}$/u;
+const RECOVERY_CANDIDATE_KIND_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
+const RECOVERY_CANDIDATE_KINDS: ReadonlySet<RecoveryCandidateKind> = new Set([
+  'accept',
+  'activation',
+  'authority-transfer',
+  'backup',
+  'delete',
+  'export',
+  'leave',
+  'retire',
+]);
 const PROJECT_SERVICE_STATES: ReadonlySet<ProjectServiceState> = new Set([
   'active',
   'deleted',
@@ -225,16 +238,7 @@ function handleIdlePoolError(_error: Error): void {
 
 function validateRecoveryCursor(cursor: RecoveryCandidateCursor): void {
   if (
-    ![
-      'accept',
-      'activation',
-      'authority-transfer',
-      'backup',
-      'delete',
-      'export',
-      'leave',
-      'retire',
-    ].includes(cursor.kind)
+    !RECOVERY_CANDIDATE_KIND_PATTERN.test(cursor.kind)
     || !isCollabProjectId(cursor.projectId)
     || !isCollabOpaqueId(cursor.operationId)
     || Number.isNaN(Date.parse(cursor.scheduledAt))
@@ -246,16 +250,35 @@ function validateRecoveryCursor(cursor: RecoveryCandidateCursor): void {
 
 function recoveryCandidate(row: RecoveryCandidateRow): RecoveryCandidate {
   if (
-    ![
-      'accept',
-      'activation',
-      'authority-transfer',
-      'backup',
-      'delete',
-      'export',
-      'leave',
-      'retire',
-    ].includes(row.kind)
+    !RECOVERY_CANDIDATE_KIND_PATTERN.test(row.kind)
+    || !isCollabProjectId(row.project_id)
+    || !isCollabOpaqueId(row.operation_id)
+    || !(row.scheduled_at instanceof Date)
+    || Number.isNaN(row.scheduled_at.valueOf())
+  ) {
+    throw dependencyFailure();
+  }
+  const identity = {
+    operationId: row.operation_id,
+    projectId: row.project_id,
+    scheduledAt: row.scheduled_at.toISOString(),
+  } as const;
+  if (RECOVERY_CANDIDATE_KINDS.has(row.kind as RecoveryCandidateKind)) {
+    return Object.freeze({
+      ...identity,
+      kind: row.kind as RecoveryCandidateKind,
+    });
+  }
+  return Object.freeze({
+    ...identity,
+    kind: 'unknown',
+    unrecognizedKind: row.kind,
+  });
+}
+
+function recoveryCursor(row: RecoveryCandidateRow): RecoveryCandidateCursor {
+  if (
+    !RECOVERY_CANDIDATE_KIND_PATTERN.test(row.kind)
     || !isCollabProjectId(row.project_id)
     || !isCollabOpaqueId(row.operation_id)
     || !(row.scheduled_at instanceof Date)
@@ -264,7 +287,7 @@ function recoveryCandidate(row: RecoveryCandidateRow): RecoveryCandidate {
     throw dependencyFailure();
   }
   return Object.freeze({
-    kind: row.kind as RecoveryCandidate['kind'],
+    kind: row.kind,
     operationId: row.operation_id,
     projectId: row.project_id,
     scheduledAt: row.scheduled_at.toISOString(),
@@ -1013,6 +1036,93 @@ class PostgresProjectScope
     return rows.length === 1 ? 'advanced' : 'replayed';
   }
 
+  async isolateProjectRecovery(
+    input: IsolateProjectRecoveryInput,
+  ): Promise<'advanced' | 'replayed' | 'stale'> {
+    this.assertActive();
+    const candidate = input.expectedRecoveryCandidate;
+    validateRecoveryCursor(candidate);
+    if (candidate.projectId !== this.#projectId) {
+      throw new CoordinationError('invalid-record');
+    }
+    const candidateRows = await safeQuery<{ readonly operation_id: string }>(
+      this.#client,
+      `SELECT operation_id
+         FROM claudian_cloud.recovery_candidates
+        WHERE kind = $1
+          AND project_id = $2
+          AND operation_id = $3
+          AND scheduled_at = $4
+        FOR UPDATE`,
+      [
+        candidate.kind,
+        this.#projectId,
+        candidate.operationId,
+        candidate.scheduledAt,
+      ],
+      this.#markBroken,
+    );
+    if (candidateRows.length === 0) return 'stale';
+    if (candidateRows.length !== 1) throw new CoordinationError('state-conflict');
+
+    const current = await this.getProject();
+    if (current === undefined || current.serviceState === 'deleted') {
+      throw new CoordinationError('state-conflict');
+    }
+    let result: 'advanced' | 'replayed';
+    let expectedRevision = current.authorityStateRevision;
+    if (current.serviceState === 'recovery-required') {
+      result = 'replayed';
+    } else {
+      const rows = await safeQuery<{ readonly project_id: string }>(
+        this.#client,
+        `UPDATE claudian_cloud.projects
+            SET authority_state_revision = authority_state_revision + 1,
+                service_state = 'recovery-required'
+          WHERE project_id = $1
+            AND authority_generation = $2
+            AND authority_state_revision = $3
+            AND service_state = $4
+         RETURNING project_id`,
+        [
+          this.#projectId,
+          current.authorityGeneration,
+          current.authorityStateRevision,
+          current.serviceState,
+        ],
+        this.#markBroken,
+      );
+      if (rows.length !== 1) throw new CoordinationError('state-conflict');
+      expectedRevision += 1;
+      result = 'advanced';
+    }
+    await safeQuery(
+      this.#client,
+      `DELETE FROM claudian_cloud.active_repository_placement_catalog
+        WHERE project_id = $1`,
+      [this.#projectId],
+      this.#markBroken,
+    );
+    const project = await this.getProject();
+    const activeCatalogRows = await safeQuery<{ readonly project_id: string }>(
+      this.#client,
+      `SELECT project_id
+         FROM claudian_cloud.active_repository_placement_catalog
+        WHERE project_id = $1`,
+      [this.#projectId],
+      this.#markBroken,
+    );
+    if (
+      project?.authorityGeneration !== current.authorityGeneration
+      || project.authorityStateRevision !== expectedRevision
+      || project.serviceState !== 'recovery-required'
+      || activeCatalogRows.length !== 0
+    ) {
+      throw new CoordinationError('state-conflict');
+    }
+    return result;
+  }
+
   async getRepositoryPlacement(): Promise<RepositoryPlacementLease | undefined> {
     this.assertActive();
     const rows = await safeQuery<PlacementRow>(
@@ -1555,7 +1665,7 @@ export class PostgresCoordination
       const candidates = Object.freeze(pageRows.map(recoveryCandidate));
       const last = pageRows.at(-1);
       const nextCursor = rows.length > limit && last !== undefined
-        ? recoveryCandidate(last)
+        ? recoveryCursor(last)
         : undefined;
       return Object.freeze({ candidates, nextCursor });
     } finally {

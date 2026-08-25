@@ -383,6 +383,9 @@ export interface PortabilityLifecyclePersistenceReader {
   getLifecycleJournal(
     operationId: string,
   ): Promise<ProjectLifecycleJournalRecord | undefined>;
+  getNonterminalLifecycleJournal(): Promise<
+    ProjectLifecycleJournalRecord | undefined
+  >;
   getProjectTombstone(): Promise<ProjectTombstoneInput | undefined>;
   getProtectedClaimEnvelope(
     transferId: string,

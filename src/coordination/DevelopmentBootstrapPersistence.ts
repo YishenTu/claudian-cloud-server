@@ -246,14 +246,29 @@ export type RecoveryCandidateKind =
   | 'leave'
   | 'retire';
 
-export interface RecoveryCandidate {
+export interface KnownRecoveryCandidate {
   readonly kind: RecoveryCandidateKind;
   readonly operationId: CollabOperationId;
   readonly projectId: CollabProjectId;
   readonly scheduledAt: CollabIsoTimestamp;
 }
 
-export type RecoveryCandidateCursor = RecoveryCandidate;
+export interface UnknownRecoveryCandidate {
+  readonly kind: 'unknown';
+  readonly operationId: CollabOperationId;
+  readonly projectId: CollabProjectId;
+  readonly scheduledAt: CollabIsoTimestamp;
+  readonly unrecognizedKind: string;
+}
+
+export type RecoveryCandidate = KnownRecoveryCandidate | UnknownRecoveryCandidate;
+
+export interface RecoveryCandidateCursor {
+  readonly kind: string;
+  readonly operationId: CollabOperationId;
+  readonly projectId: CollabProjectId;
+  readonly scheduledAt: CollabIsoTimestamp;
+}
 
 export interface RecoveryCandidatePage {
   readonly candidates: readonly RecoveryCandidate[];

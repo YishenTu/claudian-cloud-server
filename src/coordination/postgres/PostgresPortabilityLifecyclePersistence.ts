@@ -629,6 +629,24 @@ implements PortabilityLifecyclePersistence {
     return rows[0] === undefined ? undefined : lifecycleJournal(rows[0]);
   }
 
+  async getNonterminalLifecycleJournal(): Promise<
+    ProjectLifecycleJournalRecord | undefined
+  > {
+    const rows = await this.#query<LifecycleJournalRow>(
+      `SELECT project_id, operation_id, kind, direction, phase,
+              recovery_from_phase, state, expected_authority_generation,
+              actor_member_id, idempotency_key, request_fingerprint,
+              checkpoint_sha256, batch_revision, batch_sha256, result_sha256,
+              scheduled_at, created_at, updated_at
+         FROM claudian_cloud.project_lifecycle_journals
+        WHERE project_id = $1 AND state IN ('active', 'recovery-required')
+        LIMIT 2`,
+      [this.#projectId],
+    );
+    if (rows.length > 1) stateConflict();
+    return rows[0] === undefined ? undefined : lifecycleJournal(rows[0]);
+  }
+
   async advanceLifecycleJournal(
     input: AdvanceProjectLifecycleJournalInput,
   ): Promise<PersistenceAdvanceResult> {

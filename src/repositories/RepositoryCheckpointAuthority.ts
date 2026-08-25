@@ -515,7 +515,7 @@ function withoutPublicationDigest(
 }
 
 function inactivePublication(
-  checkpoint: ValidatedRepositoryCheckpoint,
+  checkpoint: Omit<ValidatedRepositoryCheckpoint, 'bundleInputDisposition'>,
   placementGeneration: number,
   repositoryStorageKey: string,
   storageNodeId: string,

@@ -79,6 +79,9 @@ class MemoryCoordination {
           status: 'active' as const,
         }),
         getNonterminalDevelopmentBootstrapAttempt: () => Promise.resolve(undefined),
+        portability: {
+          getNonterminalLifecycleJournal: () => Promise.resolve(undefined),
+        },
         getProject: () => Promise.resolve({
           activatedAt: '2026-08-22T00:00:00.000Z',
           createdAt: '2026-08-22T00:00:00.000Z',
@@ -187,6 +190,9 @@ describe('ProjectPersonalRefAuthority', () => {
         ): Promise<T> => operation({
           findDevelopmentActorMember: () => Promise.resolve(undefined),
           findMembership: () => Promise.resolve(undefined),
+          portability: {
+            getNonterminalLifecycleJournal: () => Promise.resolve(undefined),
+          },
         } as unknown as ProjectScope),
       }),
       withProjectReadScope: <T>(
@@ -255,6 +261,9 @@ describe('ProjectPersonalRefAuthority', () => {
                   ? ({ state: 'recovery-required' } as never)
                   : undefined,
               ),
+              portability: {
+                getNonterminalLifecycleJournal: () => Promise.resolve(undefined),
+              },
               getProject: () => Promise.resolve({
                 activatedAt: '2026-08-22T00:00:00.000Z',
                 createdAt: '2026-08-22T00:00:00.000Z',
@@ -349,6 +358,9 @@ describe('ProjectPersonalRefAuthority', () => {
                 projectId,
                 state: 'collecting',
               } as never),
+              portability: {
+                getNonterminalLifecycleJournal: () => Promise.resolve(undefined),
+              },
             } as unknown as ProjectScope),
           })
         ),

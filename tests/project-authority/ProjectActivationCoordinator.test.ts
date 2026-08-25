@@ -260,6 +260,9 @@ class MemoryCoordination implements ProjectActivationCoordination {
       advanceProjectAuthorityState: () => Promise.reject(
         new CoordinationError('state-conflict'),
       ),
+      isolateProjectRecovery: () => Promise.reject(
+        new CoordinationError('state-conflict'),
+      ),
       advanceDevelopmentBootstrapActivation(input) {
         const settlement = owner.attempt.settlement;
         if (
