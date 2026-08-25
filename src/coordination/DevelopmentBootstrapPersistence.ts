@@ -236,7 +236,15 @@ export interface ExpiredDevelopmentBootstrapAttemptCatalog {
   ): Promise<ExpiredDevelopmentBootstrapAttemptPage>;
 }
 
-export type RecoveryCandidateKind = 'accept' | 'activation';
+export type RecoveryCandidateKind =
+  | 'accept'
+  | 'activation'
+  | 'authority-transfer'
+  | 'backup'
+  | 'delete'
+  | 'export'
+  | 'leave'
+  | 'retire';
 
 export interface RecoveryCandidate {
   readonly kind: RecoveryCandidateKind;

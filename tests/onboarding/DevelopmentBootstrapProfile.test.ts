@@ -226,6 +226,8 @@ implements DevelopmentBootstrapProfilePersistence, DevelopmentBootstrapProfileSc
 
   getProject(): Promise<undefined | Readonly<{
     activatedAt: string;
+    authorityGeneration: number;
+    authorityStateRevision: number;
     createdAt: string;
     expectedMainOid: string;
     managerSetGeneration: number;
@@ -235,6 +237,8 @@ implements DevelopmentBootstrapProfilePersistence, DevelopmentBootstrapProfileSc
   }>> {
     return Promise.resolve(this.activeProject ? {
       activatedAt: NOW,
+      authorityGeneration: 1,
+      authorityStateRevision: 1,
       createdAt: NOW,
       expectedMainOid: MAIN_OID,
       managerSetGeneration: 1,

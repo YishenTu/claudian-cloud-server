@@ -78,6 +78,7 @@ class MemoryCoordination implements ProjectReadAuthorityCoordination {
       findDevelopmentActorMember: actorId => Promise.resolve(
         actorId === 'member-001' ? 'member-001' : undefined,
       ),
+      findPrincipalMember: () => Promise.resolve(undefined),
       findMembership: memberId => Promise.resolve(
         members.find(member => member.memberId === memberId),
       ),
@@ -90,6 +91,8 @@ class MemoryCoordination implements ProjectReadAuthorityCoordination {
         this.state.projectAvailable
           ? {
             activatedAt: CREATED,
+            authorityGeneration: 1,
+            authorityStateRevision: 1,
             createdAt: CREATED,
             expectedMainOid: this.state.expectedMainOid,
             managerSetGeneration: 1,

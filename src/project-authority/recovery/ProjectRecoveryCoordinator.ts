@@ -31,7 +31,7 @@ function isIsolatedRecovery(error: unknown): boolean {
   );
 }
 
-function unsupportedRecoveryKind(_kind: never): never {
+function unsupportedRecoveryKind(_kind: RecoveryCandidateKind): never {
   throw new ProjectRecoveryError('dependency-failed');
 }
 

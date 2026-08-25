@@ -254,7 +254,7 @@ describe('Accept journal persistence', () => {
              FROM claudian_cloud.schema_migrations
             ORDER BY version`,
         );
-        assert.deepEqual(history.rows.at(-1), {
+        assert.deepEqual(history.rows.find(row => row.version === 5), {
           name: 'accept-recovery',
           state: 'applied',
           version: 5,

@@ -256,6 +256,10 @@ class MemoryCoordination implements ProjectActivationCoordination {
     return {
       accept: undefined as never,
       collaboration: undefined as never,
+      portability: undefined as never,
+      advanceProjectAuthorityState: () => Promise.reject(
+        new CoordinationError('state-conflict'),
+      ),
       advanceDevelopmentBootstrapActivation(input) {
         const settlement = owner.attempt.settlement;
         if (
@@ -331,6 +335,7 @@ class MemoryCoordination implements ProjectActivationCoordination {
       },
       appendProjectEvent: () => Promise.reject(new Error('unused')),
       findDevelopmentActorMember: () => Promise.resolve(undefined),
+      findPrincipalMember: () => Promise.resolve(undefined),
       findMembership: () => Promise.resolve(undefined),
       listMemberships: () => Promise.resolve([]),
       getDevelopmentBootstrapAttempt: attemptId => Promise.resolve(

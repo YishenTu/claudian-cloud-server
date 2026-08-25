@@ -87,6 +87,7 @@ describe('Collaboration persistence', () => {
           { name: 'project-read-events', state: 'applied', version: 3 },
           { name: 'collaboration', state: 'applied', version: 4 },
           { name: 'accept-recovery', state: 'applied', version: 5 },
+          { name: 'portability-lifecycle', state: 'applied', version: 6 },
         ]);
 
         const relations = [

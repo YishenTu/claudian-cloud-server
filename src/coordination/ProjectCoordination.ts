@@ -16,7 +16,11 @@ import type {
   ProjectEventPersistence,
   ProjectEventReader,
 } from './ProjectEventPersistence.js';
-import type { ProjectPersistence } from './ProjectPersistence.js';
+import type {
+  ProjectPersistence,
+  ProjectPersistenceReader,
+} from './ProjectPersistence.js';
+import type { PortabilityLifecyclePersistence } from './PortabilityLifecyclePersistence.js';
 import type { RepositoryPlacementLease } from '../repositories/RepositoryPlacement.js';
 
 export interface AcquireProjectLeaseOptions {
@@ -43,7 +47,7 @@ export interface ProjectReadScope
     'getNonterminalDevelopmentBootstrapAttempt'
   >,
   ProjectEventReader,
-  ProjectPersistence {
+  ProjectPersistenceReader {
   readonly accept: AcceptPersistenceReader;
   readonly collaboration: CollaborationReadPersistence;
   findMembership(memberId: CollabMemberId): Promise<ProjectMembershipRecord | undefined>;
@@ -57,6 +61,7 @@ export interface ProjectScope
   ProjectPersistence {
   readonly accept: AcceptPersistence;
   readonly collaboration: CollaborationProjectPersistence;
+  readonly portability: PortabilityLifecyclePersistence;
   findMembership(memberId: CollabMemberId): Promise<ProjectMembershipRecord | undefined>;
   getRepositoryPlacement(): Promise<RepositoryPlacementLease | undefined>;
   listMemberships(): Promise<readonly ProjectMembershipRecord[]>;
