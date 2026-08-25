@@ -1,8 +1,8 @@
 # Claudian Cloud Server Architecture
 
-Status: foundation and the steps 5–8 local Cloud milestone are implemented and verified; Step 9 requires exact registry consumers on both merged mainlines and a clean Gomami deployment gate.
+Status: roadmap Steps 1–10 and the mandatory pre-Step-11 gates are implemented and verified; the Step 11 portability and operational-durability contracts are accepted and ready for implementation.
 
-Last reconciled: 2026-08-24
+Last reconciled: 2026-08-25
 
 ## 1. Purpose
 
@@ -13,9 +13,7 @@ coordination state available independently of any participant device.
 This document defines the initial architecture, ownership boundaries,
 multi-Project isolation model, storage contracts, concurrency and recovery
 semantics, deployment shape, capacity target, and evolution path. It is
-decision-complete for scaffolding and the first private Cloud slice. Production
-onboarding, trusted-ingress integration, commercial policy, and Cloud-to-LAN
-migration remain separately gated where explicitly identified.
+decision-complete for the implemented private Cloud slice and the accepted Step 11 authority-transfer, terminal-lifecycle, checkpoint, restore, deletion, schema-upgrade, and capacity target. Cloud-native Project and membership administration, ordinary-user UI, and final parity remain downstream. Trusted ingress and managed commercial systems remain outside this repository.
 
 Repository-level constraints in `AGENTS.md` and the locked decisions in §3 are
 authoritative.
@@ -96,8 +94,15 @@ virtual machine or persistent container per Project.
 15. **Placement generation is an execution fence.** Every repository operation
     carries a server-derived placement lease. Stale generations and demoted
     nodes fail closed; placement is not merely routing metadata.
-16. **The local milestone has three independent version authorities.** The accepted standalone registry release is `@claudian-collab/protocol` `1.0.0` with canonical wire version `4`; Cloud binding version `1` defines its routes and capabilities. The Claudian LAN control/event binding remains independently at version `9`. No adapter infers compatibility from package SemVer alone or couples a Cloud version change to the LAN binding.
+16. **Collab has three independent version authorities.** The implemented registry baseline is `@claudian-collab/protocol@1.0.0`, canonical wire version `4`, and Cloud binding version `1`. Step 11 evolves the standalone package to major `2.0.0`, wire version `5`, and Cloud binding version `2`, while Claudian LAN Project control remains independently at version `9`. No adapter infers compatibility from package SemVer alone or couples a Cloud change to the LAN binding.
 17. **Durable phase records are singular authorities.** Activation, cancellation, client binding, and Accept each have one named journal or transition record. Membership, placement, repository directories, refs, indexes, and marker files are observations used to advance or reject that journal; none becomes a parallel phase authority.
+18. **Authority generation fences authority movement.** Existing authorities begin at generation `1`; a supported transfer activates the target at exactly `source + 1`. Pre-cutover cancellation must prove the target has not accepted relinquishment. At or after the one-way source fence, every recovery owner moves forward and the source can never become writable again.
+19. **One semantic checkpoint serves portability.** A versioned manifest, canonical logical coordination stream, and exact Git bundle share profile-specific allowlists for authority transfer, backup, and export. PostgreSQL rows, SQLite images, credentials, CA private keys, working trees, and operational refs are never the portable contract.
+20. **Transfer claims bind existing identity only.** Presence never binds another Member. The transfer target initially binds only the source or selected target Host proven by the accepted transfer; every other imported active Member remains unbound until exact claim redemption. Claims cannot authenticate ingress, issue caller credentials, create membership, select role, or move a personal ref.
+21. **Claim custody is recoverable without plaintext backup.** Cutover requires durable source custody of exactly one accepted raw claim-batch revision and exact target acknowledgement. Batch acknowledgement never scrubs. A revision may rotate only after authoritative proof that custody was not committed, and rotation atomically invalidates every older target hash. Per-Member scrubbing requires an exact target-signed redemption receipt forwarded by the same former Member. Cloud stores source-held raw claims as protected envelopes; backup contains ciphertext and public key references but no plaintext or private key.
+22. **Environment restore is not Project recovery.** Project cross-store operations use the canonical Project lease and Project recovery catalog. Clean restore into empty stores uses one private environment journal and holds global readiness closed until every Project and terminal responder verifies.
+23. **Operator access is not Project authorization.** Maintenance may resume only a deletion journal already created by Manager-authorized Retire or Cloud-to-LAN handoff. It cannot delete an active Project or create terminal intent.
+24. **Schema upgrades are forward-only.** Each migration and its applied record commit in one transaction. A previous image may restart only before schema advancement or when it explicitly supports the advanced catalog; otherwise recovery is fixed-forward or a verified clean restore.
 
 ## 4. System context and trust boundaries
 
@@ -272,11 +277,7 @@ The schema follows these rules:
 - migration and runtime database roles are separate;
 - the runtime role cannot alter schema or disable isolation policy.
 
-Before external Alpha, PostgreSQL Row-Level Security is added as defense in
-depth. Runtime transactions set a transaction-local Project context, and the
-runtime role remains subject to RLS. Migration and narrowly controlled offline
-repair roles are not used by ordinary request paths. RLS does not replace
-application authorization or composite constraints.
+PostgreSQL Row-Level Security is mandatory defense in depth in every supported profile. Runtime transactions set a transaction-local Project context, and the runtime role remains subject to RLS. Migration and narrowly controlled offline repair roles are not used by ordinary request paths. RLS does not replace application authorization or composite constraints.
 
 The RLS design distinguishes Project execution from cross-Project discovery:
 
@@ -303,7 +304,7 @@ arbitrary rows. Cross-Project metadata access has its own tests and database
 grants; it is not implemented by giving the request runtime role unrestricted
 table access.
 
-The local milestone uses one dedicated recovery-candidate catalog for activation and Accept scheduling. A row contains only operation kind, opaque Project ID, opaque operation or attempt ID, and scheduling timestamps. Runtime enumeration is keyset-paged in stable order with at most 100 rows per page and cannot expose journal payload, membership, placement, report, Request, or Ticket data. Every nonterminal journal updates its candidate in the same PostgreSQL transaction; terminal completion or cancellation removes it. A scanner must acquire the canonical Project advisory lock, enter forced-RLS Project scope, and re-read the full journal before recovery. Startup scanning improves latency, but every Project admission repeats this check under the same lock, so enumeration is never the correctness boundary. An unreadable catalog, unknown authority-volume identity, or unclassified candidate holds global readiness false; a classified `recovery-required` Project blocks only that Project.
+One dedicated recovery-candidate catalog schedules development activation, Accept, transfer, Leave, Retire, checkpoint, and deletion owners. A row contains only operation kind, opaque Project ID, opaque operation or attempt ID, and scheduling timestamps. Runtime enumeration is keyset-paged in stable order with at most 100 rows per page and cannot expose journal payload, membership, placement, report, Request, Ticket, claim, or checkpoint data. Every nonterminal Project journal updates its candidate in the same PostgreSQL transaction; terminal completion or cancellation removes it. A scanner must acquire the canonical Project advisory lock, enter forced-RLS Project scope, and re-read the full journal before dispatching the exact owner. Startup scanning improves latency, but every Project admission repeats this check under the same lock, so enumeration is never the correctness boundary. An unreadable catalog, unknown authority-volume identity, unknown operation kind, or unclassified candidate holds global readiness false; a classified `recovery-required` Project blocks only that Project.
 
 The package-owned bootstrap follow-up routes carry an opaque attempt ID but no caller-asserted Project ID. A separate minimal routing relation therefore maps one globally unique attempt ID to its Project ID. Runtime may insert that pair atomically with the scoped attempt and call one exact lookup function, but it cannot enumerate or read the relation directly. The lookup reveals no bootstrap payload and grants no admission: the caller must enter the returned Project's forced-RLS scope and re-read the exact attempt before actor and operation authorization.
 
@@ -347,13 +348,7 @@ The Git authority enforces:
 - pack, blob, tree, path, repository, process, time, and output limits;
 - cleanup of every admitted Git child on completion, cancellation, or shutdown.
 
-Before external Alpha, every operation that parses participant-controlled Git
-input runs in a short-lived process sandbox or mount namespace. It can see only
-the target repository, an operation-specific quarantine or staging area, the
-required Git binaries and runtime libraries, and an empty explicit Git
-configuration. It has no network access and receives bounded CPU, memory, PID,
-filesystem, output, and duration budgets. This is per-operation containment,
-not a persistent container or VM per Project.
+Every supported self-host operation that parses participant-controlled Git input runs in a short-lived process sandbox or mount namespace. It can see only the target repository, an operation-specific quarantine or staging area, the required Git binaries and runtime libraries, and an empty explicit Git configuration. It has no network access and receives bounded CPU, memory, PID, filesystem, output, and duration budgets. This is per-operation containment, not a persistent container or VM per Project.
 
 Receive-pack is a Project mutation and holds the Project write lease through
 its final receive decision. Incoming bytes are streamed against both a
@@ -490,9 +485,7 @@ Only boundaries with actual alternative implementations receive ports:
 - coordination transport in tests versus the production PostgreSQL service;
 - clock and ID generation for deterministic fault and idempotency tests.
 
-Git command execution remains internal to `GitRepositoryAuthority`. The
-external-Alpha sandbox and a future routed worker implement this same deep
-boundary; neither creates a second domain API or exposes filesystem paths.
+Git command execution remains internal to `GitRepositoryAuthority`. The isolated Git runner and a future routed worker implement this same deep boundary; neither creates a second domain API or exposes filesystem paths.
 
 ## 8. Protocol ownership and compatibility
 
@@ -599,10 +592,7 @@ The first two-device experiment runs under an explicit
 - the assertion header is excluded from logs and is not recognized by any
   other deployment profile.
 
-This is an intentionally insecure actor assertion inside the operator's private
-development network. The deployment operator owns endpoint access; Cloud Server
-does not authenticate these development callers. The assertion is deleted or
-disabled by construction before external Alpha.
+This is an intentionally insecure actor assertion inside the operator's private development network. The deployment operator owns endpoint access; Cloud Server does not authenticate these development callers. The assertion is not recognized by self-hosted or managed profiles and is never a production identity mechanism.
 
 The private bootstrap accepts only one active source Project with exactly two membership records total. Both records are active and correspond to distinct reporting Members; exactly one reporter is the current Host and at least one is a Manager. Pending or live invitations, pending memberships, collaboration records, nonterminal authority/lifecycle operations, undrained Project work, active Collab Git children, or mismatched local repository identity make the profile ineligible. Existing Git history is allowed, while unpublished working-tree changes, local commits, and private drafts stay local.
 
@@ -758,10 +748,7 @@ Activation has four durable phases:
 
 Cancellation is allowed only before `publish-intent` and has phases `cancel-intent`, `cancelled`, and `recovery-required`. `cancel-intent` freezes further report/upload/activation admission before deleting attempt-owned staging; `cancelled` proves those resources are absent and stores the stable result. Contradictory ownership or cleanup observations become `recovery-required`. Expiry uses the same cancellation owner and may clean only paths proven to belong to an invisible attempt. Startup settlement is followed by one lifecycle-owned periodic scanner, so the fixed attempt lifetime remains enforced while the process stays running; scans never overlap and shutdown cancels the next scan before draining an active one. Filesystem presence, absence, or a marker alone never proves activation or cancellation.
 
-This flow is not the production LAN-to-Cloud cutover protocol. Production
-freeze, proof, resumable upload, activation, rollback, redirection, and
-split-authority prevention require a separate accepted design before external
-use.
+This retained flow is development bootstrap only and is never called by production authority transfer. The accepted production LAN-to-Cloud checkpoint, source fence, claim-custody, relinquishment, activation, redirect, and recovery contract is §12.7.
 
 ### 12.5 Claudian local Cloud binding
 
@@ -773,20 +760,75 @@ Recovery resumes from the durable phase plus exact observed URL, repository iden
 
 ### 12.6 Production Project creation gate
 
-The private first slice advertises no production Project-creation operation.
-Before external Alpha, one production path is selected: Cloud-native creation
-or the complete existing-LAN onboarding handoff. Cloud-native creation remains
-the smaller candidate because it does not require an authority cutover.
+Cloud-native Project creation and ordinary invitation/Join remain Step 12. They create new Project or membership authority and are not prerequisites for Step 11 transfer, which imports an already authorized Project and exact existing memberships. Transfer claims must never be reused as ordinary invitations.
 
-The selected path must define its durable phases in the same change that brings
-the feature into the implementation sequence. A Cloud-native design must keep
-the Project invisible until initial membership, coordination state, a validated
-bare repository, and active placement generation `1` are recoverably bound. It
-must specify stable operation identity, request fingerprinting, activation
-ordering, abandoned-staging cleanup, idempotent replay, and failure recovery
-without inferring authority from directory presence. No production creation
-route or speculative creation module is scaffolded before that contract is
-accepted.
+A later Cloud-native design must keep the Project invisible until initial membership, coordination state, a validated bare repository, and active placement are recoverably bound. It must specify stable operation identity, request fingerprinting, activation ordering, abandoned-staging cleanup, idempotent replay, and failure recovery without inferring authority from directory presence.
+
+### 12.7 Step 11 portability lifecycle
+
+One Project checkpoint contains `checkpoint.json`, `coordination.ndjson`, and `repository.bundle`. The manifest binds profile, Project and operation identity, source authority kind/generation, exact sorted ref/OID inventory, expected main, artifact byte counts and SHA-256 digests, schema versions, and a canonical manifest digest. The initial ceilings are 64 KiB manifest, 256 MiB logical coordination, 1 GiB bundle, and 2 GiB staging reservation. Every stream is counted, digested, admitted, timed, cancellable, and cleanup-owned.
+
+The portable coordination vocabulary contains Project identity, collaboration history, membership facts and roles, Requests, comments, Tickets, relations, mentions, stable IDs, revisions, and timestamps. It contains no SQL/SQLite representation, storage path, endpoint, ingress credential, LAN credential, invitation secret, CA private key, deployment secret, working tree, unpublished local state, cache, or operational journal. Transfer and export use the portable allowlist. Backup additionally includes Cloud operational continuity, terminal responders, protected claim envelopes, event/idempotency state, placement facts, tombstones, schema/build compatibility, and the authority-volume pair identity.
+
+LAN-to-Cloud advances through:
+
+| Phase | Durable authority meaning |
+| --- | --- |
+| `collecting-readiness` | An unused Project/transfer identity, exact target, source identity, requester, Host acceptance, and expiry are durable; LAN remains active and cancellation is allowed. |
+| `source-quiesced` | LAN has drained and persistently fenced its write lane and every conflicting lifecycle owner; cancellation requires Cloud proof that relinquishment was not accepted. |
+| `checkpoint-received` | Exact bounded source-signed artifacts are durable in isolated Cloud staging. |
+| `checkpoint-validated` | Logical state, source trust, membership, limits, and Git refs/objects pass; target-native coordination, repository, Host proof, and non-Host claim hashes are inert. |
+| `claims-retained` | The source Host durably holds the raw non-Host claim batch and Cloud durably returns the same receipt for the exact Host/transfer/intent/revision/digest after response loss or restart; revision or digest drift fails stale and an acknowledged batch is never rotated. |
+| `repository-published` | The verified repository is atomically published at an inactive placement; ordinary Project admission remains absent. |
+| `source-relinquished` | Cloud has verified the LAN Host's one-way certificate for the exact target, checkpoint, claim batch, and source generation; cancellation and LAN reopen are forbidden. |
+| `cloud-activated` | One Project transaction activates exact membership and placement at `source generation + 1`, binds only the source Host principal, persists claims/result/events, and settles recovery. |
+| `completed` | Attempt staging is removed while the former LAN authority retains only the authenticated terminal status and non-Host claim responder for at most 30 days. |
+
+Cloud-to-LAN advances through:
+
+| Phase | Durable authority meaning |
+| --- | --- |
+| `collecting-readiness` | Manager intent, selected active target Host, target acceptance, provisional LAN authority public proof, source generation, and expiry are durable; Cloud remains active. |
+| `cloud-quiesced` | Cloud has drained and fenced the Project write lane and every conflicting journal. |
+| `checkpoint-captured` | Cloud has captured and verified the exact portable checkpoint. |
+| `target-staged` | The selected target has imported inert LAN-native state, verified Git, bound only its own locally generated credential, installed exactly one current revision of non-Host claim hashes, and reported the exact stage/revision/batch digest. |
+| `claims-retained` | Cloud has sealed and durably retained the raw non-Host claims for the exact current revision/digest and returned the replayable custody receipt; an acknowledged revision is never rotated. |
+| `cloud-relinquished` | Cloud has denied active admission and committed the replayable one-way handoff result; Cloud can never reopen this generation. |
+| `lan-activated` | The target has observed exact Cloud relinquishment and atomically activated LAN at `source generation + 1`. |
+| `completed` | One Project transaction makes the transfer result terminal and creates the authorized deletion journal already at `traffic-denied`; the authenticated terminal responder, protected unclaimed claims, and tombstone remain for at most 30 days while deletion recovery proceeds independently. |
+
+Each transfer has one monotonic `claimBatchRevision`, beginning at `1`, bound to Project, transfer, checkpoint, target generation, complete Member set, and batch digest. A party missing the custody response must first replay or query the exact revision/digest. If custody committed, the exact same receipt is returned through restart and rotation is forbidden. Only an authoritative target/source response proving that revision was not committed permits the batch generator to increment the revision. That target transaction atomically replaces every unredeemed claim hash, records permanent invalidation of all older revisions, and binds the new complete digest; the source replaces any uncommitted raw candidate before acknowledging. Delayed reports, batches, acknowledgements, claims, or receipts for an older revision fail stale. Timeout, disconnect, or missing local state alone never permits rotation. Fault recovery and reordering therefore leave at most one redeemable batch revision.
+
+Before either source-relinquishment phase, both directions cancel through the same semantic settlement:
+
+| Phase | Durable authority meaning |
+| --- | --- |
+| `cancel-intent` | The source records cancellation while remaining active or quiesced at its existing generation, freezes further transfer progress, and requests exact target invalidation; source writes cannot reopen from quiescence yet. |
+| `target-invalidated` | The target durably proves it has not accepted source relinquishment and fences the exact transfer/checkpoint/generation so delayed messages can never activate it. An unreachable, contradictory, or ambiguous target leaves cancellation pending and the source fenced. |
+| `target-cleaned` | The target removes only exact attempt-owned logical state, claim hashes, artifact staging, and inactive repository placement under the invalidation proof; source-held raw claims are marked unusable. |
+| `source-reopened` | The source verifies the exact target invalidation/cleanup result, scrubs its cancelled claim batch, clears only this transfer fence, and resumes the same source generation with already-settled invitation/Join state. |
+| `cancelled` | The stable terminal cancellation result is replayable and recovery candidates plus remaining attempt-only state are removed. |
+
+Cancellation may start after any pre-relinquishment transfer phase, including after claim custody or inactive repository publication. No directory absence, disconnect, timeout, or unverified remote response permits source reopen. At or after `source-relinquished` or `cloud-relinquished`, cancellation is rejected and every source/target recovery path moves forward to target activation, terminal response, and any authorized deletion handoff.
+
+Socket presence and events are latency hints, never consent or identity proof. LAN-to-Cloud activation binds only the source Host through source proof. Cloud-to-LAN staging binds only the selected target Host. Every other active Member remains imported and unbound. The old authority authenticates a former Member and returns only that Member's retained opaque claim. Cloud redemption binds the exact accepted ingress principal; LAN redemption binds the claimant's already persisted client-generated credential hash. Exact retries return the same target-signed receipt. The same former Member forwards that receipt through the old binding; only that receipt or expiry scrubs the source-held claim. Batch custody acknowledgement never scrubs.
+
+Leave settlement advances `prepared -> membership-left -> personal-ref-removed -> completed`. The membership transaction revokes ordinary admission/principal mapping, discards the open Request according to LAN parity, removes structured mentions, emits the redacted event, and atomically creates one bounded former-principal replay record bound to exact trusted principal, Project, Member, Leave intent/fingerprint, and journal. That record permits only recovery and replay of this Leave; it grants no Project read, write, Git, event, role, or membership authority. Repository Authority then removes only the exact expected-OID personal ref, and completion stores the stable terminal result in the same replay record for 30 days. A lost response at any phase lets only that accepted former principal reacquire the canonical Project lane, finish recovery, and receive the exact result; unrelated principals and changed fingerprints fail closed. Last-Manager Leave fails with `manager-succession-required`; the public succession-aware operation remains Step 12.
+
+Manager-authorized Retire uses one Project transaction to persist the terminal response, former-principal acknowledgement map, expiry, content-free tombstone shell, terminal Retire result, service state `deleting`, and a deletion journal already at `traffic-denied`. Cloud-to-LAN uses the same atomic journal handoff when the transfer becomes `completed`. In either path the source operation is terminal before deletion is the sole nonterminal recovery candidate; there is no crash gap and no Project has two nonterminal journals.
+
+Generic deletion advances through:
+
+| Phase | Durable authority meaning |
+| --- | --- |
+| `traffic-denied` | Ordinary control, Git, event, and maintenance admission is closed; the authorized source operation is terminal; the deletion journal/candidate, terminal result/responder, acknowledgement map and expiry, protected unclaimed claims where applicable, and content-free tombstone shell are durable in the minimal non-content coordination partition. |
+| `repository-delete-intent` | Exact Project, placement/storage identity and generation, repository identity, deletion reason, and expected state are frozen before Repository Authority may detach or remove anything. |
+| `repository-removed` | Repository Authority has removed only that exact repository. Missing-after-intent is replay success; absence or mismatch before intent is never authorization or proof. |
+| `coordination-removed` | Project content, memberships, principal mappings, placements, and superseded operational rows are removed. The same deletion journal and recovery-candidate row, terminal responder/result, acknowledgement map, protected unclaimed claims, and tombstone shell remain addressable by the same Project ID, lock key, forced-RLS context, and mixed dispatcher. |
+| `tombstoned` | Phase CAS verifies repository and Project content absence, seals the existing tombstone shell with the exact terminal result digest, and proves only the allowlisted non-content continuity rows remain. It does not create a second tombstone or catalog. |
+| `completed` | The deletion journal is terminal and exact replayable result remains; the recovery candidate is removed. The responder/acknowledgement/claim rows expire after all acknowledgements or 30 days, while the minimum tombstone and terminal journal identity remain. |
+
+The minimal non-content partition is part of the one coordination contract, not a second recovery registry. Operator `resume-delete` can continue only the exact nonterminal journal identity/digest and returns the same result when it is terminal; it cannot create deletion intent. Process death after any phase, including immediately after `coordination-removed`, re-enters the same Project lock and journal and never restores active state.
 
 ## 13. Project service and storage lifecycle
 
@@ -800,16 +842,10 @@ future transition in the first slice:
 - `recovery-required`: reads allowed only where correctness can be proven;
   affected writes fail closed;
 - `deleting`: idempotent deletion journal owns progress;
-- `deleted`: only the minimum non-content tombstone remains.
+- `deleted`: Project content and repository are absent; only the allowlisted non-content tombstone and terminal journal/result remain, plus a time-bounded responder/acknowledgement/claim set where the terminal lifecycle requires it.
 
 Onboarding staging is not a Project authority state and cannot serve traffic.
 A Project becomes durable only after activation.
-
-Subscription loss changes a managed Project to `read-only-transition`; it does
-not immediately delete data. Restoration of sponsorship restores the same
-Project in place before the deadline. Expiry begins a separate deletion
-transaction. Cloud-to-LAN handoff remains a distinct authority transfer and
-must complete before Cloud canonical writes stop or deletion begins.
 
 Participant Leave, Project-wide Retire, managed-service deletion, and
 Cloud-to-LAN handoff are four separate lifecycle operations:
@@ -823,14 +859,7 @@ Cloud-to-LAN handoff are four separate lifecycle operations:
 - Cloud-to-LAN handoff transfers canonical authority and is not an export or
   deletion shortcut.
 
-The first private Cloud slice advertises none of the Cloud Leave, Retire, or
-authority-handoff mutations. Their Cloud protocol and recovery semantics remain
-deferred. In particular, the LAN `retireProject` operation, terminal responder,
-Host acknowledgement behavior, and Host-transfer semantics are not reused as
-Cloud bindings. Before an external milestone enables membership administration,
-Cloud Leave and last-Manager succession must have an accepted contract. No
-user-visible Cloud Retire endpoint is exposed until terminal distribution,
-acknowledgement, retention, and cleanup behavior is decided.
+Step 11 implements authority transfer, internal Leave settlement, Manager-authorized Retire, terminal response, and generic deletion under the lifecycle contracts in §12.7. It does not reuse the physical LAN `HostTransferPackage` or make LAN retirement routes into Cloud routes. Leave is not advertised as a public Step 11 capability because last-Manager succession and ordinary membership administration remain Step 12. Claudian ordinary-user entry remains Step 13.
 
 ## 14. Resource isolation and quotas
 
@@ -859,7 +888,7 @@ route constants.
 
 ## 15. Virtualization and deployment evolution
 
-### 15.1 Private development and early Alpha
+### 15.1 Private development and supported self-host
 
 ```text
 Primary host
@@ -879,35 +908,11 @@ Isolation requirements:
 - Ops has no repository mount;
 - off-host backup material and recovery instructions survive total host loss.
 
-### 15.2 External Alpha hardening
+### 15.2 Supported self-host hardening
 
-Before external participants upload Project data:
+The deployment operator owns TLS, endpoint reachability, caller authentication, credential issuance and validation, and the trusted-ingress principal boundary. A supported self-host deployment maps that operator-protected entry to the loopback Cloud service and preserves direct-backend isolation; Cloud Server does not implement a second ingress or Account system.
 
-- integrate with a production trusted ingress that owns Account/device
-  authentication and constructs the accepted `IngressPrincipal` outside Cloud
-  Server;
-- define stable opaque mappings among Account, device, Project, membership,
-  protocol actor, and repository identity;
-- provide at least one production-safe Project authority creation path:
-  ingress-authorized Cloud-native creation or the complete existing-LAN
-  onboarding handoff;
-- if existing LAN Projects enter scope, implement paid-active-member
-  authorization, one-time upload authority, freeze and checkpoint proof,
-  resumable staging, activation, rollback, client redirection, and
-  split-authority prevention;
-- require the deployment operator to place TLS, entry access, and request
-  protection at the supported external ingress boundary;
-- apply database runtime roles and RLS;
-- run participant-controlled Git parsing in a short-lived target-repository-only
-  sandbox, with an operation quarantine and OS/container CPU, memory, PID,
-  filesystem, output, duration, and network-denial policies;
-- enforce streamed Project and global byte reservations plus quarantine and
-  projected reachable-repository quotas at the final receive boundary;
-- make the container root filesystem read-only except for explicit repository
-  and staging mounts;
-- complete security, privacy, logging, retention, deletion, backup, restore,
-  and operator-access claims;
-- prove cross-Project isolation and verified restoration.
+Cloud Server owns runtime roles and RLS, target-repository-only Git execution, streamed Project and global reservations, quarantine and reachable-repository quotas, read-only container filesystems except explicit state mounts, safe telemetry, lifecycle recovery, verified application backup and restore, exact deletion, and cross-Project isolation. Authority transfer is admitted only after its checkpoint, source-fence, target-generation, and restart proofs pass. These data-plane guarantees are identical behind private Tailscale access and any operator-selected ingress.
 
 Containers reduce deployment and process blast radius but are not treated as
 cryptographic tenant isolation.
@@ -942,7 +947,7 @@ Two placements never independently accept canonical writes.
 
 Per-Project VMs, persistent per-Project containers, Kubernetes, Redis,
 active-active Git, and distributed consensus are not initial requirements. The
-short-lived external-Alpha Git sandbox is an internal execution control and
+short-lived Git sandbox is an internal execution control and
 does not change the Project deployment model.
 
 ## 16. Capacity model and staged targets
@@ -1117,40 +1122,22 @@ reserves approximately two to three times live data for incremental or
 deduplicated off-host history and replaces that factor with observed change
 rates. Full independent copies at every interval are not assumed.
 
-A backup record identifies:
+A backup record binds the database schema/build catalog, authority-volume identity, exact Project checkpoint inventory, Project authority and placement generations, lifecycle and terminal-responder continuity, protected claim-envelope inventory, tombstones, artifact digests, capture time, verification status, and retention class. It never contains raw claim plaintext, private receipt keys, or the claim-custody keyring.
 
-- database backup identity and schema version;
-- repository backup identity and placement generation;
-- exact Project refs or checkpoint manifest required for validation;
-- capture time, verification status, and retention class.
+Cross-store backup does not claim impossible atomicity. For every changed Project, the maintenance command acquires the canonical Project write lease, resolves non-terminal journals, durably enters maintenance, captures the logical coordination snapshot in one repeatable transaction, captures the exact allowed Git refs and self-contained bundle while writes remain fenced, verifies the common manifest and both artifacts, publishes the immutable local checkpoint/catalog record, and reopens the Project. PostgreSQL transactions are not held during Git capture. Failed or cancelled attempts never publish a complete checkpoint and recovery cleans or resumes only exact operation-owned staging.
 
-Cross-store backup does not claim impossible atomicity. The first supported
-application backup uses a Project-scoped quiesced checkpoint:
+Backup and export use one profile-bound Project checkpoint journal:
 
-1. acquire the Project write lease and resolve every non-terminal journal;
-2. durably enter a backup maintenance operation that blocks new Project writes;
-3. export the Project's coordination state and record its schema version,
-   generation, and checksum in a short PostgreSQL transaction;
-4. capture exact Git refs and reachable objects while the same write lease
-   remains held;
-5. verify the repository artifact and write one manifest binding the
-   coordination export, placement generation, refs, objects, and checksums;
-6. durably mark the local checkpoint captured, reopen Project writes, and
-   release the write lease;
-7. transfer the encrypted artifact off-host, verify its remote identity and
-   checksum, then mark the backup record complete.
+| Phase | Durable authority meaning |
+| --- | --- |
+| `prepared` | Project, operation, profile, authority/placement generation, expected service state, staging reservation, and manifest version are frozen; maintenance state fences new writes and every earlier journal is terminal. |
+| `coordination-captured` | The exact canonical logical stream and its schema/version/digest facts are durable in operation-owned staging. |
+| `repository-captured` | The exact allowed ref/OID inventory and self-contained Git bundle from the same fenced generation are durable. |
+| `checkpoint-verified` | Both artifacts, canonical manifest, limits, digests, ref reachability, portable trees, and strict Git integrity pass. |
+| `artifact-published` | Backup has atomically published an immutable local checkpoint/catalog entry, or export has published one bounded operation-owned delivery artifact; Project writes remain fenced while recovery becomes forward-only. |
+| `completed` | Capture staging is removed and one Project transaction clears maintenance, terminalizes the journal, removes its recovery candidate, and reopens writes. The immutable backup checkpoint or bounded export-delivery artifact remains under its distinct catalog/TTL owner. |
 
-The service does not hold a PostgreSQL transaction open during the Git capture.
-The durable maintenance operation and Project write lease preserve the
-checkpoint. Failed attempts do not publish a complete backup record and are
-cleaned or resumed idempotently.
-
-Before backup implementation begins, the same change must define the exact
-durable phases, side effects, cleanup ownership, and recovery observations for
-coordination capture, repository capture, checkpoint publication, off-host
-transfer, and verification. The high-level sequence above constrains that
-design but does not predeclare persistence state names before the selected
-storage mechanism is known.
+Before `artifact-published`, cancellation advances through `cancel-intent -> cancelled`: `cancel-intent` freezes capture/delivery, exact operation-owned staging is removed, maintenance state is cleared, and writes reopen only after cleanup is proven. Contradictory ownership or ambiguous cleanup becomes `recovery-required`. At or after `artifact-published`, Project recovery completes forward through `completed` before new writes. Export streaming or operator-path delivery begins only from the terminal cataloged artifact; disconnect, success, cancellation, and TTL cleanup belong to that non-authoritative artifact owner and cannot affect Project authority or canonical storage.
 
 Backup scheduling prioritizes Projects changed since their newest verified
 checkpoint and runs a bounded number of different Projects concurrently. All
@@ -1162,30 +1149,15 @@ retries rather than silently blocking Project writes. Repeated misses require
 incremental, deduplicated, or snapshot-capable storage before advancing the
 stage.
 
-The completed manifest binds one Project ID, backup operation ID, coordination
-schema version and generation, proof that no earlier non-terminal journal
-remained at the checkpoint, repository placement generation, the complete
-captured ref/OID set, repository artifact checksum, coordination export
-checksum, and completion timestamp. Restore rejects a package when any bound
-value is missing, mismatched, or references unreachable Git objects.
+The common manifest is the §12.7 semantic checkpoint with the `backup` profile. An environment backup catalog additionally binds every Project checkpoint, schema/build compatibility, database/volume pair identity, and operator-verifiable completion. A backup becomes verified only after an isolated clean restore opens every live protected claim envelope using the separately supplied keyring, passes database and Git integrity, and completes representative Project plus terminal-responder reads. Operator scheduling, whole-artifact encryption, off-host transport, destination, retention, and key distribution remain outside runtime.
 
-Verification restores into a clean environment, validates database integrity,
-runs Git repository integrity checks, confirms required refs and reachable
-objects, and exercises a representative Project read.
+Export invokes the same checkpoint coordinator with the `export` profile. It contains only the portable Project repository and coordination records, excludes Cloud operational continuity and credentials, and never deletes or transfers the authority. Capture briefly fences writes through checkpoint completion; the separate bounded delivery artifact is removed after successful delivery, delivery cancellation, or expiry.
 
-Export produces an explicit Project package containing the repository and the
-portable coordination records required by the product contract. It excludes
-credentials, entitlement projections, operational metadata, and private
-Control Plane state.
+Clean restore is supported only with Cloud Server stopped, readiness closed, an empty PostgreSQL target, and an empty authority volume. `EnvironmentRestoreCoordinator`, not Project recovery, owns the private database/volume-paired journal `validated -> database-created -> coordination-imported -> repositories-staged -> pair-prepared -> repositories-published -> authority-published -> verified -> completed`. It validates the full catalog before creating target state, imports every Project without admission, increments restored placement generations, preserves event/idempotency and terminal continuity, and verifies exact refs/objects plus representative reads before readiness opens. Before `authority-published`, unambiguous failure may remove only exact restore-owned state. At or after publication, recovery is forward-only. The operator must independently fence the old authority before directing ingress to the restored environment.
 
-Deletion is a separate idempotent journaled operation. Participant-local copies
-are never deleted by Cloud. Before deletion is enabled, its implementation
-change must define a durable phase table covering traffic denial, retention
-decision, repository and coordination removal order, minimum non-content
-tombstone creation, retry, and cleanup. Partial deletion never returns a
-Project to active, recreates a missing repository, infers success from an absent
-directory, or loses the evidence needed for idempotent replay. Unreconciled
-state remains non-admissible and requires recovery.
+The deployment operator mounts the claim-custody encryption and receipt-signing keyring read-only at `/run/secrets/claudian_claim_custody_keyring`, owned by runtime UID/GID `10001:10001` with exact mode `0400`. Server, `backup`, `verify-backup`, `restore`, and `verify-authority` profiles receive the mount while remaining unprivileged; migration, export, `resume-delete`, and unrelated profiles do not. Preflight rejects symlinks, non-regular files, wrong ownership/mode, malformed or missing keys, and reports only a sanitized code. Referenced historical keys remain available out of band with the backup.
+
+Deletion is the idempotent journal in §12.7. Participant-local copies are never deleted by Cloud. Partial deletion never restores active admission, recreates a removed repository, infers authorization from path absence, or loses replay evidence. Operator `resume-delete` must present the exact identity and digest of an existing Manager-authorized Retire or Cloud-to-LAN deletion journal; operator access cannot create terminal intent.
 
 ## 19. Lifecycle and shutdown
 
@@ -1194,24 +1166,23 @@ state remains non-admissible and requires recovery.
 1. decode and validate configuration without logging secrets;
 2. enforce deployment-profile safety constraints;
 3. initialize safe logging and process-level failure handling;
-4. connect with the runtime PostgreSQL role and verify schema compatibility;
-5. verify repository root ownership, containment, capacity, Git version, and
+4. validate the exact claim-custody keyring path, type, owner, mode, and referenced keys when the selected profile serves protected claims;
+5. connect with the runtime PostgreSQL role, verify the declared schema interval, and reconcile the database/authority-volume identity;
+6. recover or reject the private environment-restore journal while global readiness remains closed;
+7. verify repository root ownership, containment, capacity, Git version, and
    required capabilities;
-6. inspect and schedule durable operation recovery;
-7. mark only unreconciled Projects as recovery-required when isolation is safe;
-8. enumerate the bounded active-placement catalog, re-enter each Project under its canonical lock, and verify live Git integrity plus exact main and Member refs;
-9. start HTTP admission and publish readiness.
+8. inspect and schedule Project-scoped durable operation recovery;
+9. mark only unreconciled Projects as recovery-required when isolation is safe;
+10. enumerate the bounded active-placement and terminal-responder catalogs, re-enter each Project under its canonical lock, and verify authority generation, live Git integrity, exact allowed refs, tombstones, and protected-claim continuity;
+11. start HTTP admission and publish readiness.
 
-Production schema migration is a separate command using a migration role.
-Application startup verifies the schema and fails closed on unsupported
-versions rather than silently applying privileged migrations.
+Production schema migration is a separate one-shot command using the migration role and one global advisory lock. Each checksum-pinned migration body plus applied record commits in one transaction; gaps, drift, unsupported versions, and nontransactional statements fail closed. The supported deployment sequence verifies the candidate, drains and stops runtime, verifies a pre-upgrade backup, preflights compatibility, migrates once, starts the candidate, and waits for recovery/integrity/readiness. Previous-image restart is permitted only before schema advancement or when that image explicitly supports the advanced catalog; otherwise recovery is fixed-forward or a verified clean restore.
 
 ### 19.2 Shutdown
 
 1. mark readiness false;
 2. stop new control, Git, event, and onboarding admission;
-3. close event subscription admission and notify clients to reconnect where
-   possible;
+3. close event subscription, transfer-stream, terminal, and maintenance admission and notify clients to reconnect where possible;
 4. abort bounded reads and allow admitted writes with possible durable progress
    to settle within the shutdown budget;
 5. terminate remaining Git children, escalating after a deadline;
@@ -1289,20 +1260,9 @@ Ticket numbers, descriptions, and Member names, then prove:
 
 ### 20.5 Cross-store fault injection
 
-Every implemented cross-store workflow injects process failure after each of
-its documented durable phases. The first slice covers Publish, Accept, and
-development onboarding activation. Cloud-native creation, placement migration,
-backup, and deletion join this gate only when their decision-complete phase
-contracts enter the implementation sequence. Restart must either finish the
-exact operation, return its idempotent result, clean invisible staging where
-the accepted phase permits, or isolate the Project as recovery-required. No
-test may infer completion from a missing file or an absent response.
+Every implemented cross-store workflow injects process failure after each documented durable phase. Step 11 adds LAN-to-Cloud, Cloud-to-LAN, Leave ref settlement, Retire/deletion, backup/export checkpointing, and clean environment restore to the existing Publish, Accept, and development-activation lanes. Restart must finish the exact forward path, return its idempotent result, clean exact invisible staging only where the accepted phase permits, or isolate the Project/environment with readiness closed. No test may infer completion, authorization, or identity from a missing file or absent response.
 
-A two-process recovery test kills process A after each durable phase and lets
-process B immediately request another Project write. Process B must acquire the
-write lock, recover or isolate the prior operation, and never admit the new
-write past a non-terminal journal. Accept tests additionally prove that
-protected main cannot move before the exact result OID is durable.
+A two-process recovery test kills process A after each Project phase and lets process B request another write. Process B must acquire the canonical lock, recover or isolate the prior operation, and never admit the new write past a non-terminal journal. Transfer tests additionally prove source generation can never reopen after relinquishment, batch custody acknowledgement cannot scrub, exact redemption receipt forwarding can scrub only one former Member's source claim, and neither direction creates two writers. Environment-restore tests use empty multi-Project stores, kill after every environment phase, and prove database/volume pair ambiguity keeps global readiness closed.
 
 ### 20.6 Capacity and restore gates
 
@@ -1314,8 +1274,8 @@ protected main cannot move before the exact result OID is durable.
 - exercise the configured control, PostgreSQL transaction, pinned lease,
   recovery-reserve, Git, and event limits without connection starvation;
 - replay the B-test and Post-Beta reconnect storms with jittered clients;
-- restore PostgreSQL and repositories into a clean environment;
-- verify Git integrity and representative control reads after restore;
+- restore PostgreSQL and repositories into a clean environment through the private environment journal;
+- verify Git integrity, event/idempotency continuity, protected claim redemption, terminal response, and representative control reads after restore;
 - meet the staged RPO, RTO, volume, and quiescence objectives in §18;
 - record latency and admission rejection against the provisional §16 gates and
   revise configuration when measurement disproves an assumption.
@@ -1333,7 +1293,9 @@ Shipped-entry tests also prove:
 - membership revocation prevents every ingress context resolving through that
   membership, and a role change affects the next authorization check while
   deterministic same-intent replay remains available where policy permits;
-- transport disconnect and forced shutdown eventually reap every Git child.
+- transport disconnect and forced shutdown eventually reap every Git child and checkpoint stream;
+- `resume-delete` rejects active Projects and any request without the exact existing Project-authorized deletion journal;
+- schema crash tests cover before, during, and after advancement and never restart an incompatible previous image.
 
 ## 21. Completed local sequence and remaining rollout
 
@@ -1352,19 +1314,16 @@ The local milestone followed this critical path:
 7. implement Accept with durable cross-store recovery and fault injection;
 8. prove the complete Claudian-to-Cloud localhost scenario.
 
-After that milestone, the protocol ownership migration is a separate sequence: publish the canonical protocol from the standalone `claudian-collab-protocol` repository, then move both consumers to its exact registry version. This is a mandatory pre-Step-9 release gate, not a roadmap step. The remaining roadmap sequence is:
+After that milestone, the protocol ownership migration published the canonical package from the standalone `claudian-collab-protocol` repository and moved both consumers to exact `@claudian-collab/protocol@1.0.0`. The private Gomami proof then completed roadmap Step 9, including the real two-Mac gate, and the private multi-Project hardening completed Step 10. External-user rollout, managed Account systems, and operator authentication implementation are outside this project's roadmap.
 
-9. prove the two-device private-ingress scenario on Gomami;
-10. select, make decision-complete, and implement at least one production
-    Project creation path; define the trusted-ingress principal contract and
-    stable Account/device/Project/membership identity, idempotency, and audit
-    mappings; remove the development actor assertion from every external
-    profile; and integrate the external-Alpha trusted ingress, Project
-    authorization, RLS, target-repository-only Git sandbox, streamed quota,
-    backup, restore, retention, deletion, and operator-access gates before
-    accepting external Project data;
-11. when existing LAN Projects enter scope, complete the production authority
-    handoff before enabling their onboarding.
+Before Step 11, one mandatory readiness gate repairs the production Obsidian Cloud HTTP path and converges Project Management ownership. Claudian must use a CORS-independent desktop transport behind its Cloud adapter instead of requiring the Cloud Server or operator ingress to grant browser-origin access. Transport-neutral Project-management names, DTOs, codecs, safe errors, limits, capability identifiers, and fixtures belong to the standalone protocol package; Claudian owns one authority-neutral application port with LAN and Cloud adapters; each authority retains its state, authorization, credentials, routes, and durable lifecycle execution.
+
+The remaining numbered roadmap sequence is:
+
+11. implement supported LAN-to-Cloud and Cloud-to-LAN authority transfer, Cloud Leave and Retire authority semantics, upgrade and schema migration, backup, verified clean restore, export, deletion, and measured capacity;
+12. implement Cloud-native Project creation, invitation, Join, post-activation membership, role administration, last-Manager succession, personal-ref establishment, and ordinary Leave;
+13. expose the accepted Cloud lifecycle through Claudian's capability-gated ordinary-user UI and recovery paths; and
+14. prove complete LAN/Cloud semantic parity and the reproducible self-host delivery with the production Claudian UI and retained two-Mac Gomami environment.
 
 Each phase exits only when its interface-level and real integration tests pass.
 Later phases do not bypass missing recovery or isolation from earlier phases.
@@ -1373,11 +1332,11 @@ Later phases do not bypass missing recovery or isolation from earlier phases.
 
 The local milestone advanced through six ordered proof gates: `G5` bootstrap and persistent activation; `G6R` snapshot, events, upload-pack, and two-client binding; `G6W` personal-ref receive-pack; `G7` Requests, Tickets, comments, and Publish; `G8A` deterministic Accept and server recovery; and `GI` complete localhost integration. A changed contract, phase, owner, or capability reopens its gate and every dependent gate.
 
-The completed local-milestone merge order was: the original shared protocol producer in Claudian; Cloud foundation; the original Cloud protocol consumer; Cloud bootstrap; Claudian bootstrap; Cloud read plane; Claudian read/binding; Cloud personal write; Cloud collaboration; Claudian Publish; Cloud Accept; and Claudian final integration. After `GI`, the separate ownership migration published the standalone protocol release and converted Claudian and Cloud into exact registry consumers. Step 9 cannot begin until those consumer migrations are present on both merged mainlines. Every branch starts from the latest merged `origin/main`; neither consumer uses unmerged protocol source, and capability advertisement occurs only after the complete server path and its gate evidence exist.
+The completed local-milestone merge order was: the original shared protocol producer in Claudian; Cloud foundation; the original Cloud protocol consumer; Cloud bootstrap; Claudian bootstrap; Cloud read plane; Claudian read/binding; Cloud personal write; Cloud collaboration; Claudian Publish; Cloud Accept; and Claudian final integration. After `GI`, the separate ownership migration published the standalone protocol release and converted Claudian and Cloud into exact registry consumers. Steps 9 and 10 then passed on the merged exact consumers. Every future branch starts from the latest merged `origin/main`; neither consumer uses unmerged protocol source, and capability advertisement occurs only after the complete authority path and its gate evidence exist.
 
-Schema evolution is one serial, checksum-verified lane: `0002_development_bootstrap.sql`, `0003_project_read_events.sql`, `0004_collaboration.sql`, then `0005_accept_recovery.sql`. The task that introduces each migration also owns its checksum/schema registry entry, least-privilege grants, forced-RLS policy, and real PostgreSQL evidence. Gates freeze that ordered catalog; they do not become a second migration owner.
+Schema evolution is one serial, checksum-verified lane: `0002_development_bootstrap.sql`, `0003_project_read_events.sql`, `0004_collaboration.sql`, `0005_accept_recovery.sql`, then Step 11 `0006_portability_lifecycle.sql`. The task that introduces each migration also owns its checksum/schema registry entry, least-privilege grants, forced-RLS policy, and real PostgreSQL evidence. Gates freeze that ordered catalog; they do not become a second migration owner.
 
-Shared contract files, compatibility policy, and releases belong to the standalone protocol repository. Claudian and Cloud own their consumer package manifests and lockfiles; no later transport tranche edits those manifests opportunistically. The published `@claudian-collab/protocol` `1.0.0` registry artifact and lockfile integrity replace every local source, alias, or vendored-tarball path before the first Gomami deployment.
+Shared contract files, compatibility policy, and releases belong to the standalone protocol repository. Claudian and Cloud own their consumer package manifests and lockfiles; no later transport tranche edits those manifests opportunistically. Published `1.0.0` remains the implemented baseline. Step 11 is producer-first: publish and independently verify exact `@claudian-collab/protocol@2.0.0` with wire v5 and Cloud binding v2 before either consumer pins it, and advertise each new capability only after its complete server and client path passes.
 
 ## 22. Explicit non-goals
 
@@ -1396,55 +1355,33 @@ Shared contract files, compatibility policy, and releases belong to the standalo
 - synchronous payment-provider or Control Plane calls on ordinary collaboration
   traffic;
 - treating infrastructure snapshots as verified application backups;
-- production LAN-to-Cloud or Cloud-to-LAN cutover without a separately accepted
-  authority-handoff protocol.
+- authority movement without the accepted checkpoint, generation fence,
+  relinquishment, claim-custody, and target-activation contracts.
 
 ## 23. Risks and mitigations
 
 | Risk | Mitigation |
 | --- | --- |
 | Cross-Project data leak from a missing filter | Project-scoped repositories, composite keys, RLS, two-Project escape tests |
-| Split authority between LAN and Cloud | Manual LAN stop in private development; production cutover blocked on a complete handoff protocol |
+| Split authority between LAN and Cloud | Source quiescence, one-way relinquishment, exact `source + 1` target generation, forward-only recovery, and fault injection after every durable phase |
 | PostgreSQL/Git partial completion | Stable idempotency, expected OIDs, durable journals, Project write leases, restart fault injection |
 | One Project monopolizes resources | Per-Project and global Git admission, bounded queues, quotas, timeouts, disk guards |
 | Repository path escape | Opaque storage keys, placement-only lookup, real-path containment, no symlink roots |
-| Git child compromise or runaway load | Unprivileged service, controlled environment, process limits, external-Alpha sandbox hardening |
+| Git child compromise or runaway load | Unprivileged service, controlled environment, process limits, target-repository sandboxing, and streamed quotas |
 | Control Plane outage blocks collaboration | Local membership and monotonic entitlement projections; ordinary traffic has no synchronous dependency |
 | Direct backend access or forged ingress identity | Operator-owned ingress is the only supported external path; production deployment verification proves backend isolation and identity-channel protection |
 | Single-node loss | Encrypted off-host backup, external recovery material, verified clean-environment restore |
 | Scaling creates multiple Git writers | Placement leases and generations, required old-node fencing, Project write lease, CAS refs, and a fault-injected migration contract before enablement |
 | Protocol drift between client and server | One versioned executable contract package and cross-repository contract fixtures |
 | Telemetry leaks Project data | Explicit safe serializers, redaction tests, no bodies/content/credentials in logs or process arguments |
-| Capacity estimate is mistaken | Alpha metrics, bounded admission, load tests, storage headroom, vertical scaling before sharding |
+| Capacity estimate is mistaken | Isolated workload metrics, bounded admission, load tests, storage headroom, vertical scaling before sharding |
 
 ## 24. Blocking status
 
-The foundation and steps 5–8 local milestone are implemented and verified through the six gates in §21.1. The standalone `@claudian-collab/protocol` `1.0.0` release is published. Step 9 admission requires both exact-consumer migrations to be observed on clean merged `origin/main` heads, followed by the separate clean Gomami build/deployment gate. Project mutations continue to use the one canonical advisory-lock contract and fixed lock order in §11; repository interfaces carry the placement lease and generation so future sharding does not require a domain-API rewrite.
+The foundation, steps 5–8 local milestone, standalone `@claudian-collab/protocol@1.0.0` release, Step 9 private Gomami proof, real two-Mac convergence proof, and Step 10 private multi-Project hardening are complete. Project mutations continue to use the one canonical advisory-lock contract and fixed lock order in §11; repository interfaces carry the placement lease and generation so future sharding does not require a domain-API rewrite.
 
-The following are intentionally deferred and do not block the Step 9 private
-proof:
+A production Obsidian smoke check found and the pre-Step-11 gate repaired a client-composition regression: Claudian now uses a CORS-independent desktop transport behind its Cloud adapter and keeps the Cloud endpoint non-browser. The same gate established the standalone shared Project Management contract and one authority-neutral Claudian application port. Installed Obsidian, LAN, Cloud, bundle-size, and exact-package checks passed before Step 11 planning.
 
-- the production trusted-ingress principal contract and stable mappings among
-  Account, device attribution, Project, membership, and protocol actor identity;
-- the production Project creation path selected for external Alpha;
-- production LAN-to-Cloud cutover and client redirection;
-- Cloud-to-LAN Host selection and authority handoff;
-- Cloud Member Leave, last-Manager succession, and Project-wide Retire;
-- exact commercial quotas, sponsorship limits, and read-only duration;
-- final Cloud provider, region, and managed infrastructure products;
-- final server license and supported self-host packaging.
+No unresolved in-scope product or architecture decision blocks Step 11 implementation. Step 11 now follows the accepted producer-first protocol, storage/lifecycle foundation, authority movement, operational durability, local evidence, isolated Gomami evidence, and closure gates. Cloud-native Project and membership lifecycle remains Step 12, ordinary-user Claudian entry remains Step 13, and the full LAN/Cloud parity and delivery matrix remains Step 14. Placement migration remains disabled until measured need and a separate generation-fence design justify it.
 
-Stable ingress-principal mappings and at least one production Project creation
-path block every external Alpha. The production operator must provide caller
-authentication, credential revocation, backend isolation, and identity-channel
-protection outside Cloud Server. Cloud still requires membership and role
-revocation behavior, final mutation revalidation, and auditable
-Account/device/membership attribution. RLS, the target-repository Git sandbox,
-streamed receive quotas, initial product quotas, verified backup objectives,
-deletion recovery, and operator break-glass auditing block external Project
-data. The full LAN-to-Cloud handoff blocks external onboarding of existing LAN
-Projects. The self-host ingress contract, upgrade and migration process, and
-backup/recovery packaging block supported self-hosting. Cloud Leave and Retire
-block their corresponding user-visible operations. Placement migration remains
-disabled until the generation-fence phases and stale-route fault tests pass.
-None may be silently filled by private-development shortcuts.
+Caller authentication, credential issuance and validation, TLS, direct-backend prevention, public ingress, managed Accounts, billing, entitlement, commercial quotas, external users, managed infrastructure selection, and managed operator procedures remain deployment-operator or separate product-program concerns rather than blockers owned by this repository.

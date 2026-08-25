@@ -7,6 +7,9 @@
 - User-controlled names never form paths. Enforce normalized and real-path containment, no symlink roots or repository entries, and server-owned hooks and configuration.
 - Development staging and canonical repositories are sibling paths on one authority filesystem. Publication requires an exact validation marker, live object-format/ref/OID/integrity verification, and one atomic rename; repository presence or absence never decides activation, cancellation, or recovery without the Project-authority journal.
 - Startup revalidates every active catalog placement under its Project lock and requires exact protected main plus active-member branch refs before readiness. Marker files never substitute for live Git verification.
+- Project checkpoint export includes only protected main and retained Member refs from the exact quiesced logical snapshot. It never uses unreviewed `--all`; operational, validation, temporary, backup, and replace refs remain excluded.
+- Checkpoint import verifies manifest/artifact digests, `git bundle verify`, exact refs/OIDs, reachable objects, portable trees, projected quota, and strict `fsck` before inactive publication. Restore staging and authority-transfer staging never become ordinary placements by filesystem observation.
+- Exact deletion resolves only the placement/storage identity frozen in the authorized journal. Missing-after-intent may be replay success; absence before intent never authorizes or proves deletion.
 
 ## Git execution
 

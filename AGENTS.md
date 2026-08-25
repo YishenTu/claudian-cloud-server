@@ -22,6 +22,10 @@
 - Each Project has exactly one authoritative repository placement and one coordinated Git write path at a time. Scaling must not introduce independent concurrent writers for the same canonical repository.
 - Repository state and coordination state have separate storage contracts and a deliberate cross-store recovery protocol. Never infer atomicity across them.
 - Every admitted request is bound to a trusted ingress principal. Mutations crossing storage boundaries are Project-authorized, idempotent where retry is possible, and fail closed on stale expected state.
+- A supported authority transfer preserves exactly one writable authority generation. Before source relinquishment it may resume or cancel only with target proof; after the one-way relinquishment fence every owner recovers forward to the target and may never reopen the source.
+- Transfer claims bind a target principal or client-generated LAN credential to one existing imported Member. They do not authenticate ingress, issue caller credentials, create membership, select roles, or substitute for source/target authority proof.
+- Project lifecycle recovery and clean-environment restore have separate authorities. Project journals use the canonical Project write lane and recovery catalog; environment restore uses one private environment journal while runtime readiness remains closed.
+- Operator access never authorizes Project deletion. Maintenance may resume only an exact deletion journal created by a Project-authorized Retire or authority handoff.
 - Backups are not considered complete until restoration and repository integrity have been verified.
 
 ## Development constraints
@@ -39,6 +43,7 @@
 - `src/server/` owns HTTP, Git Smart HTTP, event, health, and version transport adaptation after trusted ingress.
 - `src/request-context/` binds the trusted ingress actor to immutable server request context; it does not authenticate callers or authorize Projects.
 - `src/project-authority/` owns Project admission, authorization, idempotency, mutation ordering, lifecycle policy, and cross-store recovery.
+- `src/environment-maintenance/` owns environment-wide offline maintenance policy, especially clean restore into empty stores, and compiled maintenance command adaptation. It does not authorize Project mutations or enter the Project recovery catalog.
 - `src/coordination/` owns PostgreSQL schema, transaction, RLS, advisory-lock, connection, and persistence mechanics.
 - `src/repositories/` owns placement leases, repository containment, Git execution, refs, quotas, and process cleanup.
 - `src/onboarding/` owns isolated staging and only the onboarding profiles whose authority-transfer contracts have been accepted.
