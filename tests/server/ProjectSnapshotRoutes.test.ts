@@ -112,7 +112,7 @@ describe('ProjectSnapshotRoutes', () => {
     const result = await request(route, {
       body: JSON.stringify({
         data: { projectId: 'project-a' },
-        protocolVersion: 4,
+        protocolVersion: 5,
         requestId: 'request-a',
       }),
     });
@@ -141,7 +141,7 @@ describe('ProjectSnapshotRoutes', () => {
       {
         body: JSON.stringify({
           data: { projectId: 'project-b' },
-          protocolVersion: 4,
+          protocolVersion: 5,
           requestId: 'request-b',
         }),
         status: 400,
@@ -149,7 +149,7 @@ describe('ProjectSnapshotRoutes', () => {
       {
         body: JSON.stringify({
           data: { extra: true, projectId: 'project-a' },
-          protocolVersion: 4,
+          protocolVersion: 5,
           requestId: 'request-c',
         }),
         status: 400,
@@ -168,13 +168,13 @@ describe('ProjectSnapshotRoutes', () => {
       assert.equal(result.response.status, testCase.status);
       assert.equal(
         (result.value as { readonly protocolVersion?: number }).protocolVersion,
-        4,
+        5,
       );
     }
 
     const missing = await request(route, {
       body: '{}',
-      path: '/v1/projects/project-a/operations/getProjectSnapshot?extra=1',
+      path: '/v2/projects/project-a/operations/getProjectSnapshot?extra=1',
     });
     assert.equal(missing.response.status, 404);
   });
@@ -195,7 +195,7 @@ describe('ProjectSnapshotRoutes', () => {
       responses.push(await request(route, {
         body: JSON.stringify({
           data: { projectId: 'project-a' },
-          protocolVersion: 4,
+          protocolVersion: 5,
           requestId: `request-${code}`,
         }),
       }));
@@ -270,7 +270,7 @@ describe('ProjectSnapshotRoutes', () => {
     client.on('error', () => undefined);
     client.end(JSON.stringify({
       data: { projectId: 'project-a' },
-      protocolVersion: 4,
+      protocolVersion: 5,
       requestId: 'request-disconnect',
     }));
     await started;

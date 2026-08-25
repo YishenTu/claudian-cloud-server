@@ -355,7 +355,7 @@ async function fetchProject(
     'remote',
     'add',
     'origin',
-    `${baseUrl}/v1/projects/${projectId}/repository.git`,
+    `${baseUrl}/v2/projects/${projectId}/repository.git`,
   ]);
   await git(checkout, [
     '-c',

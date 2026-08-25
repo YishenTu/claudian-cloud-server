@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import { afterEach, describe, it } from 'node:test';
 
 import {
+  COLLAB_CHECKPOINT_ARTIFACT_LIMITS,
   COLLAB_CLOUD_BINDING_LIMITS,
   COLLAB_LIMITS,
   collabCloudCapabilityDocument,
@@ -20,6 +21,14 @@ afterEach(async () => {
 });
 
 const limits = {
+  maxCheckpointCoordinationBytes:
+    COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxCoordinationBytes,
+  maxCheckpointManifestUtf8Bytes:
+    COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxManifestBytes,
+  maxCheckpointRepositoryBundleBytes:
+    COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxRepositoryBundleBytes,
+  maxCheckpointStagingBytes:
+    COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxStagingBytes,
   maxDevelopmentBootstrapGitBundleBytes: 1024,
   maxDevelopmentBootstrapManifestUtf8Bytes:
     COLLAB_CLOUD_BINDING_LIMITS.maxDevelopmentBootstrapManifestUtf8Bytes,
@@ -71,6 +80,11 @@ describe('CloudCapabilitiesRoute', () => {
       result.value,
       collabCloudCapabilityDocument(['development-bootstrap'], limits),
     );
+    const capabilities = (result.value as { readonly capabilities: readonly string[] })
+      .capabilities;
+    assert.equal(capabilities.includes('authority-transfer'), false);
+    assert.equal(capabilities.includes('project-checkpoint-export'), false);
+    assert.equal(capabilities.includes('project-retirement'), false);
   });
 
   it('does not accept a noncanonical path or method', async () => {
