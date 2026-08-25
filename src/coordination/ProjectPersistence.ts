@@ -5,7 +5,10 @@ import type {
   CollabProjectId,
 } from '@claudian-collab/protocol';
 
-import type { PersistenceAdvanceResult } from './DevelopmentBootstrapPersistence.js';
+import type {
+  PersistenceAdvanceResult,
+  RecoveryCandidateCursor,
+} from './DevelopmentBootstrapPersistence.js';
 
 export type ProjectServiceState =
   | 'active'
@@ -22,6 +25,12 @@ export interface AdvanceProjectAuthorityStateInput {
   readonly nextAuthorityGeneration: number;
   readonly nextServiceState: ProjectServiceState;
 }
+
+export interface IsolateProjectRecoveryInput {
+  readonly expectedRecoveryCandidate: RecoveryCandidateCursor;
+}
+
+export type ProjectRecoveryIsolationResult = PersistenceAdvanceResult | 'stale';
 
 export interface ProjectRecord {
   readonly activatedAt: CollabIsoTimestamp;
@@ -45,4 +54,7 @@ export interface ProjectPersistence extends ProjectPersistenceReader {
   advanceProjectAuthorityState(
     input: AdvanceProjectAuthorityStateInput,
   ): Promise<PersistenceAdvanceResult>;
+  isolateProjectRecovery(
+    input: IsolateProjectRecoveryInput,
+  ): Promise<ProjectRecoveryIsolationResult>;
 }

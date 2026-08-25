@@ -1,9 +1,19 @@
-import type { CollabProjectId } from '@claudian-collab/protocol';
+import {
+  isCollabOpaqueId,
+  isCollabProjectId,
+  type CollabProjectId,
+} from '@claudian-collab/protocol';
 
 import type {
+  RecoveryCandidate,
   RecoveryCandidateCatalog,
   RecoveryCandidateKind,
+  UnknownRecoveryCandidate,
 } from '../../coordination/DevelopmentBootstrapPersistence.js';
+import type {
+  AcquireProjectLeaseOptions,
+  PinnedProjectLease,
+} from '../../coordination/ProjectCoordination.js';
 import {
   ProjectAcceptCoordinatorError,
 } from '../acceptance/ProjectAcceptCoordinator.js';
@@ -14,11 +24,23 @@ import {
 import {
   ProjectActivationCoordinatorError,
 } from '../lifecycle/ProjectActivationCoordinator.js';
+import type {
+  ProjectLifecycleRecoveryPort,
+} from '../lifecycle/ProjectLifecycleRecoveryDispatcher.js';
 
 export interface ProjectRecoveryCoordinatorOptions {
   readonly accept: ProjectRecoveryPort;
   readonly activation: ProjectRecoveryPort;
   readonly catalog: RecoveryCandidateCatalog;
+  readonly isolation: ProjectRecoveryIsolationCoordination;
+  readonly lifecycle?: ProjectLifecycleRecoveryPort;
+}
+
+export interface ProjectRecoveryIsolationCoordination {
+  acquireProjectLease(
+    projectId: CollabProjectId,
+    options?: AcquireProjectLeaseOptions,
+  ): Promise<PinnedProjectLease>;
 }
 
 function isIsolatedRecovery(error: unknown): boolean {
@@ -28,6 +50,9 @@ function isIsolatedRecovery(error: unknown): boolean {
   ) || (
     error instanceof ProjectActivationCoordinatorError
     && error.code === 'recovery-required'
+  ) || (
+    error instanceof ProjectRecoveryError
+    && error.code === 'recovery-required'
   );
 }
 
@@ -35,16 +60,28 @@ function unsupportedRecoveryKind(_kind: RecoveryCandidateKind): never {
   throw new ProjectRecoveryError('dependency-failed');
 }
 
+function canonicalTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const parsed = new Date(value);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
+}
+
+const RECOVERY_KIND_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
+
 export class ProjectRecoveryCoordinator implements ProjectRecoveryPort {
   readonly #accept: ProjectRecoveryPort;
   readonly #activation: ProjectRecoveryPort;
   readonly #catalog: RecoveryCandidateCatalog;
+  readonly #isolation: ProjectRecoveryIsolationCoordination;
+  readonly #lifecycle: ProjectLifecycleRecoveryPort | undefined;
   #closed = false;
 
   constructor(options: ProjectRecoveryCoordinatorOptions) {
     this.#accept = options.accept;
     this.#activation = options.activation;
     this.#catalog = options.catalog;
+    this.#isolation = options.isolation;
+    this.#lifecycle = options.lifecycle;
   }
 
   async recoverProject(projectId: CollabProjectId): Promise<void> {
@@ -53,6 +90,8 @@ export class ProjectRecoveryCoordinator implements ProjectRecoveryPort {
       await this.#activation.recoverProject(projectId);
       this.#assertOpen();
       await this.#accept.recoverProject(projectId);
+      this.#assertOpen();
+      await this.#lifecycle?.recoverProject(projectId);
     } catch (error: unknown) {
       if (error instanceof ProjectRecoveryError) throw error;
       if (isIsolatedRecovery(error)) {
@@ -72,7 +111,7 @@ export class ProjectRecoveryCoordinator implements ProjectRecoveryPort {
       for (const candidate of page.candidates) {
         this.#assertOpen();
         try {
-          await this.#owner(candidate.kind).recoverProject(candidate.projectId);
+          await this.#recoverCandidate(candidate);
         } catch (error: unknown) {
           if (!isIsolatedRecovery(error)) throw error;
         }
@@ -96,5 +135,95 @@ export class ProjectRecoveryCoordinator implements ProjectRecoveryPort {
       case 'activation': return this.#activation;
     }
     return unsupportedRecoveryKind(kind);
+  }
+
+  #recoverCandidate(candidate: RecoveryCandidate): Promise<void> {
+    switch (candidate.kind) {
+      case 'accept':
+      case 'activation':
+        return this.#owner(candidate.kind).recoverProject(candidate.projectId);
+      case 'authority-transfer':
+      case 'backup':
+      case 'delete':
+      case 'export':
+      case 'leave':
+      case 'retire':
+        if (this.#lifecycle === undefined) return unsupportedRecoveryKind(
+          candidate.kind,
+        );
+        return this.#lifecycle.recoverCandidate(candidate);
+      case 'unknown':
+        return this.#isolateUnknownCandidate(candidate);
+      default: {
+        const forwardCandidate = candidate as unknown as {
+          readonly kind: string;
+          readonly operationId: string;
+          readonly projectId: string;
+          readonly scheduledAt: string;
+        };
+        return this.#isolateUnknownCandidate(Object.freeze({
+          kind: 'unknown',
+          operationId: forwardCandidate.operationId,
+          projectId: forwardCandidate.projectId,
+          scheduledAt: forwardCandidate.scheduledAt,
+          unrecognizedKind: forwardCandidate.kind,
+        }));
+      }
+    }
+  }
+
+  async #isolateUnknownCandidate(
+    candidate: UnknownRecoveryCandidate,
+  ): Promise<void> {
+    if (
+      !isCollabProjectId(candidate.projectId)
+      || !isCollabOpaqueId(candidate.operationId)
+      || !canonicalTimestamp(candidate.scheduledAt)
+      || !RECOVERY_KIND_PATTERN.test(candidate.unrecognizedKind)
+    ) {
+      throw new ProjectRecoveryError('dependency-failed');
+    }
+    let lease: PinnedProjectLease;
+    try {
+      lease = await this.#isolation.acquireProjectLease(candidate.projectId);
+    } catch {
+      throw new ProjectRecoveryError('dependency-failed');
+    }
+    let failure: ProjectRecoveryError | undefined;
+    let outcome: 'isolated' | 'stale' | undefined;
+    try {
+      this.#assertOpen();
+      outcome = await lease.withProjectScope(async scope => {
+        const result = await scope.isolateProjectRecovery({
+          expectedRecoveryCandidate: {
+            kind: candidate.unrecognizedKind,
+            operationId: candidate.operationId,
+            projectId: candidate.projectId,
+            scheduledAt: candidate.scheduledAt,
+          },
+        });
+        if (result === 'stale') return 'stale';
+        const isolated = await scope.getProject();
+        if (isolated?.serviceState !== 'recovery-required') {
+          throw new ProjectRecoveryError('dependency-failed');
+        }
+        return 'isolated';
+      });
+    } catch (error: unknown) {
+      failure = error instanceof ProjectRecoveryError
+        ? error
+        : new ProjectRecoveryError('dependency-failed');
+    }
+    try {
+      await lease.close();
+    } catch {
+      failure = new ProjectRecoveryError('dependency-failed');
+    }
+    if (failure !== undefined) throw failure;
+    if (outcome === 'stale') return;
+    if (outcome === 'isolated') {
+      throw new ProjectRecoveryError('recovery-required');
+    }
+    throw new ProjectRecoveryError('dependency-failed');
   }
 }

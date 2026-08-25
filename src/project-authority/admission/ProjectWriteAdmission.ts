@@ -219,21 +219,28 @@ export class ProjectWriteAdmission {
       const lease = await this.#coordination.acquireProjectLease(projectId, { signal });
       try {
         this.#assertAvailable(signal);
-        await lease.withProjectScope(
-          scope => this.#authorizeMember(scope, principal).then(() => undefined),
-        );
-        const recoveryState = await lease.withProjectScope(async scope => ({
-          accept: await scope.accept.getNonterminal(),
-          bootstrap: await scope.getNonterminalDevelopmentBootstrapAttempt(),
-        }));
+        const recoveryState = await lease.withProjectScope(async scope => {
+          const lifecycle = await scope.portability
+            .getNonterminalLifecycleJournal();
+          if (lifecycle?.state !== 'active') {
+            await this.#authorizeMember(scope, principal);
+          }
+          return Object.freeze({
+            accept: await scope.accept.getNonterminal(),
+            bootstrap: await scope.getNonterminalDevelopmentBootstrapAttempt(),
+            lifecycle,
+          });
+        });
         if (
           recoveryState.bootstrap !== undefined
           || recoveryState.accept !== undefined
+          || recoveryState.lifecycle !== undefined
         ) {
           if (
             recovered
             || recoveryState.bootstrap?.state === 'recovery-required'
             || recoveryState.accept?.phase === 'recovery-required'
+            || recoveryState.lifecycle?.state === 'recovery-required'
           ) {
             return fail('recovery-required');
           }

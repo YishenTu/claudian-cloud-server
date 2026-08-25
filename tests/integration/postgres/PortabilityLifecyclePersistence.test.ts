@@ -327,14 +327,14 @@ describe('portability lifecycle persistence', () => {
     });
   });
 
-  it('rejects unknown recovery cursor kinds before pagination', async () => {
+  it('rejects malformed recovery cursor kinds before pagination', async () => {
     await withPostgresTestDatabase(async database => {
       await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
       const store = coordination(database);
       try {
         await expectInvalidRecord(store.listRecoveryCandidates({
           after: {
-            kind: 'unknown' as 'delete',
+            kind: 'UNKNOWN' as 'delete',
             operationId: 'operation-one',
             projectId: 'project-cursor',
             scheduledAt: T0,
@@ -391,6 +391,10 @@ describe('portability lifecycle persistence', () => {
             scheduledAt: T1,
             updatedAt: T1,
           }), 'replayed');
+          assert.deepEqual(
+            await scope.portability.getNonterminalLifecycleJournal(),
+            await scope.portability.getLifecycleJournal(journal.operationId),
+          );
           await expectStateConflict(scope.portability.advanceLifecycleJournal({
             expectedPhase: 'checkpoint-received',
             expectedState: 'active',
@@ -444,6 +448,10 @@ describe('portability lifecycle persistence', () => {
             scheduledAt: T2,
             updatedAt: T2,
           }), 'advanced');
+          assert.equal(
+            await scope.portability.getNonterminalLifecycleJournal(),
+            undefined,
+          );
           await expectStateConflict(scope.portability.advanceLifecycleJournal({
             expectedPhase: 'completed',
             expectedState: 'completed',

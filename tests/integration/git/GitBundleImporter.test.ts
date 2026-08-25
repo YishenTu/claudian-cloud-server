@@ -438,6 +438,7 @@ describe('GitBundleImporter', () => {
           'operation-checkpoint',
         ),
         bundleByteCount: fixture.bundleByteCount,
+        bundleInputDisposition: 'consumed',
         bundleSha256: fixture.bundleSha256,
         markerSha256: staged.markerSha256,
         objectFormat: fixture.objectFormat,
@@ -511,6 +512,7 @@ describe('GitBundleImporter', () => {
       assert.equal(await pathExists(validationMarker), false);
       const checkpoint = await owners.importer.importCheckpoint(input());
       assert.equal(checkpoint.operationId, operationId);
+      assert.equal(checkpoint.bundleInputDisposition, 'replayed');
       assert.equal(await pathExists(validationMarker), true);
     } finally {
       await owners.importer.close();
@@ -564,6 +566,7 @@ describe('GitBundleImporter', () => {
       assert.equal(await pathExists(validationMarker), true);
       const replay = await owners.importer.importCheckpoint(input());
       assert.equal(replay.operationId, operationId);
+      assert.equal(replay.bundleInputDisposition, 'replayed');
       assert.equal(repositorySyncsWithMarker, 2);
     } finally {
       await owners.importer.close();

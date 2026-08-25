@@ -7,6 +7,13 @@ import { CoordinationError } from '../../../src/coordination/CoordinationError.j
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
 import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
 import {
+  ActiveRepositoryIntegrityGate,
+  type ActiveRepositoryIntegrityRepository,
+} from '../../../src/project-authority/lifecycle/ActiveRepositoryIntegrityGate.js';
+import {
+  ProjectRecoveryCoordinator,
+} from '../../../src/project-authority/recovery/ProjectRecoveryCoordinator.js';
+import {
   type PostgresTestDatabase,
   withPostgresTestDatabase,
 } from '../../helpers/PostgresTestDatabase.js';
@@ -75,7 +82,227 @@ async function seedActivationCandidate(store: PostgresCoordination): Promise<voi
   });
 }
 
+async function seedActiveProjects(
+  database: PostgresTestDatabase,
+  projectIds: readonly string[],
+): Promise<void> {
+  const client = new Client({ connectionString: database.migrationUrl });
+  try {
+    await client.connect();
+    await client.query('BEGIN');
+    for (const projectId of projectIds) {
+      await client.query(
+        "SELECT set_config('claudian_cloud.project_id', $1, true)",
+        [projectId],
+      );
+      await client.query(
+        `INSERT INTO claudian_cloud.projects (
+           project_id, project_name, manager_set_generation,
+           expected_main_oid, service_state, created_at, activated_at
+         ) VALUES ($1, $1, 1, repeat('a', 40), 'active', $2, $2)`,
+        [projectId, T0],
+      );
+      for (const [memberId, role] of [
+        [`member-${projectId}-manager`, 'manager'],
+        [`member-${projectId}-peer`, 'member'],
+      ] as const) {
+        await client.query(
+          `INSERT INTO claudian_cloud.project_memberships (
+             project_id, member_id, display_name, role, status, revision,
+             created_at, updated_at
+           ) VALUES ($1, $2, $2, $3, 'active', 1, $4, $4)`,
+          [projectId, memberId, role, T0],
+        );
+      }
+      await client.query(
+        `INSERT INTO claudian_cloud.repository_placements (
+           project_id, storage_node_id, repository_storage_key, generation,
+           active, created_at, updated_at
+         ) VALUES ($1, 'node-a', $2, 1, true, $3, $3)`,
+        [projectId, `storage-${projectId}`, T0],
+      );
+      await client.query(
+        `INSERT INTO claudian_cloud.active_repository_placement_catalog (
+           project_id, storage_node_id, repository_storage_key, generation
+         ) VALUES ($1, 'node-a', $2, 1)`,
+        [projectId, `storage-${projectId}`],
+      );
+    }
+    await client.query('COMMIT');
+  } catch (error: unknown) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    await client.end();
+  }
+}
+
 describe('recovery candidate catalog', () => {
+  it('removes an isolated unknown Project from startup integrity enumeration', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({
+        connectionString: database.migrationUrl,
+      }).apply();
+      await seedActiveProjects(database, ['project-forward', 'project-healthy']);
+      const store = coordination(database);
+      const migration = new Client({ connectionString: database.migrationUrl });
+      try {
+        await migration.connect();
+        await migration.query(
+          `ALTER TABLE claudian_cloud.recovery_candidates
+             DROP CONSTRAINT recovery_candidates_kind`,
+        );
+        await migration.query(
+          `INSERT INTO claudian_cloud.recovery_candidates (
+             kind, project_id, operation_id, scheduled_at, created_at
+           ) VALUES ('future-operation', 'project-forward',
+                     'operation-forward', $1, $1)`,
+          [T0],
+        );
+        const recovery = new ProjectRecoveryCoordinator({
+          accept: { recoverProject: () => Promise.resolve() },
+          activation: { recoverProject: () => Promise.resolve() },
+          catalog: store,
+          isolation: store,
+        });
+        await recovery.recoverAll();
+        recovery.close();
+
+        await store.withProjectScope('project-forward', async scope => {
+          assert.equal(
+            (await scope.getProject())?.serviceState,
+            'recovery-required',
+          );
+        });
+        assert.deepEqual(
+          (await store.listActiveRepositoryPlacements()).placements
+            .map(placement => placement.projectId),
+          ['project-healthy'],
+        );
+        const verified: string[] = [];
+        const repository: ActiveRepositoryIntegrityRepository = {
+          cleanupReceivePackState: placement => {
+            verified.push(`cleanup:${placement.projectId}`);
+            return Promise.resolve();
+          },
+          verifyIntegrity: placement => {
+            verified.push(`verify:${placement.projectId}`);
+            return Promise.resolve({ status: 'valid' });
+          },
+        };
+        await new ActiveRepositoryIntegrityGate({
+          coordination: store,
+          repository,
+        }).verifyAll();
+        assert.deepEqual(verified, [
+          'cleanup:project-healthy',
+          'verify:project-healthy',
+        ]);
+      } finally {
+        await migration.end();
+        await store.close();
+      }
+    });
+  });
+
+  it('keeps a healthy Project active when an unknown candidate settles before lease acquisition', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({
+        connectionString: database.migrationUrl,
+      }).apply();
+      await seedActiveProjects(database, ['project-forward']);
+      const store = coordination(database);
+      const migration = new Client({ connectionString: database.migrationUrl });
+      try {
+        await migration.connect();
+        await migration.query(
+          `ALTER TABLE claudian_cloud.recovery_candidates
+             DROP CONSTRAINT recovery_candidates_kind`,
+        );
+        await migration.query(
+          `INSERT INTO claudian_cloud.recovery_candidates (
+             kind, project_id, operation_id, scheduled_at, created_at
+           ) VALUES ('future-operation', 'project-forward',
+                     'operation-forward', $1, $1)`,
+          [T0],
+        );
+        let settled = false;
+        const recovery = new ProjectRecoveryCoordinator({
+          accept: { recoverProject: () => Promise.resolve() },
+          activation: { recoverProject: () => Promise.resolve() },
+          catalog: store,
+          isolation: {
+            acquireProjectLease: async (projectId, options) => {
+              if (!settled) {
+                settled = true;
+                await migration.query(
+                  `DELETE FROM claudian_cloud.recovery_candidates
+                    WHERE kind = 'future-operation'
+                      AND project_id = 'project-forward'
+                      AND operation_id = 'operation-forward'`,
+                );
+              }
+              return store.acquireProjectLease(projectId, options);
+            },
+          },
+        });
+
+        await recovery.recoverAll();
+        recovery.close();
+        assert.equal(settled, true);
+        await store.withProjectScope('project-forward', async scope => {
+          assert.equal((await scope.getProject())?.serviceState, 'active');
+        });
+        assert.deepEqual(
+          (await store.listActiveRepositoryPlacements()).placements
+            .map(placement => placement.projectId),
+          ['project-forward'],
+        );
+      } finally {
+        await migration.end();
+        await store.close();
+      }
+    });
+  });
+
+  it('returns a safe sentinel for a forward recovery kind', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({
+        connectionString: database.migrationUrl,
+      }).apply();
+      const store = coordination(database);
+      const migration = new Client({ connectionString: database.migrationUrl });
+      try {
+        await migration.connect();
+        await migration.query(
+          `ALTER TABLE claudian_cloud.recovery_candidates
+             DROP CONSTRAINT recovery_candidates_kind`,
+        );
+        await migration.query(
+          `INSERT INTO claudian_cloud.recovery_candidates (
+             kind, project_id, operation_id, scheduled_at, created_at
+           ) VALUES ('future-operation', 'project-forward',
+                     'operation-forward', $1, $1)`,
+          [T0],
+        );
+
+        assert.deepEqual(await store.listRecoveryCandidates(), {
+          candidates: [{
+            kind: 'unknown',
+            operationId: 'operation-forward',
+            projectId: 'project-forward',
+            scheduledAt: T0,
+            unrecognizedKind: 'future-operation',
+          }],
+          nextCursor: undefined,
+        });
+      } finally {
+        await migration.end();
+        await store.close();
+      }
+    });
+  });
+
   it('enumerates stable 100-row keyset pages containing metadata only', async () => {
     await withPostgresTestDatabase(async database => {
       await new PostgresMigrator({

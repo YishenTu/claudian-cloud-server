@@ -136,6 +136,7 @@ export interface ImportRepositoryCheckpointInput {
 export interface ValidatedRepositoryCheckpoint {
   readonly artifactKey: string;
   readonly bundleByteCount: number;
+  readonly bundleInputDisposition: 'consumed' | 'replayed';
   readonly bundleSha256: string;
   readonly markerSha256: string;
   readonly objectFormat: CollabCheckpointObjectFormat;
@@ -190,6 +191,11 @@ interface StagingPaths {
 }
 
 type StagingProfile = 'bootstrap' | 'checkpoint';
+
+interface CompletedImport {
+  readonly bundleInputDisposition: 'consumed' | 'replayed';
+  readonly repository: ValidatedBootstrapRepository;
+}
 
 interface ObjectInventoryEntry {
   readonly oid: string;
@@ -1313,7 +1319,7 @@ export class GitBundleImporter {
   ): Promise<ValidatedBootstrapRepository> {
     if (this.#closed) throw new GitBundleImportError('closed');
     assertInput(input, this.#maximumBundleBytes, 2);
-    return this.#startImport(input, true, 'bootstrap');
+    return (await this.#startImport(input, true, 'bootstrap')).repository;
   }
 
   async importCheckpoint(
@@ -1345,14 +1351,16 @@ export class GitBundleImporter {
       ...(input.signal === undefined ? {} : { signal: input.signal }),
     };
     assertInput(commonInput, this.#maximumBundleBytes);
-    const validated = await this.#startImport(
+    const completed = await this.#startImport(
       commonInput,
       false,
       'checkpoint',
     );
+    const validated = completed.repository;
     return Object.freeze({
       artifactKey: validated.artifactKey,
       bundleByteCount: validated.bundleByteCount,
+      bundleInputDisposition: completed.bundleInputDisposition,
       bundleSha256: validated.bundleSha256,
       markerSha256: validated.markerSha256,
       objectFormat: validated.objectFormat,
@@ -1394,7 +1402,7 @@ export class GitBundleImporter {
     input: ImportGitBundleInput,
     acquireUploadPermit: boolean,
     profile: StagingProfile,
-  ): Promise<ValidatedBootstrapRepository> {
+  ): Promise<CompletedImport> {
     const operationKey = artifactKey(
       input.projectId,
       input.attemptId,
@@ -1519,7 +1527,7 @@ export class GitBundleImporter {
     signal: AbortSignal,
     acquireUploadPermit: boolean,
     profile: StagingProfile,
-  ): Promise<ValidatedBootstrapRepository> {
+  ): Promise<CompletedImport> {
     const deadline = Date.now() + this.#uploadTotalTimeoutMs;
     let uploadPermit: BootstrapUploadPermit | undefined;
     let gitPermit: GitChildPermit | undefined;
@@ -1566,8 +1574,15 @@ export class GitBundleImporter {
         signal,
         deadline,
       );
+      let bundleInputDisposition: ValidatedRepositoryCheckpoint['bundleInputDisposition']
+        = 'replayed';
       if (replay === undefined) {
-        await this.#stageBundle(input, staging, signal, deadline);
+        bundleInputDisposition = await this.#stageBundle(
+          input,
+          staging,
+          signal,
+          deadline,
+        );
       }
       try {
         gitPermit = await this.#resourceAdmission.acquireGitChild({
@@ -1584,11 +1599,17 @@ export class GitBundleImporter {
       if (replay !== undefined) {
         await this.#verifyRepository(input, staging, signal, deadline);
         await this.#hardenRepository(staging);
-        return replay;
+        return Object.freeze({
+          bundleInputDisposition: 'replayed',
+          repository: replay,
+        });
       }
       await this.#validateRepository(input, staging, signal, deadline);
       await this.#writeMarker(staging, json);
-      return validatedFact(marker, json);
+      return Object.freeze({
+        bundleInputDisposition,
+        repository: validatedFact(marker, json),
+      });
     } finally {
       gitPermit?.release();
       uploadPermit?.release();
@@ -1646,7 +1667,7 @@ export class GitBundleImporter {
     staging: StagingPaths,
     signal: AbortSignal,
     deadline: number,
-  ): Promise<void> {
+  ): Promise<ValidatedRepositoryCheckpoint['bundleInputDisposition']> {
     try {
       const existing = await lstat(staging.bundle);
       if (
@@ -1664,7 +1685,7 @@ export class GitBundleImporter {
         this.#createBundleReadStream,
       );
       if (digest.sha256 !== input.expectedSha256) fail('artifact-conflict');
-      return;
+      return 'replayed';
     } catch (error: unknown) {
       if (error instanceof GitBundleImportError) throw error;
       if (!(typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT')) {
@@ -1710,6 +1731,7 @@ export class GitBundleImporter {
       await chmod(staging.bundlePart, FILE_MODE);
       await rename(staging.bundlePart, staging.bundle);
       await this.#syncDirectory(staging.attempt);
+      return 'consumed';
     } catch (error: unknown) {
       await iterator.return?.().catch(() => undefined);
       await handle?.close().catch(() => undefined);

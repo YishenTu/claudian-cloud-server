@@ -270,6 +270,7 @@ class CloudApplication implements Application {
       accept: this.#acceptCoordinator,
       activation: this.#activationCoordinator,
       catalog: this.#coordination,
+      isolation: this.#coordination,
     });
     this.#projectRequestAuthority = new ProjectRequestAuthority({
       coordination: this.#coordination,
