@@ -75,6 +75,7 @@ describe('development bootstrap persistence', () => {
           { name: 'project-read-events', state: 'applied', version: 3 },
           { name: 'collaboration', state: 'applied', version: 4 },
           { name: 'accept-recovery', state: 'applied', version: 5 },
+          { name: 'portability-lifecycle', state: 'applied', version: 6 },
         ]);
 
         const relations = await migration.query<{
@@ -479,6 +480,8 @@ describe('development bootstrap persistence', () => {
           );
           assert.deepEqual(await scope.getProject(), {
             activatedAt: T7,
+            authorityGeneration: 1,
+            authorityStateRevision: 1,
             createdAt: T8,
             expectedMainOid: 'a'.repeat(40),
             managerSetGeneration: 1,

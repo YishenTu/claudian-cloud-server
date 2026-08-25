@@ -27,8 +27,17 @@ import {
   type RecoveryCandidatePage,
 } from '../DevelopmentBootstrapPersistence.js';
 import {
+  type AdvanceProjectAuthorityStateInput,
   type ProjectRecord,
+  type ProjectServiceState,
 } from '../ProjectPersistence.js';
+import type {
+  ListTerminalRespondersOptions,
+  TerminalResponderCatalog,
+  TerminalResponderCatalogCursor,
+  TerminalResponderCatalogEntry,
+  TerminalResponderCatalogPage,
+} from '../PortabilityLifecyclePersistence.js';
 import type {
   AppendProjectEvent,
   ProjectEventReplayFacts,
@@ -71,6 +80,7 @@ import {
 import { PostgresDevelopmentBootstrapPersistence } from './PostgresDevelopmentBootstrapPersistence.js';
 import { PostgresAcceptPersistence } from './PostgresAcceptPersistence.js';
 import { PostgresCollaborationPersistence } from './PostgresCollaborationPersistence.js';
+import { PostgresPortabilityLifecyclePersistence } from './PostgresPortabilityLifecyclePersistence.js';
 import { POSTGRES_SCHEMAS } from './PostgresSchema.js';
 
 export interface PostgresCoordinationOptions {
@@ -103,6 +113,8 @@ interface PlacementRow {
 
 interface ProjectRow {
   readonly activated_at: Date;
+  readonly authority_generation: string;
+  readonly authority_state_revision: string;
   readonly created_at: Date;
   readonly expected_main_oid: string;
   readonly manager_set_generation: string;
@@ -138,6 +150,13 @@ interface RecoveryCandidateRow {
   readonly scheduled_at: Date;
 }
 
+interface TerminalResponderCatalogRow {
+  readonly expires_at: Date;
+  readonly operation_id: string;
+  readonly operation_kind: string;
+  readonly project_id: string;
+}
+
 interface BootstrapAttemptRouteRow {
   readonly project_id: string | null;
 }
@@ -153,6 +172,14 @@ type MarkBroken = () => void;
 const LOCK_RETRY_INTERVAL_MS = 5;
 const RUNTIME_ROLE = 'claudian_cloud_runtime';
 const AUTHORITY_VOLUME_ID_PATTERN = /^[0-9a-f]{32}$/u;
+const PROJECT_SERVICE_STATES: ReadonlySet<ProjectServiceState> = new Set([
+  'active',
+  'deleted',
+  'deleting',
+  'maintenance',
+  'read-only-transition',
+  'recovery-required',
+]);
 
 function dependencyFailure(): CoordinationError {
   return new CoordinationError('dependency-failed');
@@ -198,7 +225,17 @@ function handleIdlePoolError(_error: Error): void {
 
 function validateRecoveryCursor(cursor: RecoveryCandidateCursor): void {
   if (
-    !isCollabProjectId(cursor.projectId)
+    ![
+      'accept',
+      'activation',
+      'authority-transfer',
+      'backup',
+      'delete',
+      'export',
+      'leave',
+      'retire',
+    ].includes(cursor.kind)
+    || !isCollabProjectId(cursor.projectId)
     || !isCollabOpaqueId(cursor.operationId)
     || Number.isNaN(Date.parse(cursor.scheduledAt))
     || new Date(cursor.scheduledAt).toISOString() !== cursor.scheduledAt
@@ -209,7 +246,16 @@ function validateRecoveryCursor(cursor: RecoveryCandidateCursor): void {
 
 function recoveryCandidate(row: RecoveryCandidateRow): RecoveryCandidate {
   if (
-    (row.kind !== 'activation' && row.kind !== 'accept')
+    ![
+      'accept',
+      'activation',
+      'authority-transfer',
+      'backup',
+      'delete',
+      'export',
+      'leave',
+      'retire',
+    ].includes(row.kind)
     || !isCollabProjectId(row.project_id)
     || !isCollabOpaqueId(row.operation_id)
     || !(row.scheduled_at instanceof Date)
@@ -218,10 +264,41 @@ function recoveryCandidate(row: RecoveryCandidateRow): RecoveryCandidate {
     throw dependencyFailure();
   }
   return Object.freeze({
-    kind: row.kind,
+    kind: row.kind as RecoveryCandidate['kind'],
     operationId: row.operation_id,
     projectId: row.project_id,
     scheduledAt: row.scheduled_at.toISOString(),
+  });
+}
+
+function validateTerminalResponderCursor(
+  cursor: TerminalResponderCatalogCursor,
+): void {
+  const operationKind: string = cursor.operationKind;
+  if (
+    !isCollabProjectId(cursor.projectId)
+    || !isCollabOpaqueId(cursor.operationId)
+    || (operationKind !== 'authority-transfer' && operationKind !== 'retire')
+    || Number.isNaN(Date.parse(cursor.expiresAt))
+    || new Date(cursor.expiresAt).toISOString() !== cursor.expiresAt
+  ) throw new CoordinationError('invalid-record');
+}
+
+function terminalResponderCatalogEntry(
+  row: TerminalResponderCatalogRow,
+): TerminalResponderCatalogEntry {
+  if (
+    !isCollabProjectId(row.project_id)
+    || !isCollabOpaqueId(row.operation_id)
+    || (row.operation_kind !== 'authority-transfer' && row.operation_kind !== 'retire')
+    || !(row.expires_at instanceof Date)
+    || Number.isNaN(row.expires_at.valueOf())
+  ) throw dependencyFailure();
+  return Object.freeze({
+    expiresAt: row.expires_at.toISOString(),
+    operationId: row.operation_id,
+    operationKind: row.operation_kind,
+    projectId: row.project_id,
   });
 }
 
@@ -478,6 +555,7 @@ class PostgresProjectScope
   implements ProjectScope {
   readonly accept: PostgresAcceptPersistence;
   readonly collaboration: PostgresCollaborationPersistence;
+  readonly portability: PostgresPortabilityLifecyclePersistence;
   readonly #client: PoolClient;
   readonly #markBroken: MarkBroken;
   readonly #projectId: CollabProjectId;
@@ -506,6 +584,10 @@ class PostgresProjectScope
       projectId,
       query,
     });
+    this.portability = new PostgresPortabilityLifecyclePersistence(
+      projectId,
+      query,
+    );
     this.#client = client;
     this.#projectId = projectId;
     this.#markBroken = markBroken;
@@ -801,12 +883,35 @@ class PostgresProjectScope
     return memberId;
   }
 
+  async findPrincipalMember(
+    requestedPrincipalId: string,
+  ): Promise<CollabMemberId | undefined> {
+    this.assertActive();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(requestedPrincipalId)) {
+      throw new CoordinationError('invalid-record');
+    }
+    const rows = await safeQuery<{ readonly member_id: string }>(
+      this.#client,
+      `SELECT member_id
+         FROM claudian_cloud.project_principal_bindings
+        WHERE project_id = $1 AND principal_id = $2 AND state = 'active'`,
+      [this.#projectId, requestedPrincipalId],
+      this.#markBroken,
+    );
+    const boundMemberId = rows[0]?.member_id;
+    if (boundMemberId === undefined) return undefined;
+    if (!isCollabMemberId(boundMemberId)) throw dependencyFailure();
+    return boundMemberId;
+  }
+
   async getProject(): Promise<ProjectRecord | undefined> {
     this.assertActive();
     const rows = await safeQuery<ProjectRow>(
       this.#client,
       `SELECT project_id,
               project_name,
+              authority_generation,
+              authority_state_revision,
               manager_set_generation,
               expected_main_oid,
               service_state,
@@ -820,13 +925,19 @@ class PostgresProjectScope
     const row = rows[0];
     if (row === undefined) return undefined;
     const managerSetGeneration = Number(row.manager_set_generation);
+    const authorityGeneration = Number(row.authority_generation);
+    const authorityStateRevision = Number(row.authority_state_revision);
     if (
       row.project_id !== this.#projectId
       || row.project_name.length === 0
       || !Number.isSafeInteger(managerSetGeneration)
       || managerSetGeneration < 0
+      || !Number.isSafeInteger(authorityGeneration)
+      || authorityGeneration < 1
+      || !Number.isSafeInteger(authorityStateRevision)
+      || authorityStateRevision < 1
       || !isCollabGitOid(row.expected_main_oid)
-      || (row.service_state !== 'active' && row.service_state !== 'recovery-required')
+      || !PROJECT_SERVICE_STATES.has(row.service_state as ProjectServiceState)
       || !(row.created_at instanceof Date)
       || Number.isNaN(row.created_at.valueOf())
       || !(row.activated_at instanceof Date)
@@ -836,13 +947,70 @@ class PostgresProjectScope
     }
     return Object.freeze({
       activatedAt: row.activated_at.toISOString(),
+      authorityGeneration,
+      authorityStateRevision,
       createdAt: row.created_at.toISOString(),
       expectedMainOid: row.expected_main_oid,
       managerSetGeneration,
       projectId: row.project_id,
       projectName: row.project_name,
-      serviceState: row.service_state,
+      serviceState: row.service_state as ProjectRecord['serviceState'],
     });
+  }
+
+  async advanceProjectAuthorityState(
+    input: AdvanceProjectAuthorityStateInput,
+  ): Promise<'advanced' | 'replayed'> {
+    this.assertActive();
+    if (
+      !Number.isSafeInteger(input.expectedAuthorityGeneration)
+      || input.expectedAuthorityGeneration < 1
+      || !Number.isSafeInteger(input.expectedAuthorityStateRevision)
+      || input.expectedAuthorityStateRevision < 1
+      || !Number.isSafeInteger(input.nextAuthorityGeneration)
+      || (
+        input.nextAuthorityGeneration !== input.expectedAuthorityGeneration
+        && input.nextAuthorityGeneration !== input.expectedAuthorityGeneration + 1
+      )
+      || !PROJECT_SERVICE_STATES.has(input.expectedServiceState)
+      || !PROJECT_SERVICE_STATES.has(input.nextServiceState)
+      || (
+        input.expectedAuthorityGeneration === input.nextAuthorityGeneration
+        && input.expectedServiceState === input.nextServiceState
+      )
+    ) {
+      throw new CoordinationError('invalid-record');
+    }
+    const rows = await safeQuery<{ readonly project_id: string }>(
+      this.#client,
+      `UPDATE claudian_cloud.projects
+          SET authority_generation = $5,
+              authority_state_revision = authority_state_revision + 1,
+              service_state = $6
+        WHERE project_id = $1
+          AND authority_generation = $2
+          AND service_state = $3
+          AND authority_state_revision = $4
+       RETURNING project_id`,
+      [
+        this.#projectId,
+        input.expectedAuthorityGeneration,
+        input.expectedServiceState,
+        input.expectedAuthorityStateRevision,
+        input.nextAuthorityGeneration,
+        input.nextServiceState,
+      ],
+      this.#markBroken,
+    );
+    const project = await this.getProject();
+    if (
+      project?.authorityGeneration !== input.nextAuthorityGeneration
+      || project.serviceState !== input.nextServiceState
+      || project.authorityStateRevision !== input.expectedAuthorityStateRevision + 1
+    ) {
+      throw new CoordinationError('state-conflict');
+    }
+    return rows.length === 1 ? 'advanced' : 'replayed';
   }
 
   async getRepositoryPlacement(): Promise<RepositoryPlacementLease | undefined> {
@@ -942,6 +1110,72 @@ async function runProjectTransaction<T>(
   }
 }
 
+function projectReadScope(scope: PostgresProjectScope): ProjectReadScope {
+  const accept = Object.freeze({
+    get: operationId => scope.accept.get(operationId),
+    getNonterminal: () => scope.accept.getNonterminal(),
+  } satisfies ProjectReadScope['accept']);
+  type CollaborationRead = ProjectReadScope['collaboration'];
+  const idempotency: CollaborationRead['idempotency'] = {
+    find: input => scope.collaboration.idempotency.find(input),
+  };
+  const requests: CollaborationRead['requests'] = {
+    find: requestId => scope.collaboration.requests.find(requestId),
+    findOpenByMember: memberId => (
+      scope.collaboration.requests.findOpenByMember(memberId)
+    ),
+    listComments: (requestId, options) => (
+      scope.collaboration.requests.listComments(requestId, options)
+    ),
+  };
+  const snapshot: CollaborationRead['snapshot'] = {
+    read: () => scope.collaboration.snapshot.read(),
+  };
+  const tickets: CollaborationRead['tickets'] = {
+    find: ticketId => scope.collaboration.tickets.find(ticketId),
+    findByNumber: ticketNumber => (
+      scope.collaboration.tickets.findByNumber(ticketNumber)
+    ),
+    findByNumbers: ticketNumbers => (
+      scope.collaboration.tickets.findByNumbers(ticketNumbers)
+    ),
+    findDetailBase: ticketId => (
+      scope.collaboration.tickets.findDetailBase(ticketId)
+    ),
+    hasPendingResolve: ticketId => (
+      scope.collaboration.tickets.hasPendingResolve(ticketId)
+    ),
+    list: options => scope.collaboration.tickets.list(options),
+    listAcceptedRelations: (ticketId, options) => (
+      scope.collaboration.tickets.listAcceptedRelations(ticketId, options)
+    ),
+    listComments: (ticketId, options) => (
+      scope.collaboration.tickets.listComments(ticketId, options)
+    ),
+  };
+  const collaboration: CollaborationRead = Object.freeze({
+    idempotency: Object.freeze(idempotency),
+    requests: Object.freeze(requests),
+    snapshot: Object.freeze(snapshot),
+    tickets: Object.freeze(tickets),
+  });
+  return Object.freeze({
+    accept,
+    collaboration,
+    findDevelopmentActorMember: actorId => scope.findDevelopmentActorMember(actorId),
+    findPrincipalMember: principalId => scope.findPrincipalMember(principalId),
+    findMembership: memberId => scope.findMembership(memberId),
+    getNonterminalDevelopmentBootstrapAttempt: () => (
+      scope.getNonterminalDevelopmentBootstrapAttempt()
+    ),
+    getProject: () => scope.getProject(),
+    getProjectEventSequence: () => scope.getProjectEventSequence(),
+    getRepositoryPlacement: () => scope.getRepositoryPlacement(),
+    listActiveSnapshotMemberships: () => scope.listActiveSnapshotMemberships(),
+    readProjectEvents: options => scope.readProjectEvents(options),
+  } satisfies ProjectReadScope);
+}
+
 async function runProjectReadTransaction<T>(
   client: PoolClient,
   projectId: CollabProjectId,
@@ -966,7 +1200,7 @@ async function runProjectReadTransaction<T>(
     const scope = new PostgresProjectScope(client, projectId, markBroken);
     let value: T;
     try {
-      value = await operation(scope);
+      value = await operation(projectReadScope(scope));
     } finally {
       scope.deactivate();
     }
@@ -1196,7 +1430,7 @@ implements DevelopmentBootstrapUploadLease {
 export class PostgresCoordination
   implements DevelopmentBootstrapAttemptLocator,
   ExpiredDevelopmentBootstrapAttemptCatalog, RecoveryCandidateCatalog,
-  RepositoryPlacementValidator {
+  RepositoryPlacementValidator, TerminalResponderCatalog {
   readonly #checkedOutClients = new CheckedOutPoolClients();
   readonly #ordinaryPool: Pool;
   readonly #onProjectEventCommitted: ((projectId: CollabProjectId) => void)
@@ -1324,6 +1558,63 @@ export class PostgresCoordination
         ? recoveryCandidate(last)
         : undefined;
       return Object.freeze({ candidates, nextCursor });
+    } finally {
+      checkedOut.release();
+    }
+  }
+
+  async listTerminalResponders(
+    options: ListTerminalRespondersOptions = {},
+  ): Promise<TerminalResponderCatalogPage> {
+    this.#assertOpen();
+    const limit = options.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new CoordinationError('invalid-record');
+    }
+    const after = options.after;
+    if (after !== undefined) validateTerminalResponderCursor(after);
+    const deadline = Date.now() + this.#projectLockTimeoutMs;
+    const checkedOut = await checkout(
+      this.#reservedPool,
+      deadline,
+      undefined,
+      this.#checkedOutClients,
+    );
+    try {
+      const rows = after === undefined
+        ? await safeQuery<TerminalResponderCatalogRow>(
+          checkedOut.client,
+          `SELECT project_id, operation_kind, operation_id, expires_at
+             FROM claudian_cloud.project_terminal_responder_catalog
+            ORDER BY expires_at, project_id, operation_kind, operation_id
+            LIMIT $1`,
+          [limit + 1],
+          checkedOut.markBroken,
+        )
+        : await safeQuery<TerminalResponderCatalogRow>(
+          checkedOut.client,
+          `SELECT project_id, operation_kind, operation_id, expires_at
+             FROM claudian_cloud.project_terminal_responder_catalog
+            WHERE (expires_at, project_id, operation_kind, operation_id)
+                > ($1::timestamptz, $2, $3, $4)
+            ORDER BY expires_at, project_id, operation_kind, operation_id
+            LIMIT $5`,
+          [
+            after.expiresAt,
+            after.projectId,
+            after.operationKind,
+            after.operationId,
+            limit + 1,
+          ],
+          checkedOut.markBroken,
+        );
+      const pageRows = rows.slice(0, limit);
+      const responders = Object.freeze(pageRows.map(terminalResponderCatalogEntry));
+      const last = pageRows.at(-1);
+      const nextCursor = rows.length > limit && last !== undefined
+        ? terminalResponderCatalogEntry(last)
+        : undefined;
+      return Object.freeze({ nextCursor, responders });
     } finally {
       checkedOut.release();
     }

@@ -8,6 +8,7 @@ import {
   COLLABORATION_SCHEMA,
   DEVELOPMENT_BOOTSTRAP_SCHEMA,
   FOUNDATION_SCHEMA,
+  PORTABILITY_LIFECYCLE_SCHEMA,
   PROJECT_READ_EVENTS_SCHEMA,
 } from './PostgresSchema.js';
 
@@ -110,6 +111,15 @@ const MIGRATION_RESOURCES = Object.freeze([
       import.meta.url,
     ),
     version: ACCEPT_RECOVERY_SCHEMA.version,
+  }),
+  Object.freeze({
+    checksum: PORTABILITY_LIFECYCLE_SCHEMA.checksum,
+    name: PORTABILITY_LIFECYCLE_SCHEMA.name,
+    resource: new URL(
+      './migrations/0006_portability_lifecycle.sql',
+      import.meta.url,
+    ),
+    version: PORTABILITY_LIFECYCLE_SCHEMA.version,
   }),
 ]);
 

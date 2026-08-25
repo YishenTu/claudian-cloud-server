@@ -28,10 +28,17 @@ export const ACCEPT_RECOVERY_SCHEMA = Object.freeze({
   version: 5,
 });
 
+export const PORTABILITY_LIFECYCLE_SCHEMA = Object.freeze({
+  checksum: 'a7c4773253250fc0c02e0e6f02026b22ef7f1767a19ff922947a30f843160de6',
+  name: 'portability-lifecycle',
+  version: 6,
+});
+
 export const POSTGRES_SCHEMAS = Object.freeze([
   FOUNDATION_SCHEMA,
   DEVELOPMENT_BOOTSTRAP_SCHEMA,
   PROJECT_READ_EVENTS_SCHEMA,
   COLLABORATION_SCHEMA,
   ACCEPT_RECOVERY_SCHEMA,
+  PORTABILITY_LIFECYCLE_SCHEMA,
 ]);
