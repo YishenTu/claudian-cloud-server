@@ -11,9 +11,6 @@
 - Attempt state is exactly `collecting`, `validating`, `ready`, `activating`, `rejected`, `cancelled`, `recovery-required`, or `activated`. Onboarding owns comparison, staging, validation, expiry, and cancellation requests; Project authority alone owns activation/cancellation settlement and visibility.
 - Do not reuse the development assertion, LAN Host admission, invitation trust,
   or LAN Host-transfer bindings for production Cloud onboarding.
-- Production LAN-to-Cloud onboarding remains absent until freeze proof,
-  resumable upload, exact checkpoint, activation/cutover, rollback, client
-  redirection, lost-response recovery, and split-authority prevention are
-  decision-complete.
+- `production/` may own isolated LAN-to-Cloud artifact receipt, staging, expiry, and exact cleanup only. It does not authorize transfer, create claims, publish a repository, activate a Project, accept source relinquishment, or recover the Project lifecycle.
 - A new onboarding profile must add its durable phase and cleanup contract to
   `ARCHITECTURE.md` before adding routes or persistent state.

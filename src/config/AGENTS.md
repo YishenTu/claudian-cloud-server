@@ -14,3 +14,4 @@
   Self-hosted and managed profiles must not fork Project behavior.
 - Secret values may be passed to narrow owners but never serialized, logged,
   included in validation errors, or exposed by health/version endpoints.
+- The claim-custody keyring path is fixed at `/run/secrets/claudian_claim_custody_keyring`. Preflight accepts only a regular non-symlink file owned by UID/GID `10001:10001` with mode `0400`; failures expose one sanitized code and no path, key ID, or material.

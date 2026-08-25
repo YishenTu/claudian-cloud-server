@@ -5,4 +5,5 @@
 - Keep resource ownership visible: the owner that creates a server, pool, scheduler, subscription hub, or process supervisor must also close it.
 - Startup validates runtime safety constraints before accepting traffic. Shutdown stops new admission before closing dependencies used by admitted work.
 - Readiness remains closed until nonterminal recovery settles and every cataloged active repository passes exact Project-scoped Git integrity verification.
+- Environment restore policy lives under `src/environment-maintenance/`. Composition may construct its coordinator, invoke startup recovery and readiness, and close it, but it must not interpret restore phases or register restore with Project recovery.
 - Composition tests verify construction failure cleanup, startup ordering, readiness transitions, bounded shutdown, and repeated close behavior.
