@@ -18,8 +18,11 @@ import {
   COLLAB_MAIN_REF,
   COLLAB_MEMBER_REF_PREFIX,
   isCollabGitOid,
+  isCollabMemberId,
   isCollabOpaqueId,
   isCollabProjectId,
+  type CollabCheckpointGitRef,
+  type CollabCheckpointObjectFormat,
   type CollabProjectId,
   type DevelopmentBootstrapGitRef,
   type DevelopmentBootstrapObjectFormat,
@@ -39,6 +42,10 @@ import {
   GitProcessError,
   GitProcessSupervisor,
 } from './GitProcessSupervisor.js';
+import {
+  DurableTreeRemovalError,
+  removeDurableOwnedTree,
+} from './DurableTreeRemoval.js';
 
 export type GitBundleImportErrorCode =
   | 'artifact-conflict'
@@ -90,8 +97,10 @@ export interface GitBundleImporterOptions {
   readonly maximumRepositoryBytes: number;
   readonly maximumTreeEntries: number;
   readonly operationTimeoutMs: number;
+  readonly removeTree?: (path: string) => Promise<void>;
   readonly resourceAdmission: ResourceAdmission;
   readonly stagingRoot: string;
+  readonly syncDirectory?: (path: string) => Promise<void>;
   readonly uploadAdmission: BootstrapUploadAdmission;
   readonly uploadIdleTimeoutMs: number;
   readonly uploadTotalTimeoutMs: number;
@@ -113,6 +122,44 @@ export interface ImportGitBundleInput {
   readonly signal?: AbortSignal;
 }
 
+export interface ImportRepositoryCheckpointInput {
+  readonly body: AsyncIterable<Uint8Array>;
+  readonly expectedByteCount: number;
+  readonly expectedSha256: string;
+  readonly objectFormat: CollabCheckpointObjectFormat;
+  readonly operationId: string;
+  readonly projectId: CollabProjectId;
+  readonly refs: readonly CollabCheckpointGitRef[];
+  readonly signal?: AbortSignal;
+}
+
+export interface ValidatedRepositoryCheckpoint {
+  readonly artifactKey: string;
+  readonly bundleByteCount: number;
+  readonly bundleSha256: string;
+  readonly markerSha256: string;
+  readonly objectFormat: CollabCheckpointObjectFormat;
+  readonly operationId: string;
+  readonly projectId: CollabProjectId;
+  readonly refs: readonly CollabCheckpointGitRef[];
+}
+
+export interface DiscardRepositoryCheckpointInput {
+  readonly operationId: string;
+  readonly projectId: CollabProjectId;
+}
+
+export interface RepositoryCheckpointStagingPort {
+  discardCheckpoint(
+    input: DiscardRepositoryCheckpointInput,
+  ): Promise<'removed' | 'replayed'>;
+  importCheckpoint(
+    input: ImportRepositoryCheckpointInput,
+  ): Promise<ValidatedRepositoryCheckpoint>;
+}
+
+export type RepositoryRestoreStagingPort = RepositoryCheckpointStagingPort;
+
 export interface ValidatedBootstrapRepository {
   readonly artifactKey: string;
   readonly attemptId: string;
@@ -131,6 +178,7 @@ export interface DiscardBootstrapAttemptInput {
 
 interface StagingPaths {
   readonly attempt: string;
+  readonly attemptParent: string;
   readonly attemptMarker: string;
   readonly attemptMarkerPart: string;
   readonly bundle: string;
@@ -140,6 +188,8 @@ interface StagingPaths {
   readonly project: string;
   readonly repository: string;
 }
+
+type StagingProfile = 'bootstrap' | 'checkpoint';
 
 interface ObjectInventoryEntry {
   readonly oid: string;
@@ -213,6 +263,11 @@ function assertOptions(options: GitBundleImporterOptions): void {
     (options.createBundleReadStream !== undefined
       && typeof options.createBundleReadStream !== 'function')
     ||
+    (options.syncDirectory !== undefined
+      && typeof options.syncDirectory !== 'function')
+    ||
+    (options.removeTree !== undefined && typeof options.removeTree !== 'function')
+    ||
     options.maximumBlobBytes > COLLAB_LIMITS.maxBlobBytes
     || options.maximumExpandedTreeEntries > MAXIMUM_EXPANDED_TREE_ENTRIES
     || options.maximumRepositoryBytes < options.maximumBlobBytes
@@ -226,7 +281,11 @@ function assertOptions(options: GitBundleImporterOptions): void {
   }
 }
 
-function assertInput(input: ImportGitBundleInput, maximumBundleBytes: number): void {
+function assertInput(
+  input: ImportGitBundleInput,
+  maximumBundleBytes: number,
+  expectedMemberCount?: number,
+): void {
   const objectLength = input.objectFormat === 'sha1' ? 40 : 64;
   if (
     !isCollabProjectId(input.projectId)
@@ -243,7 +302,7 @@ function assertInput(input: ImportGitBundleInput, maximumBundleBytes: number): v
     || (input.contentLength !== undefined
       && (!Number.isSafeInteger(input.contentLength)
         || input.contentLength !== input.expectedByteCount))
-    || input.refs.length !== 3
+    || input.refs.length < 2
   ) {
     fail('artifact-invalid');
   }
@@ -254,38 +313,120 @@ function assertInput(input: ImportGitBundleInput, maximumBundleBytes: number): v
       ref.name.localeCompare(previous, 'en-US') <= 0
       || !isCollabGitOid(ref.oid)
       || ref.oid.length !== objectLength
-      || (ref.name !== COLLAB_MAIN_REF
-        && !ref.name.startsWith(COLLAB_MEMBER_REF_PREFIX))
+      || (ref.name !== COLLAB_MAIN_REF && (
+        !ref.name.startsWith(COLLAB_MEMBER_REF_PREFIX)
+        || !isCollabMemberId(ref.name.slice(COLLAB_MEMBER_REF_PREFIX.length))
+      ))
     ) {
       fail('artifact-invalid');
     }
     if (ref.name.startsWith(COLLAB_MEMBER_REF_PREFIX)) memberRefs += 1;
     previous = ref.name;
   }
-  if (input.refs[0]?.name !== COLLAB_MAIN_REF || memberRefs !== 2) {
+  if (
+    input.refs[0]?.name !== COLLAB_MAIN_REF
+    || memberRefs !== input.refs.length - 1
+    || (expectedMemberCount !== undefined && memberRefs !== expectedMemberCount)
+  ) {
     fail('artifact-invalid');
   }
 }
 
-function artifactKey(projectId: string, attemptId: string): string {
-  return createHash('sha256').update(`${projectId}\0${attemptId}`, 'utf8').digest('hex');
+function artifactKey(
+  projectId: string,
+  attemptId: string,
+  profile: StagingProfile,
+): string {
+  const domain = profile === 'bootstrap' ? '' : 'checkpoint\0';
+  return createHash('sha256')
+    .update(`${domain}${projectId}\0${attemptId}`, 'utf8')
+    .digest('hex');
 }
 
-function attemptMarkerJson(projectId: string, attemptId: string): string {
-  return `${JSON.stringify({
-    artifactKey: artifactKey(projectId, attemptId),
+function stagingCleanup(
+  projectId: string,
+  attemptId: string,
+  profile: StagingProfile,
+): Readonly<{ cleanupKey: string; markerJson: string }> {
+  const markerJson = `${JSON.stringify({
+    artifactKey: artifactKey(projectId, attemptId, profile),
     attemptId,
+    operationKind: 'staging-cleanup',
+    profile,
+    projectId,
+    schemaVersion: 1,
+  })}\n`;
+  return Object.freeze({
+    cleanupKey: createHash('sha256')
+      .update(`staging-cleanup\0${markerJson}`, 'utf8')
+      .digest('hex'),
+    markerJson,
+  });
+}
+
+export function repositoryCheckpointAttemptId(
+  projectId: string,
+  operationId: string,
+): string {
+  return `checkpoint-${createHash('sha256')
+    .update(`${projectId}\0${operationId}`, 'utf8')
+    .digest('hex')}`;
+}
+
+export function repositoryCheckpointArtifactKey(
+  projectId: string,
+  operationId: string,
+): string {
+  return artifactKey(
+    projectId,
+    repositoryCheckpointAttemptId(projectId, operationId),
+    'checkpoint',
+  );
+}
+
+export function repositoryCheckpointAttemptMarkerJson(
+  projectId: string,
+  operationId: string,
+): string {
+  return attemptMarkerJson(
+    projectId,
+    repositoryCheckpointAttemptId(projectId, operationId),
+    'checkpoint',
+  );
+}
+
+function attemptMarkerJson(
+  projectId: string,
+  attemptId: string,
+  profile: StagingProfile,
+): string {
+  return `${JSON.stringify({
+    artifactKey: artifactKey(projectId, attemptId, profile),
+    attemptId,
+    ...(profile === 'checkpoint' ? { operationKind: 'checkpoint' } : {}),
     projectId,
     schemaVersion: 1,
   })}\n`;
 }
 
-function paths(root: string, projectId: string, attemptId: string): StagingPaths {
+function paths(
+  root: string,
+  projectId: string,
+  attemptId: string,
+  profile: StagingProfile,
+): StagingPaths {
   const project = join(root, Buffer.from(projectId, 'utf8').toString('hex'));
-  const attempt = join(project, Buffer.from(attemptId, 'utf8').toString('hex'));
+  const attemptParent = profile === 'bootstrap'
+    ? project
+    : join(project, 'checkpoint');
+  const attempt = join(
+    attemptParent,
+    Buffer.from(attemptId, 'utf8').toString('hex'),
+  );
   const repository = join(attempt, 'repository');
   return Object.freeze({
     attempt,
+    attemptParent,
     attemptMarker: join(attempt, ATTEMPT_MARKER),
     attemptMarkerPart: join(attempt, `.${ATTEMPT_MARKER}.part`),
     bundle: join(attempt, 'source.bundle'),
@@ -295,6 +436,19 @@ function paths(root: string, projectId: string, attemptId: string): StagingPaths
     project,
     repository,
   });
+}
+
+export function repositoryCheckpointStagingRepositoryPath(
+  stagingRoot: string,
+  projectId: string,
+  operationId: string,
+): string {
+  return paths(
+    stagingRoot,
+    projectId,
+    repositoryCheckpointAttemptId(projectId, operationId),
+    'checkpoint',
+  ).repository;
 }
 
 async function assertPrivateDirectory(path: string): Promise<void> {
@@ -316,7 +470,33 @@ async function assertPrivateDirectory(path: string): Promise<void> {
   }
 }
 
-async function preparePaths(stagingRoot: string, staging: StagingPaths): Promise<void> {
+async function privateDirectoryExists(path: string): Promise<boolean> {
+  try {
+    const entry = await lstat(path);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      fail('artifact-conflict');
+    }
+    await assertPrivateDirectory(path);
+    return true;
+  } catch (error: unknown) {
+    if (error instanceof GitBundleImportError) throw error;
+    if (
+      typeof error === 'object'
+      && error !== null
+      && 'code' in error
+      && error.code === 'ENOENT'
+    ) {
+      return false;
+    }
+    fail('storage-unavailable');
+  }
+}
+
+async function preparePaths(
+  stagingRoot: string,
+  staging: StagingPaths,
+  synchronizeDirectory: (path: string) => Promise<void>,
+): Promise<boolean> {
   await assertPrivateDirectory(stagingRoot);
   try {
     await mkdir(staging.project, { mode: DIRECTORY_MODE });
@@ -326,22 +506,41 @@ async function preparePaths(stagingRoot: string, staging: StagingPaths): Promise
     }
   }
   await assertPrivateDirectory(staging.project);
+  await synchronizeDirectory(stagingRoot);
+  if (staging.attemptParent !== staging.project) {
+    try {
+      await mkdir(staging.attemptParent, { mode: DIRECTORY_MODE });
+    } catch (error: unknown) {
+      if (!(typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST')) {
+        fail('storage-unavailable');
+      }
+    }
+    await assertPrivateDirectory(staging.attemptParent);
+    await synchronizeDirectory(staging.project);
+  }
+  let attemptCreated = false;
   try {
     await mkdir(staging.attempt, { mode: DIRECTORY_MODE });
+    attemptCreated = true;
   } catch (error: unknown) {
     if (!(typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST')) {
       fail('storage-unavailable');
     }
   }
   await assertPrivateDirectory(staging.attempt);
+  await synchronizeDirectory(staging.attemptParent);
+  return attemptCreated;
 }
 
 async function ensureAttemptMarker(
   staging: StagingPaths,
   projectId: string,
   attemptId: string,
+  profile: StagingProfile,
+  allowCreate: boolean,
+  synchronizeDirectory: (path: string) => Promise<void>,
 ): Promise<void> {
-  const json = attemptMarkerJson(projectId, attemptId);
+  const json = attemptMarkerJson(projectId, attemptId, profile);
   try {
     const entry = await lstat(staging.attemptMarker);
     if (
@@ -360,6 +559,7 @@ async function ensureAttemptMarker(
       fail('storage-unavailable');
     }
   }
+  if (!allowCreate) fail('artifact-conflict');
   await removeOwnedPartialFile(staging.attemptMarkerPart);
   let handle;
   try {
@@ -369,7 +569,7 @@ async function ensureAttemptMarker(
     await handle.close();
     handle = undefined;
     await rename(staging.attemptMarkerPart, staging.attemptMarker);
-    await syncDirectory(staging.attempt);
+    await synchronizeDirectory(staging.attempt);
   } catch {
     await handle?.close().catch(() => undefined);
     await rm(staging.attemptMarkerPart, { force: true }).catch(() => undefined);
@@ -381,8 +581,9 @@ async function assertAttemptMarker(
   staging: StagingPaths,
   projectId: string,
   attemptId: string,
+  profile: StagingProfile,
 ): Promise<void> {
-  const json = attemptMarkerJson(projectId, attemptId);
+  const json = attemptMarkerJson(projectId, attemptId, profile);
   try {
     const entry = await lstat(staging.attemptMarker);
     if (
@@ -422,6 +623,18 @@ async function syncDirectory(path: string): Promise<void> {
     fail('storage-unavailable');
   } finally {
     await directory?.close().catch(() => undefined);
+  }
+}
+
+async function syncFile(path: string): Promise<void> {
+  let file;
+  try {
+    file = await open(path, 'r');
+    await file.sync();
+  } catch {
+    fail('storage-unavailable');
+  } finally {
+    await file?.close().catch(() => undefined);
   }
 }
 
@@ -546,9 +759,10 @@ async function hashFile(
 function markerFor(
   input: ImportGitBundleInput,
   options: GitBundleImporterOptions,
+  profile: StagingProfile,
 ): ValidationMarker {
   return Object.freeze({
-    artifactKey: artifactKey(input.projectId, input.attemptId),
+    artifactKey: artifactKey(input.projectId, input.attemptId, profile),
     attemptId: input.attemptId,
     bundleByteCount: input.expectedByteCount,
     bundleSha256: input.expectedSha256,
@@ -832,6 +1046,193 @@ async function validateTrees(
   }
 }
 
+export interface GitRepositoryContentValidationInput {
+  readonly closed: () => boolean;
+  readonly deadline: number;
+  readonly maximumBlobBytes: number;
+  readonly maximumExpandedTreeEntries: number;
+  readonly maximumRepositoryBytes: number;
+  readonly maximumTreeEntries: number;
+  readonly objectFormat: CollabCheckpointObjectFormat;
+  readonly refs: readonly CollabCheckpointGitRef[];
+  readonly repositoryPath: string;
+  readonly signal: AbortSignal;
+  readonly supervisor: GitProcessSupervisor;
+}
+
+async function runRepositoryValidationCommand(
+  input: GitRepositoryContentValidationInput,
+  arguments_: readonly string[],
+  options: {
+    readonly captureOutput?: boolean;
+    readonly input?: string;
+  } = {},
+): Promise<Buffer> {
+  const remaining = input.deadline - Date.now();
+  if (remaining <= 0) fail('timeout');
+  try {
+    return await input.supervisor.runCommand({
+      arguments: arguments_,
+      captureOutput: options.captureOutput ?? false,
+      cwd: input.repositoryPath,
+      failureCode: 'repository-corrupt',
+      ...(options.input === undefined ? {} : { input: options.input }),
+      signal: input.signal,
+      timeoutMs: remaining,
+    });
+  } catch (error: unknown) {
+    if (error instanceof GitProcessError) {
+      throw mapProcess(error, input.closed());
+    }
+    fail('process-failed');
+  }
+}
+
+async function readRepositoryTrees(
+  input: GitRepositoryContentValidationInput,
+  treeOids: readonly string[],
+  oidBytes: number,
+): Promise<ReadonlyMap<string, readonly TreeEntry[]>> {
+  const remaining = input.deadline - Date.now();
+  if (remaining <= 0) fail('timeout');
+  const parser = new StreamingTreeBatchParser({
+    expectedOids: treeOids,
+    maximumExpandedTreeEntries: input.maximumExpandedTreeEntries,
+    maximumTreeEntries: input.maximumTreeEntries,
+    oidBytes,
+  });
+  let parserError: unknown;
+  try {
+    await input.supervisor.runStreamingCommand({
+      arguments: ['cat-file', '--batch'],
+      cwd: input.repositoryPath,
+      failureCode: 'repository-corrupt',
+      input: `${treeOids.join('\n')}\n`,
+      onStdoutChunk: chunk => {
+        try {
+          parser.push(chunk);
+        } catch (error: unknown) {
+          parserError = error;
+          throw error;
+        }
+      },
+      signal: input.signal,
+      stdoutMaxBytes: maximumTreeBatchOutputBytes(
+        input.maximumExpandedTreeEntries,
+      ),
+      timeoutMs: remaining,
+    });
+    return parser.finish();
+  } catch (error: unknown) {
+    if (parserError instanceof GitBundleImportError) throw parserError;
+    if (error instanceof GitBundleImportError) throw error;
+    if (error instanceof GitProcessError) {
+      throw mapProcess(error, input.closed());
+    }
+    fail('process-failed');
+  }
+}
+
+export async function verifyGitRepositoryContent(
+  input: GitRepositoryContentValidationInput,
+): Promise<void> {
+  await assertPrivateDirectory(input.repositoryPath);
+  const versionRemaining = input.deadline - Date.now();
+  if (versionRemaining <= 0) fail('timeout');
+  try {
+    await input.supervisor.verifyVersion(input.signal, versionRemaining);
+  } catch (error: unknown) {
+    if (error instanceof GitProcessError) {
+      throw mapProcess(error, input.closed());
+    }
+    fail('git-unavailable');
+  }
+  const objectFormat = await runRepositoryValidationCommand(
+    input,
+    ['rev-parse', '--show-object-format'],
+    { captureOutput: true },
+  );
+  if (objectFormat.toString('utf8').trim() !== input.objectFormat) {
+    fail('repository-invalid');
+  }
+  const importedRefs = parseRefOutput(await runRepositoryValidationCommand(
+    input,
+    ['show-ref'],
+    { captureOutput: true },
+  ));
+  if (!refsEqual(importedRefs, input.refs)) fail('repository-invalid');
+
+  const commitTypes = await runRepositoryValidationCommand(
+    input,
+    ['cat-file', '--batch-check=%(objecttype)'],
+    {
+      captureOutput: true,
+      input: `${input.refs.map(ref => ref.oid).join('\n')}\n`,
+    },
+  );
+  if (
+    commitTypes.toString('utf8').trim().split('\n')
+      .some(type => type !== 'commit')
+  ) {
+    fail('repository-invalid');
+  }
+  const fsck = await runRepositoryValidationCommand(
+    input,
+    ['fsck', '--full', '--strict', '--unreachable', '--no-reflogs', '--no-progress'],
+    { captureOutput: true },
+  );
+  if (fsck.length !== 0) fail('repository-invalid');
+
+  const inventory = parseInventory(await runRepositoryValidationCommand(
+    input,
+    [
+      'cat-file',
+      '--batch-all-objects',
+      '--unordered',
+      '--batch-check=%(objectname) %(objecttype) %(objectsize)',
+    ],
+    { captureOutput: true },
+  ));
+  let repositoryBytes = 0;
+  const treeOids: string[] = [];
+  for (const object of inventory.values()) {
+    repositoryBytes += object.size;
+    if (!Number.isSafeInteger(repositoryBytes)) fail('repository-limit');
+    if (object.type === 'blob' && object.size > input.maximumBlobBytes) {
+      fail('repository-limit');
+    }
+    if (object.type === 'tree') treeOids.push(object.oid);
+    else if (object.type !== 'blob' && object.type !== 'commit') {
+      fail('repository-invalid');
+    }
+  }
+  if (repositoryBytes > input.maximumRepositoryBytes) {
+    fail('repository-limit');
+  }
+
+  const rootTrees = (await runRepositoryValidationCommand(
+    input,
+    ['log', '--format=%T', '--all'],
+    { captureOutput: true },
+  )).toString('utf8').trim().split('\n').filter(Boolean);
+  if (rootTrees.length === 0) fail('repository-invalid');
+  const trees = await readRepositoryTrees(
+    input,
+    treeOids,
+    input.objectFormat === 'sha1' ? 20 : 32,
+  );
+  await validateTrees(
+    rootTrees,
+    trees,
+    inventory,
+    input.maximumExpandedTreeEntries,
+    input.maximumTreeEntries,
+    input.deadline,
+    input.signal,
+    input.closed,
+  );
+}
+
 export class GitBundleImporter {
   readonly #createBundleReadStream: NonNullable<
     GitBundleImporterOptions['createBundleReadStream']
@@ -842,9 +1243,11 @@ export class GitBundleImporter {
   readonly #maximumRepositoryBytes: number;
   readonly #maximumTreeEntries: number;
   readonly #options: GitBundleImporterOptions;
+  readonly #removeTree: (path: string) => Promise<void>;
   readonly #resourceAdmission: ResourceAdmission;
   readonly #stagingRoot: string;
   readonly #supervisor: GitProcessSupervisor;
+  readonly #syncDirectory: (path: string) => Promise<void>;
   readonly #uploadAdmission: BootstrapUploadAdmission;
   readonly #uploadIdleTimeoutMs: number;
   readonly #uploadTotalTimeoutMs: number;
@@ -870,6 +1273,8 @@ export class GitBundleImporter {
     this.#maximumRepositoryBytes = options.maximumRepositoryBytes;
     this.#maximumTreeEntries = options.maximumTreeEntries;
     this.#options = options;
+    this.#removeTree = options.removeTree
+      ?? (path => rm(path, { recursive: true }));
     this.#resourceAdmission = options.resourceAdmission;
     this.#stagingRoot = options.stagingRoot;
     this.#supervisor = new GitProcessSupervisor({
@@ -877,6 +1282,15 @@ export class GitBundleImporter {
       operationTimeoutMs: options.operationTimeoutMs,
       outputMaxBytes: options.maximumMetadataOutputBytes,
     });
+    const synchronizeDirectory = options.syncDirectory ?? syncDirectory;
+    this.#syncDirectory = async path => {
+      try {
+        await synchronizeDirectory(path);
+      } catch (error: unknown) {
+        if (error instanceof GitBundleImportError) throw error;
+        fail('storage-unavailable');
+      }
+    };
     this.#uploadAdmission = options.uploadAdmission;
     this.#uploadIdleTimeoutMs = options.uploadIdleTimeoutMs;
     this.#uploadTotalTimeoutMs = options.uploadTotalTimeoutMs;
@@ -898,9 +1312,96 @@ export class GitBundleImporter {
     input: ImportGitBundleInput,
   ): Promise<ValidatedBootstrapRepository> {
     if (this.#closed) throw new GitBundleImportError('closed');
-    assertInput(input, this.#maximumBundleBytes);
-    if (this.#attemptOperations.has(input.attemptId)) {
-      throw new GitBundleImportError('busy');
+    assertInput(input, this.#maximumBundleBytes, 2);
+    return this.#startImport(input, true, 'bootstrap');
+  }
+
+  async importCheckpoint(
+    input: ImportRepositoryCheckpointInput,
+  ): Promise<ValidatedRepositoryCheckpoint> {
+    if (this.#closed) throw new GitBundleImportError('closed');
+    if (
+      !isCollabProjectId(input.projectId)
+      || !isCollabOpaqueId(input.operationId)
+    ) {
+      fail('artifact-invalid');
+    }
+    const commonInput: ImportGitBundleInput = {
+      attemptId: repositoryCheckpointAttemptId(
+        input.projectId,
+        input.operationId,
+      ),
+      body: input.body,
+      contentEncoding: 'identity',
+      contentLength: input.expectedByteCount,
+      contentType: 'application/x-git-bundle',
+      declaredByteCount: input.expectedByteCount,
+      declaredSha256: input.expectedSha256,
+      expectedByteCount: input.expectedByteCount,
+      expectedSha256: input.expectedSha256,
+      objectFormat: input.objectFormat,
+      projectId: input.projectId,
+      refs: input.refs,
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
+    };
+    assertInput(commonInput, this.#maximumBundleBytes);
+    const validated = await this.#startImport(
+      commonInput,
+      false,
+      'checkpoint',
+    );
+    return Object.freeze({
+      artifactKey: validated.artifactKey,
+      bundleByteCount: validated.bundleByteCount,
+      bundleSha256: validated.bundleSha256,
+      markerSha256: validated.markerSha256,
+      objectFormat: validated.objectFormat,
+      operationId: input.operationId,
+      projectId: validated.projectId,
+      refs: validated.refs,
+    });
+  }
+
+  discardCheckpoint(
+    input: DiscardRepositoryCheckpointInput,
+  ): Promise<'removed' | 'replayed'> {
+    if (this.#closed) {
+      return Promise.reject(new GitBundleImportError('closed'));
+    }
+    if (
+      !isCollabProjectId(input.projectId)
+      || !isCollabOpaqueId(input.operationId)
+    ) {
+      return Promise.reject(new GitBundleImportError('artifact-invalid'));
+    }
+    return this.#trackOperation(this.#discardAttempt({
+      attemptId: repositoryCheckpointAttemptId(
+        input.projectId,
+        input.operationId,
+      ),
+      projectId: input.projectId,
+    }, 'checkpoint'));
+  }
+
+  #trackOperation<Result>(operation: Promise<Result>): Promise<Result> {
+    const tracked = operation.then(() => undefined, () => undefined);
+    this.#running.add(tracked);
+    void tracked.finally(() => this.#running.delete(tracked));
+    return operation;
+  }
+
+  #startImport(
+    input: ImportGitBundleInput,
+    acquireUploadPermit: boolean,
+    profile: StagingProfile,
+  ): Promise<ValidatedBootstrapRepository> {
+    const operationKey = artifactKey(
+      input.projectId,
+      input.attemptId,
+      profile,
+    );
+    if (this.#attemptOperations.has(operationKey)) {
+      return Promise.reject(new GitBundleImportError('busy'));
     }
     const controller = new AbortController();
     const onAbort = (): void => controller.abort('cancelled');
@@ -908,17 +1409,22 @@ export class GitBundleImporter {
     if (input.signal?.aborted === true) onAbort();
     this.#controllers.add(controller);
 
-    const operation = this.#performImport(input, controller.signal);
+    const operation = this.#performImport(
+      input,
+      controller.signal,
+      acquireUploadPermit,
+      profile,
+    );
     const tracked = operation.then(() => undefined, () => undefined);
     const attemptOperation = Object.freeze({ controller, settled: tracked });
-    this.#attemptOperations.set(input.attemptId, attemptOperation);
+    this.#attemptOperations.set(operationKey, attemptOperation);
     this.#running.add(tracked);
     void tracked.finally(() => {
       input.signal?.removeEventListener('abort', onAbort);
       this.#controllers.delete(controller);
       this.#running.delete(tracked);
-      if (this.#attemptOperations.get(input.attemptId) === attemptOperation) {
-        this.#attemptOperations.delete(input.attemptId);
+      if (this.#attemptOperations.get(operationKey) === attemptOperation) {
+        this.#attemptOperations.delete(operationKey);
       }
     });
     return operation;
@@ -931,29 +1437,58 @@ export class GitBundleImporter {
     if (!isCollabProjectId(input.projectId) || !isCollabOpaqueId(input.attemptId)) {
       fail('artifact-invalid');
     }
-    await this.abortAttempt(input);
-    const staging = paths(this.#stagingRoot, input.projectId, input.attemptId);
+    return this.#trackOperation(this.#discardAttempt(input, 'bootstrap'));
+  }
+
+  async #discardAttempt(
+    input: DiscardBootstrapAttemptInput,
+    profile: StagingProfile,
+  ): Promise<'removed' | 'replayed'> {
+    await this.#abortAttempt(input, profile);
+    const staging = paths(
+      this.#stagingRoot,
+      input.projectId,
+      input.attemptId,
+      profile,
+    );
     await assertPrivateDirectory(this.#stagingRoot);
+    if (!await privateDirectoryExists(staging.project)) {
+      await this.#syncDirectory(this.#stagingRoot);
+      return 'replayed';
+    }
+    if (
+      staging.attemptParent !== staging.project
+      && !await privateDirectoryExists(staging.attemptParent)
+    ) {
+      await this.#syncDirectory(staging.project);
+      return 'replayed';
+    }
+    const cleanup = stagingCleanup(input.projectId, input.attemptId, profile);
     try {
-      const entry = await lstat(staging.attempt);
-      if (!entry.isDirectory() || entry.isSymbolicLink()) fail('artifact-conflict');
+      return await removeDurableOwnedTree({
+        assertTargetOwned: () => assertAttemptMarker(
+          staging,
+          input.projectId,
+          input.attemptId,
+          profile,
+        ),
+        cleanupKey: cleanup.cleanupKey,
+        markerJson: cleanup.markerJson,
+        parentPath: staging.attemptParent,
+        removeTree: this.#removeTree,
+        syncDirectory: this.#syncDirectory,
+        targetPath: staging.attempt,
+      });
     } catch (error: unknown) {
       if (error instanceof GitBundleImportError) throw error;
-      if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
-        return 'replayed';
+      if (
+        error instanceof DurableTreeRemovalError
+        && error.code === 'conflict'
+      ) {
+        fail('artifact-conflict');
       }
       fail('storage-unavailable');
     }
-    await assertPrivateDirectory(staging.project);
-    await assertPrivateDirectory(staging.attempt);
-    await assertAttemptMarker(staging, input.projectId, input.attemptId);
-    try {
-      await rm(staging.attempt, { recursive: true });
-      await syncDirectory(staging.project);
-    } catch {
-      fail('storage-unavailable');
-    }
-    return 'removed';
   }
 
   async abortAttempt(input: DiscardBootstrapAttemptInput): Promise<void> {
@@ -961,7 +1496,18 @@ export class GitBundleImporter {
     if (!isCollabProjectId(input.projectId) || !isCollabOpaqueId(input.attemptId)) {
       fail('artifact-invalid');
     }
-    const active = this.#attemptOperations.get(input.attemptId);
+    await this.#abortAttempt(input, 'bootstrap');
+  }
+
+  async #abortAttempt(
+    input: DiscardBootstrapAttemptInput,
+    profile: StagingProfile,
+  ): Promise<void> {
+    const active = this.#attemptOperations.get(artifactKey(
+      input.projectId,
+      input.attemptId,
+      profile,
+    ));
     if (active !== undefined) {
       active.controller.abort('cancelled');
       await active.settled;
@@ -971,27 +1517,47 @@ export class GitBundleImporter {
   async #performImport(
     input: ImportGitBundleInput,
     signal: AbortSignal,
+    acquireUploadPermit: boolean,
+    profile: StagingProfile,
   ): Promise<ValidatedBootstrapRepository> {
     const deadline = Date.now() + this.#uploadTotalTimeoutMs;
     let uploadPermit: BootstrapUploadPermit | undefined;
     let gitPermit: GitChildPermit | undefined;
     try {
-      try {
-        uploadPermit = await this.#uploadAdmission.acquire({
-          attemptId: input.attemptId,
-          signal,
-        });
-      } catch (error: unknown) {
-        if (error instanceof BootstrapUploadAdmissionError) {
-          throw mapUploadAdmission(error);
+      if (acquireUploadPermit) {
+        try {
+          uploadPermit = await this.#uploadAdmission.acquire({
+            attemptId: input.attemptId,
+            signal,
+          });
+        } catch (error: unknown) {
+          if (error instanceof BootstrapUploadAdmissionError) {
+            throw mapUploadAdmission(error);
+          }
+          fail('storage-unavailable');
         }
-        fail('storage-unavailable');
       }
 
-      const staging = paths(this.#stagingRoot, input.projectId, input.attemptId);
-      await preparePaths(this.#stagingRoot, staging);
-      await ensureAttemptMarker(staging, input.projectId, input.attemptId);
-      const marker = markerFor(input, this.#options);
+      const staging = paths(
+        this.#stagingRoot,
+        input.projectId,
+        input.attemptId,
+        profile,
+      );
+      const attemptCreated = await preparePaths(
+        this.#stagingRoot,
+        staging,
+        this.#syncDirectory,
+      );
+      await ensureAttemptMarker(
+        staging,
+        input.projectId,
+        input.attemptId,
+        profile,
+        attemptCreated,
+        this.#syncDirectory,
+      );
+      const marker = markerFor(input, this.#options, profile);
       const json = markerJson(marker);
       const replay = await this.#readValidatedReplay(
         staging,
@@ -1017,6 +1583,7 @@ export class GitBundleImporter {
       }
       if (replay !== undefined) {
         await this.#verifyRepository(input, staging, signal, deadline);
+        await this.#hardenRepository(staging);
         return replay;
       }
       await this.#validateRepository(input, staging, signal, deadline);
@@ -1142,7 +1709,7 @@ export class GitBundleImporter {
       handle = undefined;
       await chmod(staging.bundlePart, FILE_MODE);
       await rename(staging.bundlePart, staging.bundle);
-      await syncDirectory(staging.attempt);
+      await this.#syncDirectory(staging.attempt);
     } catch (error: unknown) {
       await iterator.return?.().catch(() => undefined);
       await handle?.close().catch(() => undefined);
@@ -1166,7 +1733,13 @@ export class GitBundleImporter {
     if (remaining <= 0) fail('timeout');
     try {
       return await this.#supervisor.runCommand({
-        arguments: arguments_,
+        arguments: [
+          '-c',
+          'core.fsync=all',
+          '-c',
+          'core.fsyncMethod=fsync',
+          ...arguments_,
+        ],
         captureOutput: options.captureOutput ?? false,
         cwd: staging.repository,
         failureCode: 'repository-corrupt',
@@ -1175,51 +1748,6 @@ export class GitBundleImporter {
         timeoutMs: remaining,
       });
     } catch (error: unknown) {
-      if (error instanceof GitProcessError) throw mapProcess(error, this.#closed);
-      fail('process-failed');
-    }
-  }
-
-  async #readTrees(
-    staging: StagingPaths,
-    treeOids: readonly string[],
-    oidBytes: number,
-    signal: AbortSignal,
-    deadline: number,
-  ): Promise<ReadonlyMap<string, readonly TreeEntry[]>> {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) fail('timeout');
-    const parser = new StreamingTreeBatchParser({
-      expectedOids: treeOids,
-      maximumExpandedTreeEntries: this.#maximumExpandedTreeEntries,
-      maximumTreeEntries: this.#maximumTreeEntries,
-      oidBytes,
-    });
-    let parserError: unknown;
-    try {
-      await this.#supervisor.runStreamingCommand({
-        arguments: ['cat-file', '--batch'],
-        cwd: staging.repository,
-        failureCode: 'repository-corrupt',
-        input: `${treeOids.join('\n')}\n`,
-        onStdoutChunk: chunk => {
-          try {
-            parser.push(chunk);
-          } catch (error: unknown) {
-            parserError = error;
-            throw error;
-          }
-        },
-        signal,
-        stdoutMaxBytes: maximumTreeBatchOutputBytes(
-          this.#maximumExpandedTreeEntries,
-        ),
-        timeoutMs: remaining,
-      });
-      return parser.finish();
-    } catch (error: unknown) {
-      if (parserError instanceof GitBundleImportError) throw parserError;
-      if (error instanceof GitBundleImportError) throw error;
       if (error instanceof GitProcessError) throw mapProcess(error, this.#closed);
       fail('process-failed');
     }
@@ -1289,6 +1817,14 @@ export class GitBundleImporter {
     } catch {
       fail('storage-unavailable');
     }
+    await this.#hardenRepository(staging);
+  }
+
+  async #hardenRepository(staging: StagingPaths): Promise<void> {
+    await syncFile(join(staging.repository, 'config'));
+    await this.#syncDirectory(join(staging.repository, 'hooks'));
+    await this.#syncDirectory(staging.repository);
+    await this.#syncDirectory(staging.attempt);
   }
 
   async #verifyRepository(
@@ -1297,16 +1833,6 @@ export class GitBundleImporter {
     signal: AbortSignal,
     deadline: number,
   ): Promise<void> {
-    await assertPrivateDirectory(staging.repository);
-    await this.#verifyGitVersion(signal, deadline);
-    const objectFormat = await this.#run(
-      staging,
-      ['rev-parse', '--show-object-format'],
-      { captureOutput: true, deadline, signal },
-    );
-    if (objectFormat.toString('utf8').trim() !== input.objectFormat) {
-      fail('repository-invalid');
-    }
     await this.#run(staging, ['bundle', 'verify', '../source.bundle'], { deadline, signal });
     const bundleRefs = parseRefOutput(await this.#run(
       staging,
@@ -1314,82 +1840,19 @@ export class GitBundleImporter {
       { captureOutput: true, deadline, signal },
     ));
     if (!refsEqual(bundleRefs, input.refs)) fail('repository-invalid');
-    const importedRefs = parseRefOutput(await this.#run(
-      staging,
-      ['show-ref', '--heads'],
-      { captureOutput: true, deadline, signal },
-    ));
-    if (!refsEqual(importedRefs, input.refs)) fail('repository-invalid');
-
-    const commitTypes = await this.#run(
-      staging,
-      ['cat-file', '--batch-check=%(objecttype)'],
-      {
-        captureOutput: true,
-        deadline,
-        input: `${input.refs.map(ref => ref.oid).join('\n')}\n`,
-        signal,
-      },
-    );
-    if (commitTypes.toString('utf8').trim().split('\n').some(type => type !== 'commit')) {
-      fail('repository-invalid');
-    }
-    const fsck = await this.#run(
-      staging,
-      ['fsck', '--full', '--strict', '--unreachable', '--no-reflogs', '--no-progress'],
-      { captureOutput: true, deadline, signal },
-    );
-    if (fsck.length !== 0) fail('repository-invalid');
-
-    const inventory = parseInventory(await this.#run(
-      staging,
-      [
-        'cat-file',
-        '--batch-all-objects',
-        '--unordered',
-        '--batch-check=%(objectname) %(objecttype) %(objectsize)',
-      ],
-      { captureOutput: true, deadline, signal },
-    ));
-    let repositoryBytes = 0;
-    const treeOids: string[] = [];
-    for (const object of inventory.values()) {
-      repositoryBytes += object.size;
-      if (!Number.isSafeInteger(repositoryBytes)) fail('repository-limit');
-      if (object.type === 'blob' && object.size > this.#maximumBlobBytes) {
-        fail('repository-limit');
-      }
-      if (object.type === 'tree') treeOids.push(object.oid);
-      else if (object.type !== 'blob' && object.type !== 'commit') {
-        fail('repository-invalid');
-      }
-    }
-    if (repositoryBytes > this.#maximumRepositoryBytes) fail('repository-limit');
-
-    const rootTrees = (await this.#run(
-      staging,
-      ['log', '--format=%T', '--all'],
-      { captureOutput: true, deadline, signal },
-    )).toString('utf8').trim().split('\n').filter(Boolean);
-    if (rootTrees.length === 0) fail('repository-invalid');
-    const oidBytes = input.objectFormat === 'sha1' ? 20 : 32;
-    const trees = await this.#readTrees(
-      staging,
-      treeOids,
-      oidBytes,
-      signal,
+    await verifyGitRepositoryContent({
+      closed: () => this.#closed,
       deadline,
-    );
-    await validateTrees(
-      rootTrees,
-      trees,
-      inventory,
-      this.#maximumExpandedTreeEntries,
-      this.#maximumTreeEntries,
-      deadline,
+      maximumBlobBytes: this.#maximumBlobBytes,
+      maximumExpandedTreeEntries: this.#maximumExpandedTreeEntries,
+      maximumRepositoryBytes: this.#maximumRepositoryBytes,
+      maximumTreeEntries: this.#maximumTreeEntries,
+      objectFormat: input.objectFormat,
+      refs: input.refs,
+      repositoryPath: staging.repository,
       signal,
-      () => this.#closed,
-    );
+      supervisor: this.#supervisor,
+    });
   }
 
   async #writeMarker(staging: StagingPaths, json: string): Promise<void> {
@@ -1401,7 +1864,7 @@ export class GitBundleImporter {
       await handle.close();
       handle = undefined;
       await rename(staging.markerPart, staging.marker);
-      await syncDirectory(staging.repository);
+      await this.#syncDirectory(staging.repository);
     } catch {
       await handle?.close().catch(() => undefined);
       await rm(staging.markerPart, { force: true }).catch(() => undefined);

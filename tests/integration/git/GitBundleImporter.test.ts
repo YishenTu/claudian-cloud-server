@@ -12,7 +12,7 @@ import {
   symlink,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { promisify } from 'node:util';
 import { describe, it } from 'node:test';
@@ -22,8 +22,12 @@ import type { DevelopmentBootstrapGitRef } from '@claudian-collab/protocol';
 import {
   GitBundleImporter,
   GitBundleImportError,
+  repositoryCheckpointArtifactKey,
+  repositoryCheckpointAttemptId,
+  repositoryCheckpointStagingRepositoryPath,
   type GitBundleImporterOptions,
   type ImportGitBundleInput,
+  type ImportRepositoryCheckpointInput,
 } from '../../../src/repositories/GitBundleImporter.js';
 import { BootstrapUploadAdmission } from '../../../src/resource-admission/BootstrapUploadAdmission.js';
 import { ResourceAdmission } from '../../../src/resource-admission/ResourceAdmission.js';
@@ -62,7 +66,7 @@ async function createBundleFixture(options: {
   readonly bundleRefMode?: 'exact' | 'extra' | 'missing';
   readonly files?: Readonly<Record<string, string>>;
   readonly gitlink?: boolean;
-  readonly memberIds?: readonly [string, string];
+  readonly memberIds?: readonly string[];
   readonly objectFormat?: 'sha1' | 'sha256';
   readonly repeatedTreeDepth?: number;
   readonly symlinks?: Readonly<Record<string, string>>;
@@ -257,12 +261,15 @@ async function createBundleFixture(options: {
   }
   const headOid = await git(source, ['rev-parse', 'refs/heads/main']);
   const memberIds = options.memberIds ?? ['member-a', 'member-b'];
-  await git(source, ['update-ref', `refs/heads/members/${memberIds[0]}`, headOid]);
-  await git(source, ['update-ref', `refs/heads/members/${memberIds[1]}`, headOid]);
+  for (const memberId of memberIds) {
+    await git(source, ['update-ref', `refs/heads/members/${memberId}`, headOid]);
+  }
   const refs = [
     { name: 'refs/heads/main', oid: headOid },
-    { name: `refs/heads/members/${memberIds[0]}`, oid: headOid },
-    { name: `refs/heads/members/${memberIds[1]}`, oid: headOid },
+    ...memberIds.map(memberId => ({
+      name: `refs/heads/members/${memberId}`,
+      oid: headOid,
+    })),
   ].sort((left, right) => left.name.localeCompare(right.name, 'en-US'));
   if (options.bundleRefMode === 'extra') {
     await git(source, ['update-ref', 'refs/heads/extra', headOid]);
@@ -309,6 +316,8 @@ function createImporter(
       path: string,
       signal: AbortSignal,
     ) => AsyncIterable<unknown>;
+    readonly removeTree?: (path: string) => Promise<void>;
+    readonly syncDirectory?: (path: string) => Promise<void>;
   } = {},
 ): {
   readonly importer: GitBundleImporter;
@@ -353,6 +362,23 @@ function createImporter(
   };
 }
 
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error: unknown) {
+    if (
+      typeof error === 'object'
+      && error !== null
+      && 'code' in error
+      && error.code === 'ENOENT'
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
 function importInput(
   fixture: BundleFixture,
   overrides: Partial<ImportGitBundleInput> = {},
@@ -389,6 +415,491 @@ async function expectImportError(
 }
 
 describe('GitBundleImporter', () => {
+  it('stages a production checkpoint independently from bootstrap upload admission', async () => {
+    const fixture = await createBundleFixture({
+      memberIds: ['member-a', 'member-b', 'member-c'],
+    });
+    const owners = createImporter(fixture);
+    try {
+      await owners.uploadAdmission.close();
+      const input: ImportRepositoryCheckpointInput = {
+        body: createReadStream(fixture.bundlePath, { highWaterMark: 11 }),
+        expectedByteCount: fixture.bundleByteCount,
+        expectedSha256: fixture.bundleSha256,
+        objectFormat: fixture.objectFormat,
+        operationId: 'operation-checkpoint',
+        projectId: 'project-a',
+        refs: fixture.refs,
+      };
+      const staged = await owners.importer.importCheckpoint(input);
+      assert.deepEqual(staged, {
+        artifactKey: repositoryCheckpointArtifactKey(
+          'project-a',
+          'operation-checkpoint',
+        ),
+        bundleByteCount: fixture.bundleByteCount,
+        bundleSha256: fixture.bundleSha256,
+        markerSha256: staged.markerSha256,
+        objectFormat: fixture.objectFormat,
+        operationId: 'operation-checkpoint',
+        projectId: 'project-a',
+        refs: fixture.refs,
+      });
+      assert.equal(Object.isFrozen(staged), true);
+      assert.equal(await owners.importer.discardAttempt({
+        attemptId: 'operation-checkpoint',
+        projectId: 'project-a',
+      }), 'replayed');
+      assert.equal(await owners.importer.discardCheckpoint({
+        operationId: 'operation-checkpoint',
+        projectId: 'project-a',
+      }), 'removed');
+      assert.equal(await owners.importer.discardCheckpoint({
+        operationId: 'operation-checkpoint',
+        projectId: 'project-a',
+      }), 'replayed');
+    } finally {
+      await owners.importer.close();
+      await owners.resourceAdmission.close();
+      await rm(fixture.authorityRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('hardens imported Git state before committing validation and rebuilds after a barrier failure', async () => {
+    const fixture = await createBundleFixture({
+      memberIds: ['member-a', 'member-b', 'member-c'],
+    });
+    const operationId = 'operation-durability';
+    const attemptId = repositoryCheckpointAttemptId('project-a', operationId);
+    const attempt = join(
+      fixture.stagingRoot,
+      Buffer.from('project-a').toString('hex'),
+      'checkpoint',
+      Buffer.from(attemptId).toString('hex'),
+    );
+    const repository = join(attempt, 'repository');
+    const validationMarker = join(repository, '.claudian-cloud-validation.json');
+    let injected = false;
+    const owners = createImporter(fixture, {
+      syncDirectory: async path => {
+        if (
+          !injected
+          && path === attempt
+          && await pathExists(repository)
+          && !await pathExists(validationMarker)
+        ) {
+          injected = true;
+          throw new Error('injected-repository-durability-failure');
+        }
+      },
+    });
+    const input = (): ImportRepositoryCheckpointInput => ({
+      body: createReadStream(fixture.bundlePath, { highWaterMark: 11 }),
+      expectedByteCount: fixture.bundleByteCount,
+      expectedSha256: fixture.bundleSha256,
+      objectFormat: fixture.objectFormat,
+      operationId,
+      projectId: 'project-a',
+      refs: fixture.refs,
+    });
+    try {
+      await expectImportError(
+        owners.importer.importCheckpoint(input()),
+        'storage-unavailable',
+      );
+      assert.equal(injected, true);
+      assert.equal(await pathExists(validationMarker), false);
+      const checkpoint = await owners.importer.importCheckpoint(input());
+      assert.equal(checkpoint.operationId, operationId);
+      assert.equal(await pathExists(validationMarker), true);
+    } finally {
+      await owners.importer.close();
+      await Promise.all([
+        owners.resourceAdmission.close(),
+        owners.uploadAdmission.close(),
+      ]);
+      await rm(fixture.authorityRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('re-establishes an ambiguous validation-marker barrier on replay', async () => {
+    const fixture = await createBundleFixture({
+      memberIds: ['member-a', 'member-b', 'member-c'],
+    });
+    const operationId = 'operation-marker-barrier';
+    const attemptId = repositoryCheckpointAttemptId('project-a', operationId);
+    const attempt = join(
+      fixture.stagingRoot,
+      Buffer.from('project-a').toString('hex'),
+      'checkpoint',
+      Buffer.from(attemptId).toString('hex'),
+    );
+    const repository = join(attempt, 'repository');
+    const validationMarker = join(repository, '.claudian-cloud-validation.json');
+    let repositorySyncsWithMarker = 0;
+    const owners = createImporter(fixture, {
+      syncDirectory: async path => {
+        if (path === repository && await pathExists(validationMarker)) {
+          repositorySyncsWithMarker += 1;
+          if (repositorySyncsWithMarker === 1) {
+            throw new Error('injected-validation-marker-sync-failure');
+          }
+        }
+      },
+    });
+    const input = (): ImportRepositoryCheckpointInput => ({
+      body: createReadStream(fixture.bundlePath, { highWaterMark: 11 }),
+      expectedByteCount: fixture.bundleByteCount,
+      expectedSha256: fixture.bundleSha256,
+      objectFormat: fixture.objectFormat,
+      operationId,
+      projectId: 'project-a',
+      refs: fixture.refs,
+    });
+    try {
+      await expectImportError(
+        owners.importer.importCheckpoint(input()),
+        'storage-unavailable',
+      );
+      assert.equal(await pathExists(validationMarker), true);
+      const replay = await owners.importer.importCheckpoint(input());
+      assert.equal(replay.operationId, operationId);
+      assert.equal(repositorySyncsWithMarker, 2);
+    } finally {
+      await owners.importer.close();
+      await Promise.all([
+        owners.resourceAdmission.close(),
+        owners.uploadAdmission.close(),
+      ]);
+      await rm(fixture.authorityRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('uses an explicit Git fsync policy while materializing a checkpoint', async () => {
+    const fixture = await createBundleFixture({
+      memberIds: ['member-a', 'member-b', 'member-c'],
+    });
+    const executable = join(fixture.authorityRoot, 'recording-git');
+    const commandLog = join(fixture.authorityRoot, 'git-commands.log');
+    await writeFile(executable, `#!/bin/sh
+set -eu
+printf '%s ' "$@" >> '${commandLog}'
+printf '\\n' >> '${commandLog}'
+exec '${GIT_EXECUTABLE}' "$@"
+`, { mode: 0o755 });
+    const owners = createImporter(fixture, { gitExecutable: executable });
+    try {
+      await owners.importer.importCheckpoint({
+        body: createReadStream(fixture.bundlePath, { highWaterMark: 11 }),
+        expectedByteCount: fixture.bundleByteCount,
+        expectedSha256: fixture.bundleSha256,
+        objectFormat: fixture.objectFormat,
+        operationId: 'operation-fsync-policy',
+        projectId: 'project-a',
+        refs: fixture.refs,
+      });
+      const commands = (await readFile(commandLog, 'utf8')).split('\n');
+      for (const command of ['init', 'fetch']) {
+        const observed = commands.find(line => line.includes(` ${command} `));
+        assert.notEqual(observed, undefined);
+        assert.match(observed ?? '', /-c core\.fsync=all -c core\.fsyncMethod=fsync/u);
+      }
+    } finally {
+      await owners.importer.close();
+      await Promise.all([
+        owners.resourceAdmission.close(),
+        owners.uploadAdmission.close(),
+      ]);
+      await rm(fixture.authorityRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('waits for checkpoint discard to finish before shutdown settles', async () => {
+    const fixture = await createBundleFixture({
+      memberIds: ['member-a', 'member-b', 'member-c'],
+    });
+    const operationId = 'operation-discard-close';
+    const attemptParent = join(
+      fixture.stagingRoot,
+      Buffer.from('project-a').toString('hex'),
+      'checkpoint',
+    );
+    let blockDiscard = false;
+    let enterDiscard: (() => void) | undefined;
+    let releaseDiscard: (() => void) | undefined;
+    const discardEntered = new Promise<void>(resolve => {
+      enterDiscard = resolve;
+    });
+    const discardRelease = new Promise<void>(resolve => {
+      releaseDiscard = resolve;
+    });
+    const owners = createImporter(fixture, {
+      syncDirectory: async path => {
+        if (blockDiscard && path === attemptParent) {
+          enterDiscard?.();
+          await discardRelease;
+        }
+      },
+    });
+    try {
+      await owners.importer.importCheckpoint({
+        body: createReadStream(fixture.bundlePath, { highWaterMark: 11 }),
+        expectedByteCount: fixture.bundleByteCount,
+        expectedSha256: fixture.bundleSha256,
+        objectFormat: fixture.objectFormat,
+        operationId,
+        projectId: 'project-a',
+        refs: fixture.refs,
+      });
+      blockDiscard = true;
+      const discard = owners.importer.discardCheckpoint({
+        operationId,
+        projectId: 'project-a',
+      });
+      assert.equal(await Promise.race([
+        discardEntered.then(() => true),
+        new Promise<boolean>(resolve => setTimeout(() => resolve(false), 500)),
+      ]), true);
+      let closeSettled = false;
+      const closing = owners.importer.close().then(() => {
+        closeSettled = true;
+      });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(closeSettled, false);
+      releaseDiscard?.();
+      assert.equal(await discard, 'removed');
+      await closing;
+    } finally {
+      releaseDiscard?.();
+      await owners.importer.close();
+      await Promise.all([
+        owners.resourceAdmission.close(),
+        owners.uploadAdmission.close(),
+      ]);
+      await rm(fixture.authorityRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('replays checkpoint cleanup after detachment and partial recursive removal', async () => {
+    const fixture = await createBundleFixture({
+      memberIds: ['member-a', 'member-b', 'member-c'],
+    });
+    const operationId = 'operation-partial-cleanup';
+    const attemptId = repositoryCheckpointAttemptId('project-a', operationId);
+    const attempt = join(
+      fixture.stagingRoot,
+      Buffer.from('project-a').toString('hex'),
+      'checkpoint',
+      Buffer.from(attemptId).toString('hex'),
+    );
+    const attemptParent = join(
+      fixture.stagingRoot,
+      Buffer.from('project-a').toString('hex'),
+      'checkpoint',
+    );
+    let cleanupStarted = false;
+    let cleanupSyncCount = 0;
+    let failCleanup = true;
+    const detachedCleanups: string[] = [];
+    const latestDetachedCleanup = (): string | undefined => detachedCleanups.at(-1);
+    const owners = createImporter(fixture, {
+      removeTree: async path => {
+        detachedCleanups.push(path);
+        if (failCleanup) {
+          failCleanup = false;
+          await rm(join(path, 'repository', '.claudian-cloud-validation.json'), {
+            force: true,
+          });
+          throw new Error('injected-partial-cleanup-failure');
+        }
+        await rm(path, { recursive: true });
+      },
+      syncDirectory: path => {
+        if (cleanupStarted && path === attemptParent) {
+          cleanupSyncCount += 1;
+          if (cleanupSyncCount === 2) {
+            throw new Error('injected-detachment-sync-failure');
+          }
+        }
+        return Promise.resolve();
+      },
+    });
+    try {
+      await owners.importer.importCheckpoint({
+        body: createReadStream(fixture.bundlePath, { highWaterMark: 11 }),
+        expectedByteCount: fixture.bundleByteCount,
+        expectedSha256: fixture.bundleSha256,
+        objectFormat: fixture.objectFormat,
+        operationId,
+        projectId: 'project-a',
+        refs: fixture.refs,
+      });
+      cleanupStarted = true;
+      await expectImportError(owners.importer.discardCheckpoint({
+        operationId,
+        projectId: 'project-a',
+      }), 'storage-unavailable');
+      assert.equal(await pathExists(attempt), false);
+      assert.deepEqual(detachedCleanups, []);
+      await expectImportError(owners.importer.discardCheckpoint({
+        operationId,
+        projectId: 'project-a',
+      }), 'storage-unavailable');
+      const detachedCleanup = latestDetachedCleanup();
+      assert.ok(detachedCleanup !== undefined);
+      assert.equal(await pathExists(detachedCleanup), true);
+      assert.equal(await owners.importer.discardCheckpoint({
+        operationId,
+        projectId: 'project-a',
+      }), 'removed');
+      assert.equal(await pathExists(detachedCleanup), false);
+      assert.equal(await owners.importer.discardCheckpoint({
+        operationId,
+        projectId: 'project-a',
+      }), 'replayed');
+    } finally {
+      await owners.importer.close();
+      await Promise.all([
+        owners.resourceAdmission.close(),
+        owners.uploadAdmission.close(),
+      ]);
+      await rm(fixture.authorityRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('preserves an ownership conflict while discarding checkpoint staging', async () => {
+    const fixture = await createBundleFixture({
+      memberIds: ['member-a', 'member-b'],
+    });
+    const operationId = 'operation-discard-ownership-conflict';
+    const repository = repositoryCheckpointStagingRepositoryPath(
+      fixture.stagingRoot,
+      'project-a',
+      operationId,
+    );
+    const attempt = dirname(repository);
+    const owners = createImporter(fixture);
+    try {
+      await owners.importer.importCheckpoint({
+        body: createReadStream(fixture.bundlePath, { highWaterMark: 11 }),
+        expectedByteCount: fixture.bundleByteCount,
+        expectedSha256: fixture.bundleSha256,
+        objectFormat: fixture.objectFormat,
+        operationId,
+        projectId: 'project-a',
+        refs: fixture.refs,
+      });
+      await rm(join(attempt, '.claudian-cloud-attempt.json'));
+      await expectImportError(owners.importer.discardCheckpoint({
+        operationId,
+        projectId: 'project-a',
+      }), 'artifact-conflict');
+      assert.equal(await pathExists(repository), true);
+    } finally {
+      await owners.importer.close();
+      await Promise.all([
+        owners.resourceAdmission.close(),
+        owners.uploadAdmission.close(),
+      ]);
+      await rm(fixture.authorityRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('structurally isolates checkpoint staging from caller-chosen bootstrap IDs', async () => {
+    const fixture = await createBundleFixture({
+      memberIds: ['member-a', 'member-b'],
+    });
+    const owners = createImporter(fixture);
+    const projectId = 'project-a';
+    const operationId = 'operation-shared';
+    const bootstrapAttemptId = repositoryCheckpointAttemptId(
+      projectId,
+      operationId,
+    );
+    const checkpointInput = (): ImportRepositoryCheckpointInput => ({
+      body: createReadStream(fixture.bundlePath, { highWaterMark: 11 }),
+      expectedByteCount: fixture.bundleByteCount,
+      expectedSha256: fixture.bundleSha256,
+      objectFormat: fixture.objectFormat,
+      operationId,
+      projectId,
+      refs: fixture.refs,
+    });
+    const bootstrapInput = (): ImportGitBundleInput => importInput(fixture, {
+      attemptId: bootstrapAttemptId,
+      body: createReadStream(fixture.bundlePath, { highWaterMark: 13 }),
+      projectId,
+    });
+    try {
+      const [bootstrap, checkpoint] = await Promise.all([
+        owners.importer.importBundle(bootstrapInput()),
+        owners.importer.importCheckpoint(checkpointInput()),
+      ]);
+      assert.notEqual(bootstrap.artifactKey, checkpoint.artifactKey);
+      assert.equal(
+        (await owners.importer.importBundle(bootstrapInput())).artifactKey,
+        bootstrap.artifactKey,
+      );
+      assert.equal(
+        (await owners.importer.importCheckpoint(checkpointInput())).artifactKey,
+        checkpoint.artifactKey,
+      );
+
+      assert.equal(await owners.importer.discardCheckpoint({
+        operationId,
+        projectId,
+      }), 'removed');
+      assert.equal(
+        (await owners.importer.importBundle(bootstrapInput())).artifactKey,
+        bootstrap.artifactKey,
+      );
+      await owners.importer.importCheckpoint(checkpointInput());
+
+      assert.equal(await owners.importer.discardAttempt({
+        attemptId: bootstrapAttemptId,
+        projectId,
+      }), 'removed');
+      assert.equal(
+        (await owners.importer.importCheckpoint(checkpointInput())).artifactKey,
+        checkpoint.artifactKey,
+      );
+      assert.equal(await owners.importer.discardCheckpoint({
+        operationId,
+        projectId,
+      }), 'removed');
+    } finally {
+      await owners.importer.close();
+      await owners.resourceAdmission.close();
+      await rm(fixture.authorityRoot, { force: true, recursive: true });
+    }
+  });
+
+  it('rejects extra refs in a production checkpoint bundle', async () => {
+    const fixture = await createBundleFixture({
+      bundleRefMode: 'extra',
+      memberIds: ['member-a', 'member-b', 'member-c'],
+    });
+    const owners = createImporter(fixture);
+    try {
+      await expectImportError(owners.importer.importCheckpoint({
+        body: createReadStream(fixture.bundlePath),
+        expectedByteCount: fixture.bundleByteCount,
+        expectedSha256: fixture.bundleSha256,
+        objectFormat: fixture.objectFormat,
+        operationId: 'operation-extra-ref',
+        projectId: 'project-a',
+        refs: fixture.refs,
+      }), 'repository-invalid');
+    } finally {
+      await owners.importer.close();
+      await Promise.all([
+        owners.resourceAdmission.close(),
+        owners.uploadAdmission.close(),
+      ]);
+      await rm(fixture.authorityRoot, { force: true, recursive: true });
+    }
+  });
+
   it('streams and imports an exact raw bundle with real Git', async () => {
     const fixture = await createBundleFixture();
     const owners = createImporter(fixture);
@@ -703,7 +1214,7 @@ describe('GitBundleImporter', () => {
     }
   });
 
-  it('recovers an exact attempt after a crash left a partial marker', async () => {
+  it('rejects markerless adoption and recovers an owned partial marker', async () => {
     const fixture = await createBundleFixture();
     const owners = createImporter(fixture);
     const attempt = join(
@@ -717,8 +1228,21 @@ describe('GitBundleImporter', () => {
         join(attempt, '..claudian-cloud-attempt.json.part'),
         'interrupted-marker',
       );
+      await expectImportError(
+        owners.importer.importBundle(importInput(fixture)),
+        'artifact-conflict',
+      );
+      await rm(attempt, { recursive: true });
       const validated = await owners.importer.importBundle(importInput(fixture));
       assert.equal(validated.attemptId, 'attempt-a');
+      await writeFile(
+        join(attempt, '..claudian-cloud-attempt.json.part'),
+        'interrupted-marker',
+      );
+      assert.equal(
+        (await owners.importer.importBundle(importInput(fixture))).artifactKey,
+        validated.artifactKey,
+      );
     } finally {
       await owners.importer.close();
       await Promise.all([
