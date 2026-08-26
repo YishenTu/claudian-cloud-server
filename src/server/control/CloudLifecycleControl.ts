@@ -7,7 +7,6 @@ import {
   type BeginLanToCloudTransferRequest,
   type CancelProjectAuthorityTransferRequest,
   type ClaimTransferredMembershipRequest,
-  type CollabAuthorityTransferDirection,
   type CollabControlOperationMap,
   type CollabProjectRetirementAcknowledgementRequest,
   type CollabProjectRetirementRequest,
@@ -19,6 +18,10 @@ import {
   type RotateTransferredMembershipClaimsRequest,
 } from '@claudian-collab/protocol';
 
+import {
+  AuthorityTransferControlDispatcherError,
+  type AuthorityTransferControlDispatcher,
+} from '../../project-authority/lifecycle/AuthorityTransferControlDispatcher.js';
 import {
   CloudToLanTransferCoordinatorError,
   type CloudToLanTransferCoordinator,
@@ -41,10 +44,8 @@ type LanToCloudControl = Pick<
   LanToCloudTransferCoordinator,
   | 'acknowledgeClaimBatch'
   | 'begin'
-  | 'cancel'
   | 'claimMembership'
   | 'commitRelinquishment'
-  | 'getStatus'
   | 'rotateClaims'
 >;
 
@@ -53,29 +54,24 @@ type CloudToLanControl = Pick<
   | 'acceptTarget'
   | 'acknowledgeRedemption'
   | 'begin'
-  | 'cancel'
   | 'confirmTargetActive'
   | 'getClaim'
-  | 'getStatus'
   | 'reportTargetStaged'
 >;
 
 type RetireControl = Pick<RetireCoordinator, 'acknowledge' | 'retire'>;
 
-export interface AuthorityTransferDirectionResolver {
-  resolve(input: Readonly<{
-    readonly principalId: string;
-    readonly projectId: string;
-    readonly transferId: string;
-  }>): Promise<CollabAuthorityTransferDirection>;
-}
+type AuthorityTransferControl = Pick<
+  AuthorityTransferControlDispatcher,
+  'cancel' | 'getStatus'
+>;
 
 export interface CloudLifecycleControlAdapterOptions {
   readonly cloudToLan: CloudToLanControl;
-  readonly direction: AuthorityTransferDirectionResolver;
   readonly expiresAtFactory: () => string;
   readonly lanToCloud: LanToCloudControl;
   readonly retire: RetireControl;
+  readonly transfer: AuthorityTransferControl;
 }
 
 function requestFailure(
@@ -85,6 +81,7 @@ function requestFailure(
   const code = error instanceof LanToCloudTransferCoordinatorError
     || error instanceof CloudToLanTransferCoordinatorError
     || error instanceof RetireCoordinatorError
+    || error instanceof AuthorityTransferControlDispatcherError
     ? error.code
     : undefined;
   switch (code) {
@@ -97,10 +94,18 @@ function requestFailure(
       });
     case 'expired':
       return new CollabError({
-        code: operation === 'claimTransferredMembership'
+        code: operation === 'retireProject'
+          || operation === 'acknowledgeProjectRetirement'
+          ? 'project-retired'
+          : operation === 'claimTransferredMembership'
           || operation === 'getTransferredMembershipClaim'
           ? 'membership-claim-expired'
           : 'authority-transfer-stale',
+      });
+    case 'aborted':
+      return new CollabError({
+        code: 'operation-timeout',
+        recoveryActions: ['retry'],
       });
     case 'cancelled':
       return new CollabError({ code: 'authority-transfer-cancellation-forbidden' });
@@ -137,17 +142,17 @@ function assertExpiresAt(value: string): string {
 
 export class CloudLifecycleControlAdapter implements CloudLifecycleControl {
   readonly #cloudToLan: CloudToLanControl;
-  readonly #direction: AuthorityTransferDirectionResolver;
   readonly #expiresAtFactory: () => string;
   readonly #lanToCloud: LanToCloudControl;
   readonly #retire: RetireControl;
+  readonly #transfer: AuthorityTransferControl;
 
   constructor(options: CloudLifecycleControlAdapterOptions) {
     this.#cloudToLan = options.cloudToLan;
-    this.#direction = options.direction;
     this.#expiresAtFactory = options.expiresAtFactory;
     this.#lanToCloud = options.lanToCloud;
     this.#retire = options.retire;
+    this.#transfer = options.transfer;
   }
 
   execute<Operation extends CloudLifecycleOperation>(
@@ -232,25 +237,15 @@ export class CloudLifecycleControlAdapter implements CloudLifecycleControl {
         });
       case 'getProjectAuthorityTransfer': {
         const request = context.request as GetProjectAuthorityTransferRequest;
-        const direction = await this.#direction.resolve({
-          principalId,
-          projectId: request.projectId,
-          transferId: request.transferId,
-        });
-        return direction === 'lan-to-cloud'
-          ? this.#lanToCloud.getStatus({ principalId, request })
-          : this.#cloudToLan.getStatus({ principalId, request });
+        return this.#transfer.getStatus({ principalId, request });
       }
       case 'cancelProjectAuthorityTransfer': {
         const request = context.request as CancelProjectAuthorityTransferRequest;
-        const direction = await this.#direction.resolve({
+        return this.#transfer.cancel({
           principalId,
-          projectId: request.projectId,
-          transferId: request.transferId,
+          request,
+          signal: context.signal,
         });
-        return direction === 'lan-to-cloud'
-          ? this.#lanToCloud.cancel({ principalId, request })
-          : this.#cloudToLan.cancel({ principalId, request });
       }
       case 'retireProject':
         return this.#retire.retire({

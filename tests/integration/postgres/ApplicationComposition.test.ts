@@ -24,6 +24,8 @@ import { Client } from 'pg';
 import { decodeCollabCloudCapabilityDocument } from '@claudian-collab/protocol';
 
 import { createApplication } from '../../../src/composition/createApplication.js';
+import { ComposedCloudLifecycleRuntime } from '../../../src/composition/CloudLifecycleRuntime.js';
+import { TerminalResponderExpiryReconciler } from '../../../src/composition/TerminalResponderExpiryReconciler.js';
 import type { ServerConfig } from '../../../src/config/ServerConfig.js';
 import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
@@ -825,5 +827,60 @@ while :; do sleep 1; done`,
       'start',
       'close',
     ]);
+  });
+
+  it('does not close lifecycle owners beneath foreground startup reconciliation', async () => {
+    let entered!: () => void;
+    const reconciling = new Promise<void>(resolve => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    const closed: string[] = [];
+    const expiry = new TerminalResponderExpiryReconciler({
+      catalog: {
+        listTerminalResponders: async () => {
+          entered();
+          await blocked;
+          return { nextCursor: undefined, responders: [] };
+        },
+      },
+      expiry: { expire: () => Promise.resolve('replayed') },
+      intervalMs: 60_000,
+    });
+    const lifecycle = new ComposedCloudLifecycleRuntime({
+      artifacts: {
+        download: () => Promise.reject(new Error('unused')),
+        upload: () => Promise.reject(new Error('unused')),
+      },
+      closeOrder: [{ close: () => { closed.push('transfer-owners'); } }],
+      control: { execute: () => Promise.reject(new Error('unused')) },
+      expiry,
+      recovery: {
+        close: () => { closed.push('recovery'); },
+        recoverCandidate: () => Promise.resolve(),
+        recoverProject: () => Promise.resolve(),
+      },
+    });
+    const application = createApplication({
+      config: config({
+        postgresUrl: database.runtimeUrl,
+        repositoryRoot,
+      }),
+      lifecycle,
+      logger: logger([]),
+    });
+
+    const starting = application.start();
+    await reconciling;
+    const closing = application.close();
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(closed, []);
+    release();
+    await assert.rejects(starting, /application\.error\.startup-failed/u);
+    await closing;
+    assert.deepEqual(closed, ['recovery', 'transfer-owners']);
   });
 });

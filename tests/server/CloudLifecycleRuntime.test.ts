@@ -47,4 +47,50 @@ describe('ComposedCloudLifecycleRuntime', () => {
       'checkpoint-owners',
     ]);
   });
+
+  it('attempts every close owner before reporting a sanitized failure', async () => {
+    const calls: string[] = [];
+    const runtime = new ComposedCloudLifecycleRuntime({
+      artifacts: {
+        download: () => Promise.reject(new Error('unused')),
+        upload: () => Promise.reject(new Error('unused')),
+      },
+      closeOrder: [
+        {
+          close: () => {
+            calls.push('transfer-owners');
+            throw new Error('private-transfer-close-detail');
+          },
+        },
+        { close: () => { calls.push('checkpoint-owners'); } },
+      ],
+      control: { execute: () => Promise.reject(new Error('unused')) },
+      expiry: {
+        close: () => {
+          calls.push('expiry-close');
+          return Promise.reject(new Error('private-expiry-close-detail'));
+        },
+        reconcileAll: () => Promise.resolve(),
+        start: () => undefined,
+      },
+      recovery: {
+        close: () => {
+          calls.push('recovery-close');
+          throw new Error('private-recovery-close-detail');
+        },
+        recoverCandidate: () => Promise.resolve(),
+        recoverProject: () => Promise.resolve(),
+      },
+    });
+
+    const closing = runtime.close();
+    await assert.rejects(closing, /cloud-lifecycle-runtime\.close-failed/u);
+    await assert.rejects(runtime.close(), /cloud-lifecycle-runtime\.close-failed/u);
+    assert.deepEqual(calls, [
+      'expiry-close',
+      'recovery-close',
+      'transfer-owners',
+      'checkpoint-owners',
+    ]);
+  });
 });

@@ -63,8 +63,18 @@ export class ComposedCloudLifecycleRuntime implements CloudLifecycleRuntime {
   }
 
   async #close(): Promise<void> {
-    await this.#expiry.close();
-    await this.#recoveryOwner.close();
-    for (const owner of this.#closeOrder) await owner.close();
+    let failed = false;
+    for (const owner of [
+      this.#expiry,
+      this.#recoveryOwner,
+      ...this.#closeOrder,
+    ]) {
+      try {
+        await owner.close();
+      } catch {
+        failed = true;
+      }
+    }
+    if (failed) throw new Error('cloud-lifecycle-runtime.close-failed');
   }
 }

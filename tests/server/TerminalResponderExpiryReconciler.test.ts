@@ -80,4 +80,38 @@ describe('TerminalResponderExpiryReconciler', () => {
     await closing;
     assert.equal(closed, true);
   });
+
+  it('coalesces a foreground pass and waits for it during close', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    let calls = 0;
+    const reconciler = new TerminalResponderExpiryReconciler({
+      catalog: {
+        listTerminalResponders: async () => {
+          calls += 1;
+          await blocked;
+          return { nextCursor: undefined, responders: [] };
+        },
+      },
+      clock: () => new Date(NOW),
+      expiry: { expire: () => Promise.resolve('replayed') },
+      intervalMs: 60_000,
+    });
+
+    const first = reconciler.reconcileAll();
+    const second = reconciler.reconcileAll();
+    const closing = reconciler.close();
+    let closed = false;
+    void closing.then(() => {
+      closed = true;
+    });
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(calls, 1);
+    assert.equal(closed, false);
+    release();
+    await Promise.all([first, second, closing]);
+    assert.equal(closed, true);
+  });
 });

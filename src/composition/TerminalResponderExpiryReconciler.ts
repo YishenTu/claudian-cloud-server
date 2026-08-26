@@ -37,18 +37,14 @@ export class TerminalResponderExpiryReconciler {
     if (this.#closed) {
       return Promise.reject(new Error('terminal-responder-expiry-reconciler.closed'));
     }
-    return this.#runOnce();
+    return this.#beginRun(false);
   }
 
   start(): void {
     if (this.#closed || this.#timer !== undefined) return;
     this.#timer = setInterval(() => {
       if (this.#running !== undefined) return;
-      const running = this.#runOnce();
-      this.#running = running;
-      void running.catch(() => this.#onBackgroundFailure()).finally(() => {
-        if (this.#running === running) this.#running = undefined;
-      });
+      void this.#beginRun(true);
     }, this.#intervalMs);
     this.#timer.unref();
   }
@@ -60,6 +56,22 @@ export class TerminalResponderExpiryReconciler {
       this.#timer = undefined;
     }
     await this.#running;
+  }
+
+  #beginRun(background: boolean): Promise<void> {
+    if (this.#running !== undefined) return this.#running;
+    const running = this.#runOnce();
+    this.#running = running;
+    void running.then(
+      () => {
+        if (this.#running === running) this.#running = undefined;
+      },
+      () => {
+        if (background) this.#onBackgroundFailure();
+        if (this.#running === running) this.#running = undefined;
+      },
+    );
+    return running;
   }
 
   async #runOnce(): Promise<void> {

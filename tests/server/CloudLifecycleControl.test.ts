@@ -7,6 +7,7 @@ import {
   CloudLifecycleControlAdapter,
 } from '../../src/server/control/CloudLifecycleControl.js';
 import { LanToCloudTransferCoordinatorError } from '../../src/project-authority/lifecycle/lan-to-cloud/LanToCloudTransferCoordinator.js';
+import { RetireCoordinatorError } from '../../src/project-authority/lifecycle/retire/RetireCoordinator.js';
 
 const PROJECT_ID = 'project-lifecycle-control';
 const TRANSFER_ID = 'transfer-lifecycle-control';
@@ -22,28 +23,25 @@ function adapter(calls: string[]) {
       acceptTarget: () => calls.push('cloud.acceptTarget'),
       acknowledgeRedemption: () => calls.push('cloud.acknowledgeRedemption'),
       begin: () => calls.push('cloud.begin'),
-      cancel: () => calls.push('cloud.cancel'),
       confirmTargetActive: () => calls.push('cloud.confirmTargetActive'),
       getClaim: () => calls.push('cloud.getClaim'),
-      getStatus: () => calls.push('cloud.getStatus'),
       reportTargetStaged: () => calls.push('cloud.reportTargetStaged'),
     }),
-    direction: {
-      resolve: () => Promise.resolve('cloud-to-lan'),
-    },
     expiresAtFactory: () => EXPIRES_AT,
     lanToCloud: coordinator({
       acknowledgeClaimBatch: () => calls.push('lan.acknowledgeClaimBatch'),
       begin: () => calls.push('lan.begin'),
-      cancel: () => calls.push('lan.cancel'),
       claimMembership: () => calls.push('lan.claimMembership'),
       commitRelinquishment: () => calls.push('lan.commitRelinquishment'),
-      getStatus: () => calls.push('lan.getStatus'),
       rotateClaims: () => calls.push('lan.rotateClaims'),
     }),
     retire: coordinator({
       acknowledge: () => calls.push('retire.acknowledge'),
       retire: () => calls.push('retire.retire'),
+    }),
+    transfer: coordinator({
+      cancel: () => calls.push('transfer.cancel'),
+      getStatus: () => calls.push('transfer.getStatus'),
     }),
   });
 }
@@ -126,8 +124,8 @@ describe('CloudLifecycleControlAdapter', () => {
       'cloud.confirmTargetActive',
       'cloud.getClaim',
       'cloud.acknowledgeRedemption',
-      'cloud.getStatus',
-      'cloud.cancel',
+      'transfer.getStatus',
+      'transfer.cancel',
       'retire.retire',
       'retire.acknowledge',
     ]);
@@ -137,7 +135,6 @@ describe('CloudLifecycleControlAdapter', () => {
     let observed: unknown;
     const control = new CloudLifecycleControlAdapter({
       cloudToLan: coordinator({}),
-      direction: { resolve: () => Promise.resolve('lan-to-cloud') },
       expiresAtFactory: () => EXPIRES_AT,
       lanToCloud: coordinator({
         begin: (input: never) => {
@@ -146,6 +143,7 @@ describe('CloudLifecycleControlAdapter', () => {
         },
       }),
       retire: coordinator({}),
+      transfer: coordinator({}),
     });
     const request = { projectId: PROJECT_ID, transferId: TRANSFER_ID };
     await control.execute('beginLanToCloudTransfer', context(request));
@@ -159,14 +157,14 @@ describe('CloudLifecycleControlAdapter', () => {
   it('maps owner failures to safe package errors', async () => {
     const control = new CloudLifecycleControlAdapter({
       cloudToLan: coordinator({}),
-      direction: { resolve: () => Promise.resolve('lan-to-cloud') },
       expiresAtFactory: () => EXPIRES_AT,
-      lanToCloud: coordinator({
+      lanToCloud: coordinator({}),
+      retire: coordinator({}),
+      transfer: coordinator({
         getStatus: () => {
           throw new LanToCloudTransferCoordinatorError('state-conflict');
         },
       }),
-      retire: coordinator({}),
     });
     await assert.rejects(
       control.execute('getProjectAuthorityTransfer', context({
@@ -185,14 +183,14 @@ describe('CloudLifecycleControlAdapter', () => {
     let invoked = false;
     const control = new CloudLifecycleControlAdapter({
       cloudToLan: coordinator({}),
-      direction: { resolve: () => Promise.resolve('lan-to-cloud') },
       expiresAtFactory: () => EXPIRES_AT,
-      lanToCloud: coordinator({
+      lanToCloud: coordinator({}),
+      retire: coordinator({}),
+      transfer: coordinator({
         getStatus: () => {
           invoked = true;
         },
       }),
-      retire: coordinator({}),
     });
     const controller = new AbortController();
     controller.abort();
@@ -204,5 +202,28 @@ describe('CloudLifecycleControlAdapter', () => {
       error instanceof CollabError && error.code === 'operation-timeout'
     ));
     assert.equal(invoked, false);
+  });
+
+  it('maps retirement expiry to the retirement terminal error', async () => {
+    const control = new CloudLifecycleControlAdapter({
+      cloudToLan: coordinator({}),
+      expiresAtFactory: () => EXPIRES_AT,
+      lanToCloud: coordinator({}),
+      retire: coordinator({
+        acknowledge: () => Promise.reject(new RetireCoordinatorError('expired')),
+      }),
+      transfer: coordinator({}),
+    });
+
+    await assert.rejects(
+      control.execute('acknowledgeProjectRetirement', context({
+        idempotencyKey: 'acknowledge-retirement-expiry',
+        projectId: PROJECT_ID,
+        retirementId: 'retire-lifecycle-control',
+      })),
+      (error: unknown) => (
+        error instanceof CollabError && error.code === 'project-retired'
+      ),
+    );
   });
 });
