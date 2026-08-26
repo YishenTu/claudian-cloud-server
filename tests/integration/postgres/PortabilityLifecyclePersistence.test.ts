@@ -8,6 +8,10 @@ import { Client } from 'pg';
 import { CoordinationError } from '../../../src/coordination/CoordinationError.js';
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
 import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { LeaveCoordinator } from '../../../src/project-authority/lifecycle/leave/LeaveCoordinator.js';
+import { RetireCoordinator } from '../../../src/project-authority/lifecycle/retire/RetireCoordinator.js';
+import { DeletionCoordinator } from '../../../src/project-authority/lifecycle/delete/DeletionCoordinator.js';
+import { TerminalResponderExpiry } from '../../../src/project-authority/lifecycle/retire/TerminalResponderExpiry.js';
 import {
   type PostgresTestDatabase,
   withPostgresTestDatabase,
@@ -175,10 +179,10 @@ describe('portability lifecycle persistence', () => {
             ORDER BY version`,
         );
         assert.deepEqual(history.rows.at(-1), {
-          checksum: '12e60f0ef26d2906687635cc4bdc59f33cb3bbfbc2095d2e7196b57417eb0e12',
-          name: 'cloud-to-lan-transfer',
+          checksum: 'f5a9541802d114f0959b2e62c9a884cba938c99926fe9547063d95a457a6d284',
+          name: 'terminal-project-lifecycle',
           state: 'applied',
-          version: 8,
+          version: 9,
         });
 
         const projectColumns = await migration.query<{
@@ -937,6 +941,7 @@ describe('portability lifecycle persistence', () => {
       let store = coordination(database);
       const locator = {
         createdAt: T1,
+        expectedPersonalRefOid: '9'.repeat(40),
         expiresAt: EXPIRES,
         intentId: 'leave-intent',
         memberId,
@@ -956,6 +961,7 @@ describe('portability lifecycle persistence', () => {
             createdAt: T0,
             direction: undefined,
             expectedAuthorityGeneration: 1,
+            expectedPersonalRefOid: locator.expectedPersonalRefOid,
             idempotencyKey: locator.intentId,
             kind: 'leave',
             operationId: locator.operationId,
@@ -968,6 +974,11 @@ describe('portability lifecycle persistence', () => {
             await scope.portability.putLeaveFormerPrincipalReplay(locator),
             'created',
           );
+          assert.equal(await scope.portability.revokeProjectPrincipal({
+            memberId,
+            principalId: locator.principalId,
+            revokedAt: T1,
+          }), 'advanced');
           assert.equal(await scope.findPrincipalMember(locator.principalId), undefined);
           assert.equal(await scope.portability.findLeaveFormerPrincipalReplay({
             ...locator,
@@ -980,11 +991,13 @@ describe('portability lifecycle persistence', () => {
             operationId: locator.operationId,
             principalId: locator.principalId,
             requestFingerprint: locator.requestFingerprint,
+            expectedPersonalRefOid: locator.expectedPersonalRefOid,
             requestedAt: T2,
           }), {
             completedAt: undefined,
             createdAt: T1,
             expiresAt: EXPIRES,
+            expectedPersonalRefOid: locator.expectedPersonalRefOid,
             intentId: locator.intentId,
             memberId,
             operationId: locator.operationId,
@@ -997,6 +1010,7 @@ describe('portability lifecycle persistence', () => {
             operationId: locator.operationId,
             principalId: 'principal:other',
             requestFingerprint: locator.requestFingerprint,
+            expectedPersonalRefOid: locator.expectedPersonalRefOid,
             requestedAt: T2,
           }), undefined);
           assert.equal(await scope.portability.completeLeaveFormerPrincipalReplay({
@@ -1006,6 +1020,7 @@ describe('portability lifecycle persistence', () => {
             operationId: locator.operationId,
             principalId: locator.principalId,
             requestFingerprint: locator.requestFingerprint,
+            expectedPersonalRefOid: locator.expectedPersonalRefOid,
             resultSha256: RESULT_SHA,
           }), 'advanced');
         });
@@ -1021,17 +1036,342 @@ describe('portability lifecycle persistence', () => {
             operationId: locator.operationId,
             principalId: locator.principalId,
             requestFingerprint: locator.requestFingerprint,
+            expectedPersonalRefOid: locator.expectedPersonalRefOid,
             requestedAt: T3,
           }), {
             completedAt: T2,
             createdAt: T1,
             expiresAt: EXPIRES,
+            expectedPersonalRefOid: locator.expectedPersonalRefOid,
             intentId: locator.intentId,
             memberId,
             operationId: locator.operationId,
             resultSha256: RESULT_SHA,
             state: 'completed',
           });
+        });
+      } finally {
+        await store.close();
+      }
+    });
+  });
+
+  it('settles Leave membership and all principal bindings through exact replay', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      const projectId = 'project-leave-settlement';
+      const memberId = 'member-leaving';
+      const principalId = 'principal:leaving';
+      const operationId = 'leave-settlement';
+      await seedProject(database, projectId);
+      await seedMembership(database, projectId, memberId);
+      const store = coordination(database);
+      try {
+        await store.withProjectScope(projectId, async scope => {
+          await scope.portability.bindProjectPrincipal({
+            boundAt: T0,
+            memberId,
+            principalId,
+          });
+          await scope.portability.putLifecycleJournal({
+            actorMemberId: memberId,
+            createdAt: T0,
+            direction: undefined,
+            expectedAuthorityGeneration: 1,
+            expectedPersonalRefOid: '9'.repeat(40),
+            idempotencyKey: 'leave-settlement-intent',
+            kind: 'leave',
+            operationId,
+            phase: 'prepared',
+            projectId,
+            requestFingerprint: '7'.repeat(64),
+            scheduledAt: T0,
+          });
+          await scope.portability.putLeaveFormerPrincipalReplay({
+            createdAt: T1,
+            expectedPersonalRefOid: '9'.repeat(40),
+            expiresAt: EXPIRES,
+            intentId: 'leave-settlement-intent',
+            memberId,
+            operationId,
+            principalId,
+            requestFingerprint: '7'.repeat(64),
+          });
+          assert.equal(await scope.portability.settleLeaveMembership({
+            expectedMembershipRevision: 1n,
+            leftAt: T1,
+            memberId,
+            operationId,
+          }), 'settled');
+          await scope.portability.advanceLifecycleJournal({
+            expectedPhase: 'prepared',
+            expectedState: 'active',
+            nextPhase: 'membership-left',
+            nextState: 'active',
+            operationId,
+            scheduledAt: T0,
+            updatedAt: T1,
+          });
+          assert.deepEqual(await scope.findMembership(memberId), {
+            displayName: 'Offline Member',
+            memberId,
+            revision: 2n,
+            role: 'member',
+            status: 'left',
+          });
+          assert.equal(
+            (await scope.portability.findProjectPrincipalBinding(principalId))?.state,
+            'revoked',
+          );
+          assert.equal(await scope.portability.settleLeaveMembership({
+            expectedMembershipRevision: 1n,
+            leftAt: T1,
+            memberId,
+            operationId,
+          }), 'replayed');
+        });
+      } finally {
+        await store.close();
+      }
+    });
+  });
+
+  it('scopes equal Leave idempotency keys to their exact membership actors', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      const projectId = 'project-leave-actor-scope';
+      const actors = [
+        { memberId: 'member-leaving-a', oid: '8'.repeat(40),
+          principalId: 'principal:leaving-a' },
+        { memberId: 'member-leaving-b', oid: '9'.repeat(40),
+          principalId: 'principal:leaving-b' },
+      ] as const;
+      await seedProject(database, projectId);
+      await seedPlacement(database, projectId);
+      for (const actor of actors) {
+        await seedMembership(database, projectId, actor.memberId);
+      }
+      const store = coordination(database);
+      try {
+        await store.withProjectScope(projectId, async scope => {
+          for (const actor of actors) {
+            await scope.portability.bindProjectPrincipal({
+              boundAt: T0,
+              memberId: actor.memberId,
+              principalId: actor.principalId,
+            });
+          }
+        });
+        const removed = new Set<string>();
+        const leave = new LeaveCoordinator({
+          clock: () => new Date(T1),
+          coordination: store,
+          repository: {
+            reserveExactRepositoryOperation() {
+              return Promise.resolve({ async close() {}, projectId });
+            },
+            verifyExactPersonalRef(_reservation, input) {
+              assert.equal(
+                actors.some(actor => (
+                  input.personalRef.endsWith(actor.memberId)
+                  && input.expectedOid === actor.oid
+                )),
+                true,
+              );
+              return Promise.resolve();
+            },
+            deleteExactPersonalRef(_reservation, input) {
+              removed.add(input.personalRef);
+              return Promise.resolve('deleted');
+            },
+          },
+        });
+        const results = [];
+        for (const actor of actors) {
+          results.push(await leave.leave({
+            principalId: actor.principalId,
+            request: {
+              expectedPersonalRefOid: actor.oid,
+              idempotencyKey: 'shared-leave-intent',
+              projectId,
+            },
+          }));
+        }
+        assert.deepEqual(results.map(result => result.memberId), [
+          actors[0].memberId,
+          actors[1].memberId,
+        ]);
+        assert.equal(removed.size, 2);
+      } finally {
+        await store.close();
+      }
+    });
+  });
+
+  it('atomically terminalizes Retire and creates one deletion handoff', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      const projectId = 'project-retire-settlement';
+      const memberId = 'member-manager';
+      const principalId = 'principal:manager';
+      await seedProject(database, projectId);
+      await seedMembership(database, projectId, memberId);
+      await seedPlacement(database, projectId);
+      const migration = new Client({ connectionString: database.migrationUrl });
+      try {
+        await migration.connect();
+        await migration.query('BEGIN');
+        await migration.query(
+          `SELECT set_config('claudian_cloud.project_id', $1, true)`,
+          [projectId],
+        );
+        await migration.query(
+          `UPDATE claudian_cloud.project_memberships
+              SET role = 'manager'
+            WHERE project_id = $1 AND member_id = $2`,
+          [projectId, memberId],
+        );
+        await migration.query('COMMIT');
+      } finally {
+        await migration.end();
+      }
+      const store = coordination(database);
+      try {
+        await store.withProjectScope(projectId, async scope => {
+          await scope.portability.bindProjectPrincipal({
+            boundAt: T0,
+            memberId,
+            principalId,
+          });
+        });
+        const coordinator = new RetireCoordinator({
+          clock: () => new Date(T1),
+          coordination: store,
+          repository: {
+            reserveExactRepositoryOperation() {
+              return Promise.resolve({ async close() {}, projectId });
+            },
+            async verifyExactRepository() {},
+          },
+        });
+        const request = {
+          expectedAuthorityGeneration: 1,
+          expectedMainOid: 'a'.repeat(40),
+          idempotencyKey: 'retire-settlement-intent',
+          projectId,
+        };
+        const result = await coordinator.retire({ principalId, request });
+        assert.deepEqual(
+          await coordinator.retire({ principalId, request }),
+          result,
+        );
+        const acknowledgement = await coordinator.acknowledge({
+          principalId,
+          request: {
+            idempotencyKey: 'retire-acknowledgement',
+            projectId,
+            retirementId: result.retirementId,
+          },
+        });
+        assert.equal(acknowledgement.retirementId, result.retirementId);
+        assert.deepEqual(
+          await coordinator.retire({ principalId, request }),
+          result,
+        );
+        let deletionAuthorization: string | undefined;
+        let deletionOperationId: string | undefined;
+        await store.withProjectScope(projectId, async scope => {
+          const project = await scope.getProject();
+          const retirement = await scope.portability.getLifecycleJournal(
+            result.retirementId,
+          );
+          const deletion = await scope.portability.getNonterminalLifecycleJournal();
+          const intent = deletion === undefined
+            ? undefined
+            : await scope.portability.getDeletionIntent(deletion.operationId);
+          const responder = await scope.portability.getTerminalResponder(
+            'retire',
+            result.retirementId,
+          );
+          assert.ok(project);
+          assert.ok(retirement);
+          assert.ok(deletion);
+          assert.ok(intent);
+          assert.ok(responder);
+          assert.equal(project.serviceState, 'deleting');
+          assert.equal(retirement.state, 'completed');
+          assert.equal(retirement.phase, 'completed');
+          assert.equal(deletion.kind, 'delete');
+          assert.equal(deletion.phase, 'traffic-denied');
+          assert.equal(intent.reason, 'retire');
+          assert.equal(responder.acknowledgements.length, 1);
+          deletionAuthorization = intent.authorizationSha256;
+          deletionOperationId = intent.operationId;
+        });
+        assert.ok(deletionAuthorization);
+        assert.ok(deletionOperationId);
+        const exactDeletionAuthorization = deletionAuthorization;
+        const exactDeletionOperationId = deletionOperationId;
+        const expiry = new TerminalResponderExpiry({ coordination: store });
+        assert.equal(await expiry.expire({
+          operationId: result.retirementId,
+          operationKind: 'retire',
+          projectId,
+          removedAt: T3,
+        }), 'expired');
+        await store.withProjectScope(projectId, async scope => {
+          assert.equal(
+            await scope.portability.getTerminalResponder(
+              'retire',
+              result.retirementId,
+            ),
+            undefined,
+          );
+          assert.equal(
+            (await scope.portability.getProjectTombstone())?.terminalOperationId,
+            result.retirementId,
+          );
+          assert.equal(
+            (await scope.portability.getLifecycleJournal(
+              exactDeletionOperationId,
+            ))?.phase,
+            'traffic-denied',
+          );
+        });
+        let repositoryRemovals = 0;
+        const deletionCoordinator = new DeletionCoordinator({
+          clock: () => new Date(T2),
+          coordination: store,
+          repository: {
+            reserveExactRepositoryOperation() {
+              return Promise.resolve({ async close() {}, projectId });
+            },
+            async verifyExactRepository() {},
+            removeExactRepository(_reservation, identity) {
+              assert.equal(identity.projectId, projectId);
+              repositoryRemovals += 1;
+              return Promise.resolve('removed');
+            },
+          },
+        });
+        assert.equal(await deletionCoordinator.resumeAuthorized({
+          authorizationSha256: exactDeletionAuthorization,
+          operationId: exactDeletionOperationId,
+          projectId,
+        }), 'settled');
+        assert.equal(repositoryRemovals, 1);
+        await store.withProjectScope(projectId, async scope => {
+          assert.equal(await scope.getProject(), undefined);
+          assert.equal(
+            (await scope.portability.getLifecycleJournal(
+              exactDeletionOperationId,
+            ))?.state,
+            'completed',
+          );
+          assert.equal(
+            (await scope.portability.getProjectTombstone())?.terminalOperationId,
+            result.retirementId,
+          );
         });
       } finally {
         await store.close();
@@ -1266,6 +1606,74 @@ describe('portability lifecycle persistence', () => {
             targetClaim.transferId,
             targetClaim.memberId,
           ), undefined);
+          const terminalStatus = {
+            batchRevision: 1,
+            batchSha256: BATCH_SHA,
+            checkpointSha256: CHECKPOINT_SHA,
+            createdAt: T0,
+            direction: 'cloud-to-lan' as const,
+            expiresAt: EXPIRES,
+            phase: 'completed' as const,
+            projectId: 'project-claims',
+            relinquishmentProof: {
+              batchRevision: 1,
+              batchSha256: BATCH_SHA,
+              certificate: 'A'.repeat(86),
+              certificateAlgorithm: 'ed25519' as const,
+              checkpointSha256: CHECKPOINT_SHA,
+              committedAt: T1,
+              operationIntentId: 'relinquishment-claims',
+              projectId: 'project-claims',
+              sourceAuthority: { generation: 4, kind: 'cloud' as const },
+              sourceHostMemberId: null,
+              targetAuthority: { generation: 5, kind: 'lan' as const },
+              transferId: targetClaim.transferId,
+            },
+            sourceAuthority: { generation: 4, kind: 'cloud' as const },
+            state: 'completed' as const,
+            targetAuthority: { generation: 5, kind: 'lan' as const },
+            targetUrl: 'https://lan.example.test',
+            transferId: targetClaim.transferId,
+            updatedAt: T2,
+          };
+          const terminalJson = JSON.stringify(terminalStatus);
+          assert.equal(await scope.portability.putTerminalResponder({
+            createdAt: T2,
+            eligiblePrincipals: [{
+              memberId: targetClaim.memberId,
+              principalId: 'principal:offline',
+            }],
+            expiresAt: EXPIRES,
+            operationId: targetClaim.transferId,
+            operationKind: 'authority-transfer',
+            replayAuthorization: {
+              memberId: targetClaim.memberId,
+              requestSha256: AUTHORIZATION_SHA,
+            },
+            responseJson: terminalJson,
+            responseSha256: createHash('sha256').update(terminalJson).digest('hex'),
+          }), 'created');
+          assert.deepEqual((await scope.portability.getTerminalResponder(
+            'authority-transfer',
+            targetClaim.transferId,
+          )), {
+            acknowledgements: [{
+              acknowledgedAt: T2,
+              memberId: targetClaim.memberId,
+              principalId: 'principal:offline',
+            }],
+            createdAt: T2,
+            eligiblePrincipals: [],
+            expiresAt: EXPIRES,
+            operationId: targetClaim.transferId,
+            operationKind: 'authority-transfer',
+            replayAuthorization: {
+              memberId: targetClaim.memberId,
+              requestSha256: AUTHORIZATION_SHA,
+            },
+            responseJson: terminalJson,
+            responseSha256: createHash('sha256').update(terminalJson).digest('hex'),
+          });
           const pendingAssociatedData = {
             ...associatedData,
             claimSha256: '8'.repeat(64),
@@ -1831,12 +2239,12 @@ describe('portability lifecycle persistence', () => {
             principalId: 'principal:manager',
           }), 'advanced');
           assert.equal(await scope.portability.putDeletionIntent(deletion), 'created');
-          await expectStateConflict(scope.portability.removeTerminalResponder({
+          assert.equal(await scope.portability.removeTerminalResponder({
             expectedExpiresAt: responder.expiresAt,
             operationId: responder.operationId,
             operationKind: responder.operationKind,
             removedAt: T1,
-          }));
+          }), 'advanced');
           assert.equal(await scope.portability.advanceLifecycleJournal({
             expectedPhase: 'traffic-denied',
             expectedState: 'active',

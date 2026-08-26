@@ -427,8 +427,30 @@ exec '${GIT}' "$@"
       assert.equal(await authority.discardCapture(cleanupCapture), 'removed');
       await assert.rejects(access(detachedCaptureCleanup ?? ''), { code: 'ENOENT' });
 
+      const exactReservation = await authority.reserveExactRepositoryOperation(
+        placement.projectId,
+      );
+      await authority.verifyExactPersonalRef(exactReservation, {
+        expectedOid: oid,
+        personalRef: 'refs/heads/members/member-a',
+        placement,
+      });
+      await assert.rejects(authority.verifyExactPersonalRef(exactReservation, {
+        expectedOid: 'f'.repeat(oid.length),
+        personalRef: 'refs/heads/members/member-a',
+        placement,
+      }), error => {
+        assert.ok(error instanceof RepositoryCheckpointError);
+        assert.equal(error.code, 'repository-invalid');
+        return true;
+      });
+      assert.equal(
+        await git(repository, ['rev-parse', 'refs/heads/members/member-a']),
+        oid,
+      );
+
       failPersonalRefSync = true;
-      await assert.rejects(authority.deleteExactPersonalRef({
+      await assert.rejects(authority.deleteExactPersonalRef(exactReservation, {
         expectedOid: oid,
         personalRef: 'refs/heads/members/member-a',
         placement,
@@ -438,7 +460,7 @@ exec '${GIT}' "$@"
         return true;
       });
       synchronizedDirectories.length = 0;
-      assert.equal(await authority.deleteExactPersonalRef({
+      assert.equal(await authority.deleteExactPersonalRef(exactReservation, {
         expectedOid: oid,
         personalRef: 'refs/heads/members/member-a',
         placement,
@@ -452,7 +474,7 @@ exec '${GIT}' "$@"
         updateRefCommand ?? '',
         /-c core\.fsync=all -c core\.fsyncMethod=fsync update-ref -d/u,
       );
-      await assert.rejects(authority.deleteExactPersonalRef({
+      await assert.rejects(authority.deleteExactPersonalRef(exactReservation, {
         expectedOid: oid,
         personalRef: 'refs/heads/main',
         placement,
@@ -461,6 +483,7 @@ exec '${GIT}' "$@"
         assert.equal(error.code, 'invalid-checkpoint');
         return true;
       });
+      await exactReservation.close();
 
       const cancelledDiscard = new AbortController();
       cancelledDiscard.abort();
@@ -563,6 +586,7 @@ exec '${GIT}' "$@"
     let failPublishedSourceSync = true;
     let failOwnedTreeCleanup = false;
     let detachedOwnedCleanup: string | undefined;
+    let removalAuthority: RepositoryCheckpointAuthority | undefined;
     const authority = new RepositoryCheckpointAuthority({
       ...REPOSITORY_VALIDATION_LIMITS,
       gitExecutable: GIT,
@@ -783,7 +807,7 @@ exec '${GIT}' "$@"
       let failRemovalSync = false;
       let failExactTreeCleanup = true;
       let detachedExactCleanup: string | undefined;
-      const removalAuthority = new RepositoryCheckpointAuthority({
+      removalAuthority = new RepositoryCheckpointAuthority({
         ...REPOSITORY_VALIDATION_LIMITS,
         gitExecutable: GIT,
         maximumBundleBytes: 2 * 1024 * 1024,
@@ -815,8 +839,21 @@ exec '${GIT}' "$@"
           return Promise.resolve();
         },
       });
+      const removalReservation = await removalAuthority
+        .reserveExactRepositoryOperation(projectId);
+      const exactPlacement = createRepositoryPlacementLease({
+        active: true,
+        generation: exactIdentity.placementGeneration,
+        projectId,
+        repositoryStorageKey: exactIdentity.repositoryStorageKey,
+        storageNodeId: exactIdentity.storageNodeId,
+      });
+      await removalAuthority.verifyExactRepository(
+        removalReservation,
+        exactPlacement,
+      );
       await assert.rejects(
-        removalAuthority.removeExactRepository(exactIdentity),
+        removalAuthority.removeExactRepository(removalReservation, exactIdentity),
         error => {
           assert.ok(error instanceof RepositoryCheckpointError);
           assert.equal(error.code, 'storage-unavailable');
@@ -828,7 +865,7 @@ exec '${GIT}' "$@"
       await access(detachedExactCleanup ?? '');
       failRemovalSync = true;
       await assert.rejects(
-        removalAuthority.removeExactRepository(exactIdentity),
+        removalAuthority.removeExactRepository(removalReservation, exactIdentity),
         error => {
           assert.ok(error instanceof RepositoryCheckpointError);
           assert.equal(error.code, 'storage-unavailable');
@@ -837,24 +874,41 @@ exec '${GIT}' "$@"
       );
       synchronizedDirectories.length = 0;
       assert.equal(
-        await removalAuthority.removeExactRepository(exactIdentity),
+        await removalAuthority.removeExactRepository(removalReservation, exactIdentity),
         'removed',
       );
       assert.equal(synchronizedDirectories.includes(projectPath), true);
       await assert.rejects(access(detachedExactCleanup ?? ''), { code: 'ENOENT' });
       assert.equal(
-        await removalAuthority.removeExactRepository(exactIdentity),
+        await removalAuthority.removeExactRepository(removalReservation, exactIdentity),
         'replayed',
       );
       await rm(projectPath, { recursive: true });
       synchronizedDirectories.length = 0;
+      await assert.rejects(
+        removalAuthority.verifyExactRepository(
+          removalReservation,
+          exactPlacement,
+        ),
+        error => {
+          assert.ok(error instanceof RepositoryCheckpointError);
+          assert.equal(error.code, 'storage-unavailable');
+          return true;
+        },
+      );
       assert.equal(
-        await removalAuthority.removeExactRepository(exactIdentity),
+        await removalAuthority.removeExactRepository(removalReservation, exactIdentity),
         'replayed',
       );
       assert.equal(synchronizedDirectories.includes(repositoryRoot), true);
+      await removalReservation.close();
       await removalAuthority.close();
-      assert.equal(await authority.removeExactRepository(exactIdentity), 'replayed');
+      const replayReservation = await authority.reserveExactRepositoryOperation(projectId);
+      assert.equal(
+        await authority.removeExactRepository(replayReservation, exactIdentity),
+        'replayed',
+      );
+      await replayReservation.close();
 
       const stagingProject = join(operationRoot, projectHex);
       const outsideStagingProject = join(root, 'outside-staging-project');
@@ -916,6 +970,7 @@ exec '${GIT}' "$@"
     } finally {
       await importer.close();
       await uploadAdmission.close();
+      await removalAuthority?.close();
       await authority.close();
       await admission.close();
       await rm(root, { force: true, recursive: true });
@@ -972,7 +1027,10 @@ exec '${GIT}' "$@"
     let captureAuthority: RepositoryCheckpointAuthority | undefined;
     let syncFailureAuthority: RepositoryCheckpointAuthority | undefined;
     try {
-      await assert.rejects(authority.deleteExactPersonalRef({
+      const exactReservation = await authority.reserveExactRepositoryOperation(
+        placement.projectId,
+      );
+      await assert.rejects(authority.deleteExactPersonalRef(exactReservation, {
         expectedOid: oid,
         personalRef: 'refs/heads/members/member-a',
         placement,
@@ -981,6 +1039,7 @@ exec '${GIT}' "$@"
         assert.equal(error.code, 'placement-rejected');
         return true;
       });
+      await exactReservation.close();
       assert.equal(
         await git(repository, ['rev-parse', 'refs/heads/members/member-a']),
         oid,

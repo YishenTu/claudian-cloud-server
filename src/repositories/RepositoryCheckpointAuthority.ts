@@ -30,6 +30,7 @@ import {
 
 import {
   ResourceAdmissionError,
+  type GitChildPermit,
   type ResourceAdmission,
 } from '../resource-admission/ResourceAdmission.js';
 import {
@@ -154,6 +155,11 @@ export interface ExactOwnedRepositoryIdentity {
   readonly storageNodeId: string;
 }
 
+export interface ExactRepositoryOperationReservation {
+  readonly projectId: CollabProjectId;
+  close(): Promise<void>;
+}
+
 export interface InactiveRepositoryPublication {
   readonly artifactKey: string;
   readonly bundleByteCount: number;
@@ -194,11 +200,35 @@ export interface InactiveRepositoryPublicationPort {
   ): Promise<'removed' | 'replayed'>;
 }
 
-export interface ExactRepositoryMutationPort {
+export interface ExactPersonalRefPort {
+  reserveExactRepositoryOperation(
+    projectId: CollabProjectId,
+    signal?: AbortSignal,
+  ): Promise<ExactRepositoryOperationReservation>;
+  verifyExactPersonalRef(
+    reservation: ExactRepositoryOperationReservation,
+    input: DeleteExactPersonalRefInput,
+  ): Promise<void>;
   deleteExactPersonalRef(
+    reservation: ExactRepositoryOperationReservation,
     input: DeleteExactPersonalRefInput,
   ): Promise<'deleted' | 'replayed'>;
+}
+
+export interface ExactRepositoryPresencePort {
+  reserveExactRepositoryOperation(
+    projectId: CollabProjectId,
+    signal?: AbortSignal,
+  ): Promise<ExactRepositoryOperationReservation>;
+  verifyExactRepository(
+    reservation: ExactRepositoryOperationReservation,
+    placement: RepositoryPlacementLease,
+  ): Promise<void>;
+}
+
+export interface ExactRepositoryRemovalPort extends ExactRepositoryPresencePort {
   removeExactRepository(
+    reservation: ExactRepositoryOperationReservation,
     identity: ExactOwnedRepositoryIdentity,
     signal?: AbortSignal,
   ): Promise<'removed' | 'replayed'>;
@@ -230,6 +260,13 @@ interface CapturePaths {
   readonly projectId: string;
   readonly project: string;
   readonly verification: string;
+}
+
+interface ExactRepositoryReservationState {
+  active: boolean;
+  inUse: boolean;
+  readonly permit: GitChildPermit;
+  readonly projectId: CollabProjectId;
 }
 
 const DIRECTORY_MODE = 0o700;
@@ -599,6 +636,20 @@ function assertExactOwnedIdentity(
     || identity.placementGeneration <= 0
     || !STORAGE_KEY_PATTERN.test(identity.repositoryStorageKey)
     || identity.storageNodeId !== storageNodeId
+  ) {
+    fail('invalid-checkpoint');
+  }
+}
+
+function assertExactPersonalRef(input: DeleteExactPersonalRefInput): void {
+  const memberId = input.personalRef.startsWith(COLLAB_MEMBER_REF_PREFIX)
+    ? input.personalRef.slice(COLLAB_MEMBER_REF_PREFIX.length)
+    : undefined;
+  if (
+    !isCollabGitOid(input.expectedOid)
+    || memberId === undefined
+    || !isCollabMemberId(memberId)
+    || collabMemberRef(memberId) !== input.personalRef
   ) {
     fail('invalid-checkpoint');
   }
@@ -1086,8 +1137,12 @@ export class RepositoryCheckpointAuthority
 implements
 RepositoryCheckpointCapturePort,
 InactiveRepositoryPublicationPort,
-ExactRepositoryMutationPort {
+ExactPersonalRefPort,
+ExactRepositoryRemovalPort {
   readonly #activeCaptures = new Set<string>();
+  readonly #activeExactRepositoryReservations = new Set<
+    ExactRepositoryReservationState
+  >();
   readonly #maximumBlobBytes: number;
   readonly #maximumBundleBytes: number;
   readonly #maximumExpandedTreeEntries: number;
@@ -1104,6 +1159,10 @@ ExactRepositoryMutationPort {
   readonly #treeRemoval: (path: string) => Promise<void>;
   readonly #running = new Set<Promise<void>>();
   readonly #controllers = new Set<AbortController>();
+  readonly #exactRepositoryReservations = new WeakMap<
+    ExactRepositoryOperationReservation,
+    ExactRepositoryReservationState
+  >();
   #closePromise: Promise<void> | undefined;
   #closed = false;
 
@@ -1137,6 +1196,11 @@ ExactRepositoryMutationPort {
   close(): Promise<void> {
     if (this.#closePromise === undefined) {
       this.#closed = true;
+      for (const state of this.#activeExactRepositoryReservations) {
+        state.active = false;
+        state.permit.release();
+      }
+      this.#activeExactRepositoryReservations.clear();
       for (const controller of this.#controllers) controller.abort('closed');
       this.#closePromise = Promise.allSettled([
         this.#supervisor.close(),
@@ -1144,6 +1208,66 @@ ExactRepositoryMutationPort {
       ]).then(() => undefined);
     }
     return this.#closePromise;
+  }
+
+  async reserveExactRepositoryOperation(
+    projectId: CollabProjectId,
+    signal?: AbortSignal,
+  ): Promise<ExactRepositoryOperationReservation> {
+    if (this.#closed) fail('closed');
+    let permit: GitChildPermit;
+    try {
+      permit = await this.#resourceAdmission.acquireGitChild({
+        classification: 'write',
+        projectId,
+        ...(signal === undefined ? {} : { signal }),
+      });
+    } catch (error: unknown) {
+      if (error instanceof ResourceAdmissionError) throw mapAdmission(error);
+      return fail('storage-unavailable');
+    }
+    const reservation: ExactRepositoryOperationReservation = Object.freeze({
+      close: (): Promise<void> => {
+        const state = this.#exactRepositoryReservations.get(reservation);
+        if (state?.active === true) {
+          state.active = false;
+          this.#activeExactRepositoryReservations.delete(state);
+          state.permit.release();
+        }
+        return Promise.resolve();
+      },
+      projectId,
+    });
+    const state: ExactRepositoryReservationState = {
+      active: true,
+      inUse: false,
+      permit,
+      projectId,
+    };
+    this.#exactRepositoryReservations.set(reservation, state);
+    this.#activeExactRepositoryReservations.add(state);
+    return reservation;
+  }
+
+  #runExactRepositoryOperation<Result>(
+    reservation: ExactRepositoryOperationReservation,
+    projectId: CollabProjectId,
+    externalSignal: AbortSignal | undefined,
+    operation: (signal: AbortSignal) => Promise<Result>,
+  ): Promise<Result> {
+    const state = this.#exactRepositoryReservations.get(reservation);
+    if (
+      state?.active !== true
+      || state.inUse
+      || state.projectId !== projectId
+      || reservation.projectId !== projectId
+    ) {
+      return Promise.reject(new RepositoryCheckpointError('invalid-checkpoint'));
+    }
+    state.inUse = true;
+    return this.#runOperation(externalSignal, operation).finally(() => {
+      state.inUse = false;
+    });
   }
 
   #runOperation<Result>(
@@ -1458,9 +1582,12 @@ ExactRepositoryMutationPort {
   }
 
   deleteExactPersonalRef(
+    reservation: ExactRepositoryOperationReservation,
     input: DeleteExactPersonalRefInput,
   ): Promise<'deleted' | 'replayed'> {
-    return this.#runOperation(
+    return this.#runExactRepositoryOperation(
+      reservation,
+      input.placement.projectId,
       input.signal,
       signal => this.#deleteExactPersonalRef(input, signal),
     );
@@ -1470,28 +1597,7 @@ ExactRepositoryMutationPort {
     input: DeleteExactPersonalRefInput,
     signal: AbortSignal,
   ): Promise<'deleted' | 'replayed'> {
-    const memberId = input.personalRef.startsWith(COLLAB_MEMBER_REF_PREFIX)
-      ? input.personalRef.slice(COLLAB_MEMBER_REF_PREFIX.length)
-      : undefined;
-    if (
-      !isCollabGitOid(input.expectedOid)
-      || memberId === undefined
-      || !isCollabMemberId(memberId)
-      || collabMemberRef(memberId) !== input.personalRef
-    ) {
-      fail('invalid-checkpoint');
-    }
-    let permit;
-    try {
-      permit = await this.#resourceAdmission.acquireGitChild({
-        classification: 'write',
-        projectId: input.placement.projectId,
-        signal,
-      });
-    } catch (error: unknown) {
-      if (error instanceof ResourceAdmissionError) throw mapAdmission(error);
-      fail('storage-unavailable');
-    }
+    assertExactPersonalRef(input);
     try {
       const resolved = await this.#pathPolicy.resolveExisting(input.placement)
         .catch((error: unknown) => {
@@ -1571,8 +1677,61 @@ ExactRepositoryMutationPort {
       if (error instanceof RepositoryCheckpointError) throw error;
       if (error instanceof GitProcessError) throw mapGit(error);
       fail('storage-unavailable');
-    } finally {
-      permit.release();
+    }
+  }
+
+  verifyExactPersonalRef(
+    reservation: ExactRepositoryOperationReservation,
+    input: DeleteExactPersonalRefInput,
+  ): Promise<void> {
+    return this.#runExactRepositoryOperation(
+      reservation,
+      input.placement.projectId,
+      input.signal,
+      signal => this.#verifyExactPersonalRef(input, signal),
+    );
+  }
+
+  async #verifyExactPersonalRef(
+    input: DeleteExactPersonalRefInput,
+    signal: AbortSignal,
+  ): Promise<void> {
+    assertExactPersonalRef(input);
+    try {
+      const resolved = await this.#pathPolicy.resolveExisting(input.placement)
+        .catch((error: unknown) => {
+          if (error instanceof RepositoryPlacementError) throw mapPlacement(error);
+          fail('storage-unavailable');
+        });
+      const currentRefs = parseForEachRefOutput(
+        await this.#supervisor.runCommand({
+          arguments: [
+            'for-each-ref',
+            '--format=%(refname)%00%(objectname)',
+            input.personalRef,
+          ],
+          captureOutput: true,
+          cwd: resolved.repositoryPath,
+          failureCode: 'repository-corrupt',
+          signal,
+        }),
+      );
+      if (
+        currentRefs.size !== 1
+        || currentRefs.get(input.personalRef) !== input.expectedOid
+      ) {
+        fail('repository-invalid');
+      }
+      await this.#pathPolicy.revalidate(input.placement).catch(
+        (error: unknown) => {
+          if (error instanceof RepositoryPlacementError) throw mapPlacement(error);
+          fail('storage-unavailable');
+        },
+      );
+    } catch (error: unknown) {
+      if (error instanceof RepositoryCheckpointError) throw error;
+      if (error instanceof GitProcessError) throw mapGit(error);
+      fail('storage-unavailable');
     }
   }
 
@@ -1586,10 +1745,13 @@ ExactRepositoryMutationPort {
   }
 
   removeExactRepository(
+    reservation: ExactRepositoryOperationReservation,
     identity: ExactOwnedRepositoryIdentity,
     signal?: AbortSignal,
   ): Promise<'removed' | 'replayed'> {
-    return this.#runOperation(
+    return this.#runExactRepositoryOperation(
+      reservation,
+      identity.projectId,
       signal,
       operationSignal => this.#removeExactRepository(
         identity,
@@ -1603,50 +1765,62 @@ ExactRepositoryMutationPort {
     signal: AbortSignal,
   ): Promise<'removed' | 'replayed'> {
     assertExactOwnedIdentity(identity, this.#storageNodeId);
-    let permit;
-    try {
-      permit = await this.#resourceAdmission.acquireGitChild({
-        classification: 'write',
-        projectId: identity.projectId,
-        signal,
-      });
-    } catch (error: unknown) {
-      if (error instanceof ResourceAdmissionError) throw mapAdmission(error);
+    await this.#pathPolicy.verifyRoot().catch((error: unknown) => {
+      if (error instanceof RepositoryPlacementError) throw mapPlacement(error);
       fail('storage-unavailable');
+    });
+    const projectPath = join(
+      this.#repositoryRoot,
+      Buffer.from(identity.projectId, 'utf8').toString('hex'),
+    );
+    const repositoryPath = join(
+      projectPath,
+      identity.repositoryStorageKey,
+    );
+    const projectExists = await directoryExists(projectPath);
+    if (!projectExists) {
+      await this.#syncDirectory(this.#repositoryRoot);
+      return 'replayed';
     }
-    try {
-      await this.#pathPolicy.verifyRoot().catch((error: unknown) => {
-        if (error instanceof RepositoryPlacementError) throw mapPlacement(error);
-        fail('storage-unavailable');
-      });
-      const projectPath = join(
-        this.#repositoryRoot,
-        Buffer.from(identity.projectId, 'utf8').toString('hex'),
-      );
-      const repositoryPath = join(
-        projectPath,
-        identity.repositoryStorageKey,
-      );
-      const projectExists = await directoryExists(projectPath);
-      if (!projectExists) {
-        await this.#syncDirectory(this.#repositoryRoot);
-        return 'replayed';
-      }
-      const cleanup = exactRepositoryCleanupFact(identity);
-      return await this.#removeDurableTree({
-        assertTargetOwned: async () => {
-          await assertPrivateDirectory(repositoryPath);
-          await assertOwnedRepositoryMarker(repositoryPath, identity);
-        },
-        cleanupKey: cleanup.cleanupKey,
-        markerJson: cleanup.markerJson,
-        parentPath: projectPath,
-        signal,
-        targetPath: repositoryPath,
-      });
-    } finally {
-      permit.release();
-    }
+    const cleanup = exactRepositoryCleanupFact(identity);
+    return this.#removeDurableTree({
+      assertTargetOwned: async () => {
+        await assertPrivateDirectory(repositoryPath);
+        await assertOwnedRepositoryMarker(repositoryPath, identity);
+      },
+      cleanupKey: cleanup.cleanupKey,
+      markerJson: cleanup.markerJson,
+      parentPath: projectPath,
+      signal,
+      targetPath: repositoryPath,
+    });
+  }
+
+  verifyExactRepository(
+    reservation: ExactRepositoryOperationReservation,
+    placement: RepositoryPlacementLease,
+  ): Promise<void> {
+    return this.#runExactRepositoryOperation(
+      reservation,
+      placement.projectId,
+      undefined,
+      async () => {
+        try {
+          const resolved = await this.#pathPolicy.resolveExisting(placement);
+          await assertOwnedRepositoryMarker(resolved.repositoryPath, {
+            placementGeneration: placement.generation,
+            projectId: placement.projectId,
+            repositoryStorageKey: placement.repositoryStorageKey,
+            storageNodeId: placement.storageNodeId,
+          });
+          await this.#pathPolicy.revalidate(placement);
+        } catch (error: unknown) {
+          if (error instanceof RepositoryCheckpointError) throw error;
+          if (error instanceof RepositoryPlacementError) throw mapPlacement(error);
+          fail('storage-unavailable');
+        }
+      },
+    );
   }
 
   removeOwnedRepository(

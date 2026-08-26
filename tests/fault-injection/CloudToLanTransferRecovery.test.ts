@@ -169,15 +169,27 @@ async function recoverCurrent(
   projectId: string,
   transferId: string,
 ): Promise<void> {
+  const observed = await store.withProjectScope(projectId, scope => (
+    scope.portability.getLifecycleJournal(transferId)
+  ));
+  assert.ok(observed);
+  const reservation = await coordinator.reserveRecovery(projectId, observed);
   const lease = await store.acquireProjectLease(projectId);
   try {
     const journal = await lease.withProjectScope(scope => (
       scope.portability.getLifecycleJournal(transferId)
     ));
     assert.ok(journal);
-    await coordinator.recover({ journal, lease });
+    await coordinator.recover({
+      journal,
+      lease,
+      ...(reservation === undefined ? {} : {
+        repositoryReservation: reservation,
+      }),
+    });
   } finally {
     await lease.close();
+    await reservation?.close();
   }
 }
 

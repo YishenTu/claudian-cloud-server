@@ -12,6 +12,7 @@ import {
   LAN_TO_CLOUD_TRANSFER_SCHEMA,
   PORTABILITY_LIFECYCLE_SCHEMA,
   PROJECT_READ_EVENTS_SCHEMA,
+  TERMINAL_PROJECT_LIFECYCLE_SCHEMA,
 } from './PostgresSchema.js';
 
 export type PostgresMigrationErrorCode =
@@ -140,6 +141,15 @@ const MIGRATION_RESOURCES = Object.freeze([
       import.meta.url,
     ),
     version: CLOUD_TO_LAN_TRANSFER_SCHEMA.version,
+  }),
+  Object.freeze({
+    checksum: TERMINAL_PROJECT_LIFECYCLE_SCHEMA.checksum,
+    name: TERMINAL_PROJECT_LIFECYCLE_SCHEMA.name,
+    resource: new URL(
+      './migrations/0009_terminal_project_lifecycle.sql',
+      import.meta.url,
+    ),
+    version: TERMINAL_PROJECT_LIFECYCLE_SCHEMA.version,
   }),
 ]);
 

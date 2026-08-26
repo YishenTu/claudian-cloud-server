@@ -60,6 +60,7 @@ export interface PutProjectLifecycleJournalInput {
   readonly createdAt: CollabIsoTimestamp;
   readonly direction: 'cloud-to-lan' | 'lan-to-cloud' | undefined;
   readonly expectedAuthorityGeneration: number;
+  readonly expectedPersonalRefOid?: string;
   readonly idempotencyKey: string;
   readonly kind: ProjectLifecycleKind;
   readonly operationId: string;
@@ -305,6 +306,7 @@ export interface AuthorityTransferRecoveryRecord
 
 export interface LeaveFormerPrincipalReplayInput {
   readonly createdAt: CollabIsoTimestamp;
+  readonly expectedPersonalRefOid: string;
   readonly expiresAt: CollabIsoTimestamp;
   readonly intentId: string;
   readonly memberId: CollabMemberId;
@@ -317,6 +319,7 @@ export interface LeaveFormerPrincipalReplayRecord {
   readonly completedAt: CollabIsoTimestamp | undefined;
   readonly createdAt: CollabIsoTimestamp;
   readonly expiresAt: CollabIsoTimestamp;
+  readonly expectedPersonalRefOid: string;
   readonly intentId: string;
   readonly memberId: CollabMemberId;
   readonly operationId: string;
@@ -328,6 +331,29 @@ export interface CompleteLeaveFormerPrincipalReplayInput
   extends Omit<LeaveFormerPrincipalReplayInput, 'createdAt' | 'expiresAt'> {
   readonly completedAt: CollabIsoTimestamp;
   readonly resultSha256: string;
+}
+
+export interface CompleteLeaveFormerPrincipalReplayRecoveryInput {
+  readonly completedAt: CollabIsoTimestamp;
+  readonly operationId: string;
+  readonly resultSha256: string;
+}
+
+export interface SettleLeaveMembershipInput {
+  readonly expectedMembershipRevision: bigint;
+  readonly leftAt: CollabIsoTimestamp;
+  readonly memberId: CollabMemberId;
+  readonly operationId: string;
+}
+
+export type SettleLeaveMembershipResult =
+  | 'last-manager'
+  | 'replayed'
+  | 'settled';
+
+export interface CleanupTerminalArtifactsInput {
+  readonly operationId: string;
+  readonly operationKind: 'authority-transfer' | 'retire';
 }
 
 export interface RemoveProjectCoordinationContentInput {
@@ -444,6 +470,9 @@ export interface PortabilityLifecyclePersistenceReader {
   getLifecycleJournal(
     operationId: string,
   ): Promise<ProjectLifecycleJournalRecord | undefined>;
+  getLeaveFormerPrincipalReplay(
+    operationId: string,
+  ): Promise<LeaveFormerPrincipalReplayRecord | undefined>;
   getNonterminalLifecycleJournal(): Promise<
     ProjectLifecycleJournalRecord | undefined
   >;
@@ -495,6 +524,12 @@ export interface PortabilityLifecyclePersistence
   ): Promise<PersistencePutResult>;
   completeLeaveFormerPrincipalReplay(
     input: CompleteLeaveFormerPrincipalReplayInput,
+  ): Promise<PersistenceAdvanceResult>;
+  completeLeaveFormerPrincipalReplayRecovery(
+    input: CompleteLeaveFormerPrincipalReplayRecoveryInput,
+  ): Promise<PersistenceAdvanceResult>;
+  cleanupTerminalArtifacts(
+    input: CleanupTerminalArtifactsInput,
   ): Promise<PersistenceAdvanceResult>;
   deleteProtectedClaimEnvelopes(
     input: DeleteProtectedClaimEnvelopesInput,
@@ -570,6 +605,9 @@ export interface PortabilityLifecyclePersistence
   scrubProtectedClaimEnvelope(
     input: ScrubProtectedClaimEnvelopeInput,
   ): Promise<ProtectedClaimScrubResult>;
+  settleLeaveMembership(
+    input: SettleLeaveMembershipInput,
+  ): Promise<SettleLeaveMembershipResult>;
   stageLanToCloudProject(
     input: StageLanToCloudProjectInput,
   ): Promise<PersistencePutResult>;

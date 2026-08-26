@@ -193,6 +193,13 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
         environmentIdentity: 'environment-real',
         relinquishmentIntentIdFactory: () => 'relinquishment-intent-real',
         relinquishmentSigner: { sign: () => Promise.resolve(SIGNATURE) },
+        repository: {
+          reserveExactRepositoryOperation: projectId => Promise.resolve(Object.freeze({
+            async close() {},
+            projectId,
+          })),
+          verifyExactRepository: () => Promise.resolve(),
+        },
         sourceFence: {
           quiesce: () => Promise.resolve(),
           relinquish: () => Promise.resolve(),

@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util';
+
 import {
   isCollabOpaqueId,
   isCollabProjectId,
@@ -23,6 +25,11 @@ import {
 export interface RecoverProjectLifecycleInput {
   readonly journal: ProjectLifecycleJournalRecord;
   readonly lease: PinnedProjectLease;
+  readonly repositoryReservation?: ProjectLifecycleRecoveryReservation;
+}
+
+export interface ProjectLifecycleRecoveryReservation {
+  close(): Promise<void>;
 }
 
 export type ProjectLifecycleRecoveryOutcome =
@@ -30,6 +37,10 @@ export type ProjectLifecycleRecoveryOutcome =
   | 'waiting-for-external-proof';
 
 export interface ProjectLifecycleRecoveryOwner {
+  reserveRecovery?(
+    projectId: CollabProjectId,
+    journal: ProjectLifecycleJournalRecord,
+  ): Promise<ProjectLifecycleRecoveryReservation | undefined>;
   recover(
     input: RecoverProjectLifecycleInput,
   ): Promise<ProjectLifecycleRecoveryOutcome>;
@@ -76,6 +87,11 @@ const LIFECYCLE_KINDS = new Set<ProjectLifecycleKind>([
   'retire',
 ]);
 const MAXIMUM_LIFECYCLE_JOURNALS_PER_RECOVERY = 2;
+
+interface RecoveryStepResult {
+  readonly journal: ProjectLifecycleJournalRecord;
+  readonly outcome: ProjectLifecycleRecoveryOutcome;
+}
 
 function fail(code: ProjectRecoveryError['code']): never {
   throw new ProjectRecoveryError(code);
@@ -136,10 +152,10 @@ function permitsDeletionSuccessor(
   return journal.state === 'completed'
     && (
       journal.kind === 'retire'
-    || (
-      journal.kind === 'authority-transfer'
-      && journal.direction === 'cloud-to-lan'
-    )
+      || (
+        journal.kind === 'authority-transfer'
+        && journal.direction === 'cloud-to-lan'
+      )
     );
 }
 
@@ -165,95 +181,151 @@ implements ProjectLifecycleRecoveryPort {
           : new ProjectRecoveryError('dependency-failed'),
       );
     }
-    return this.#withProjectLease(snapshot.projectId, async lease => {
-      const journal = await lease.withProjectScope(scope => (
-        scope.portability.getLifecycleJournal(snapshot.operationId)
-      ));
-      if (journal === undefined) fail('dependency-failed');
-      exactJournal(journal, snapshot);
-      await this.#recover(lease, journal);
-    });
+    return this.#recoverCandidate(snapshot);
   }
 
   recoverProject(projectId: CollabProjectId): Promise<void> {
     if (!isCollabProjectId(projectId)) {
       return Promise.reject(new ProjectRecoveryError('dependency-failed'));
     }
-    return this.#withProjectLease(projectId, async lease => {
-      const journal = await lease.withProjectScope(scope => (
-        scope.portability.getNonterminalLifecycleJournal()
-      ));
-      if (journal === undefined) return;
-      exactJournal(journal, { projectId });
-      const outcome = await this.#recover(lease, journal);
-      if (outcome === 'waiting-for-external-proof') {
-        fail('recovery-required');
-      }
-    });
+    return this.#drainProject(projectId, true);
   }
 
   close(): void {
     this.#closed = true;
   }
 
-  async #recover(
-    lease: PinnedProjectLease,
-    initial: ProjectLifecycleJournalRecord,
-  ): Promise<ProjectLifecycleRecoveryOutcome> {
-    let journal = initial;
-    const seen = new Set<string>();
+  async #recoverCandidate(snapshot: ExactCandidate): Promise<void> {
+    const observed = await this.#withProjectLease(snapshot.projectId, async lease => {
+      const journal = await lease.withProjectScope(scope => (
+        scope.portability.getLifecycleJournal(snapshot.operationId)
+      ));
+      if (journal === undefined) fail('dependency-failed');
+      exactJournal(journal, snapshot);
+      return journal;
+    });
+    const recovered = await this.#recoverObserved(observed);
+    if (recovered.outcome === 'waiting-for-external-proof') return;
+    await this.#drainProject(snapshot.projectId, false, recovered.journal);
+  }
+
+  async #drainProject(
+    projectId: CollabProjectId,
+    rejectWaiting: boolean,
+    initialPredecessor?: ProjectLifecycleJournalRecord,
+  ): Promise<void> {
+    let predecessor = initialPredecessor;
     for (
       let index = 0;
       index < MAXIMUM_LIFECYCLE_JOURNALS_PER_RECOVERY;
       index += 1
     ) {
-      if (seen.has(journal.operationId)) fail('dependency-failed');
-      seen.add(journal.operationId);
-      if (journal.state === 'recovery-required') fail('recovery-required');
-      if (journal.state !== 'cancelled' && journal.state !== 'completed') {
-        const outcome = await this.#owner(journal.kind).recover(Object.freeze({
-          journal,
-          lease,
-        }));
-        const settled = await lease.withProjectScope(scope => (
-          scope.portability.getLifecycleJournal(journal.operationId)
-        ));
-        if (settled === undefined) fail('dependency-failed');
-        exactJournal(settled, journal);
-        if (settled.state === 'recovery-required') fail('recovery-required');
-        if (outcome === 'waiting-for-external-proof') {
-          if (
-            settled.state === 'cancelled'
-            || settled.state === 'completed'
-            || settled.operationId !== journal.operationId
-          ) fail('dependency-failed');
-          return 'waiting-for-external-proof';
-        }
-        if (settled.state !== 'cancelled' && settled.state !== 'completed') {
-          fail('dependency-failed');
-        }
-        journal = settled;
-      }
-      const successor = await lease.withProjectScope(scope => (
-        scope.portability.getNonterminalLifecycleJournal()
+      const journal = await this.#withProjectLease(projectId, lease => (
+        lease.withProjectScope(scope => (
+          scope.portability.getNonterminalLifecycleJournal()
+        ))
       ));
-      if (successor === undefined) return 'settled';
-      exactJournal(successor, { projectId: initial.projectId });
+      if (journal === undefined) return;
+      exactJournal(journal, { projectId });
       if (
-        successor.kind !== 'delete'
-        || !permitsDeletionSuccessor(journal)
-      ) {
-        fail('dependency-failed');
+        predecessor !== undefined
+        && (
+          journal.kind !== 'delete'
+          || !permitsDeletionSuccessor(predecessor)
+        )
+      ) fail('dependency-failed');
+      const recovered = await this.#recoverObserved(journal);
+      if (recovered.outcome === 'waiting-for-external-proof') {
+        if (rejectWaiting) fail('recovery-required');
+        return;
       }
-      journal = successor;
+      predecessor = recovered.journal;
     }
-    fail('dependency-failed');
+    const remaining = await this.#withProjectLease(projectId, lease => (
+      lease.withProjectScope(scope => (
+        scope.portability.getNonterminalLifecycleJournal()
+      ))
+    ));
+    if (remaining !== undefined) fail('dependency-failed');
   }
 
-  async #withProjectLease(
+  async #recoverObserved(
+    observed: ProjectLifecycleJournalRecord,
+  ): Promise<RecoveryStepResult> {
+    const owner = this.#owner(observed.kind);
+    let preflight = observed;
+    for (;;) {
+      if (preflight.state === 'recovery-required') fail('recovery-required');
+      if (preflight.state === 'cancelled' || preflight.state === 'completed') {
+        return { journal: preflight, outcome: 'settled' };
+      }
+      let reservation: ProjectLifecycleRecoveryReservation | undefined;
+      try {
+        reservation = await owner.reserveRecovery?.(
+          preflight.projectId,
+          preflight,
+        );
+        const attempt = await this.#withProjectLease(
+          preflight.projectId,
+          async lease => {
+            const journal = await lease.withProjectScope(scope => (
+              scope.portability.getLifecycleJournal(preflight.operationId)
+            ));
+            if (journal === undefined) fail('dependency-failed');
+            exactJournal(journal, preflight);
+            if (!isDeepStrictEqual(journal, preflight)) {
+              return Object.freeze({ retry: journal });
+            }
+            if (journal.state === 'recovery-required') fail('recovery-required');
+            if (journal.state === 'cancelled' || journal.state === 'completed') {
+              return Object.freeze({
+                result: Object.freeze({ journal, outcome: 'settled' as const }),
+              });
+            }
+            const outcome = await owner.recover(Object.freeze({
+              journal,
+              lease,
+              ...(reservation === undefined ? {} : {
+                repositoryReservation: reservation,
+              }),
+            }));
+            const settled = await lease.withProjectScope(scope => (
+              scope.portability.getLifecycleJournal(journal.operationId)
+            ));
+            if (settled === undefined) fail('dependency-failed');
+            exactJournal(settled, journal);
+            if (settled.state === 'recovery-required') fail('recovery-required');
+            if (outcome === 'waiting-for-external-proof') {
+              if (settled.state === 'cancelled' || settled.state === 'completed') {
+                fail('dependency-failed');
+              }
+              return Object.freeze({
+                result: Object.freeze({ journal: settled, outcome }),
+              });
+            }
+            if (settled.state !== 'cancelled' && settled.state !== 'completed') {
+              fail('dependency-failed');
+            }
+            return Object.freeze({
+              result: Object.freeze({
+                journal: settled,
+                outcome: 'settled' as const,
+              }),
+            });
+          },
+        );
+        if ('result' in attempt) return attempt.result;
+        preflight = attempt.retry;
+      } finally {
+        await reservation?.close().catch(() => undefined);
+      }
+    }
+  }
+
+  async #withProjectLease<Result>(
     projectId: CollabProjectId,
-    operation: (lease: PinnedProjectLease) => Promise<void>,
-  ): Promise<void> {
+    operation: (lease: PinnedProjectLease) => Promise<Result>,
+  ): Promise<Result> {
     if (this.#isClosed()) fail('closed');
     let lease: PinnedProjectLease;
     try {
@@ -263,9 +335,10 @@ implements ProjectLifecycleRecoveryPort {
       return fail(this.#isClosed() ? 'closed' : 'dependency-failed');
     }
     let failure: Error | undefined;
+    let result: Result | undefined;
     try {
       if (this.#isClosed()) fail('closed');
-      await operation(lease);
+      result = await operation(lease);
     } catch (error: unknown) {
       failure = error instanceof ProjectRecoveryError
         ? error
@@ -277,6 +350,7 @@ implements ProjectLifecycleRecoveryPort {
       failure = new ProjectRecoveryError('dependency-failed');
     }
     if (failure !== undefined) throw failure;
+    return result as Result;
   }
 
   #isClosed(): boolean {

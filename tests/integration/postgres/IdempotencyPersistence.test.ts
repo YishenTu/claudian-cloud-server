@@ -172,8 +172,10 @@ describe('Collaboration idempotency persistence', () => {
           );
           await client.query(
             `UPDATE claudian_cloud.project_memberships
-                SET status = 'left', revision = 2
+                SET status = 'left', revision = 2,
+                    left_at = $1::timestamptz
               WHERE project_id = 'project-a' AND member_id = 'member-a'`,
+            [CREATED],
           );
           await client.query('COMMIT');
         } finally {

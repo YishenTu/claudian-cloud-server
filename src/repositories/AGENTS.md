@@ -16,6 +16,7 @@
 - Enforce exact allowed refs, expected-OID CAS, full reachable-tree policy, streamed pack reservations, quarantine inspection, projected repository quotas, and cleanup on success, rejection, cancellation, timeout, and shutdown.
 - Participant-controlled Git input in external profiles runs in a short-lived target-repository-only sandbox with no network and bounded CPU, RSS, PIDs, filesystem, output, and duration. This is not a persistent per-Project container or VM.
 - Count Smart HTTP, validation, Accept, maintenance, and backup verification processes against the shared child budget owned by resource admission.
+- Exact lifecycle ref verification/removal and repository verification/removal require one opaque Project-scoped repository reservation acquired before the caller's canonical Project lease. Repository operations validate and consume that reservation without acquiring capacity from inside the lease.
 - Keep local execution, the sandbox, and a future routed worker behind one deep repository authority. Do not expose a second domain API or remote-node port before a second implementation actually exists.
 - Accept creates its persisted deterministic commit plan without checkout or ambient Git configuration, parses the object back, and returns a verified result OID before Project authority may compare-and-swap protected main.
 

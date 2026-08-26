@@ -20,6 +20,7 @@ const ACCEPT_RECOVERY_CHECKSUM = '0f0e91dd7be0ac961222c8802925425b87d6b540f87f1e
 const PORTABILITY_LIFECYCLE_CHECKSUM = 'a7c4773253250fc0c02e0e6f02026b22ef7f1767a19ff922947a30f843160de6';
 const LAN_TO_CLOUD_TRANSFER_CHECKSUM = 'd49bf1335d3410cdd95ff2b928f21264eb6212e7db9baea6561d118038d06a95';
 const CLOUD_TO_LAN_TRANSFER_CHECKSUM = '12e60f0ef26d2906687635cc4bdc59f33cb3bbfbc2095d2e7196b57417eb0e12';
+const TERMINAL_PROJECT_LIFECYCLE_CHECKSUM = 'f5a9541802d114f0959b2e62c9a884cba938c99926fe9547063d95a457a6d284';
 
 async function execute(connectionString: string, sql: string): Promise<void> {
   const client = new Client({ connectionString });
@@ -150,6 +151,12 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
         state: 'applied',
         version: 8,
       },
+      {
+        checksum: TERMINAL_PROJECT_LIFECYCLE_CHECKSUM,
+        name: 'terminal-project-lifecycle',
+        state: 'applied',
+        version: 9,
+      },
     ]);
 
     const relations = await client.query<{ readonly relation: string }>(
@@ -244,10 +251,10 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
     await client.query(
       `INSERT INTO claudian_cloud.schema_migrations
         (version, name, checksum, state, applied_at)
-       VALUES (9, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
+       VALUES (10, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
     );
-    await expectMigrationError(migrator, 'schema-newer', 9);
-    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 9');
+    await expectMigrationError(migrator, 'schema-newer', 10);
+    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 10');
 
     await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 1');
     await expectMigrationError(migrator, 'schema-gap', 2);
@@ -470,8 +477,8 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       ticket_mentions: ['DELETE', 'INSERT', 'SELECT'],
       tickets: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       transfer_claim_batch_receipts: ['INSERT', 'SELECT'],
-      transfer_receipt_keys: ['INSERT', 'SELECT'],
-      transfer_redemption_receipts: ['INSERT', 'SELECT'],
+      transfer_receipt_keys: ['DELETE', 'INSERT', 'SELECT'],
+      transfer_redemption_receipts: ['DELETE', 'INSERT', 'SELECT'],
       transferred_membership_claims: ['DELETE', 'INSERT', 'SELECT'],
     };
     assert.deepEqual(

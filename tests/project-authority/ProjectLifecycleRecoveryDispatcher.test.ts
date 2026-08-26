@@ -204,6 +204,15 @@ describe('ProjectLifecycleRecoveryDispatcher', () => {
     const dispatcher = new ProjectLifecycleRecoveryDispatcher({
       coordination,
       owners: owners({
+        reserveRecovery: projectId => {
+          coordination.events.push(`reserve:${projectId}`);
+          return Promise.resolve({
+            close: () => {
+              coordination.events.push(`release:${projectId}`);
+              return Promise.resolve();
+            },
+          });
+        },
         recover: input => {
           seen.push(input.journal);
           coordination.events.push(`owner:${input.journal.operationId}`);
@@ -227,9 +236,73 @@ describe('ProjectLifecycleRecoveryDispatcher', () => {
     assert.deepEqual(seen, [record]);
     assert.deepEqual(coordination.events, [
       'lease:project-a',
+      'close:project-a',
+      'reserve:project-a',
+      'lease:project-a',
       'owner:operation-backup',
       'close:project-a',
+      'release:project-a',
+      'lease:project-a',
+      'close:project-a',
     ]);
+    dispatcher.close();
+  });
+
+  it('restarts reservation preflight when the journal advances before lease reacquisition', async () => {
+    const observed = Object.freeze({
+      ...journal('authority-transfer'),
+      direction: 'cloud-to-lan' as const,
+      phase: 'cloud-relinquished',
+    });
+    const coordination = new MemoryLifecycleCoordination(observed);
+    const reservations: string[] = [];
+    const authorityTransfer: ProjectLifecycleRecoveryOwner = {
+      reserveRecovery: (_projectId, candidate) => {
+        reservations.push(candidate.phase);
+        if (candidate.phase === 'cloud-relinquished') {
+          coordination.current = Object.freeze({
+            ...candidate,
+            phase: 'lan-activated',
+            updatedAt: '2026-08-25T00:00:01.000Z',
+          });
+          return Promise.resolve(undefined);
+        }
+        return Promise.resolve({ close: () => Promise.resolve() });
+      },
+      recover: input => {
+        assert.equal(input.journal.phase, 'lan-activated');
+        assert.ok(input.repositoryReservation);
+        coordination.current = Object.freeze({
+          ...input.journal,
+          phase: 'completed',
+          state: 'completed',
+        });
+        return Promise.resolve('settled');
+      },
+    };
+    const unexpected: ProjectLifecycleRecoveryOwner = {
+      recover: () => Promise.reject(new Error('unexpected-owner')),
+    };
+    const dispatcher = new ProjectLifecycleRecoveryDispatcher({
+      coordination,
+      owners: {
+        authorityTransfer,
+        backup: unexpected,
+        deletion: unexpected,
+        export: unexpected,
+        leave: unexpected,
+        retire: unexpected,
+      },
+    });
+
+    await dispatcher.recoverCandidate({
+      kind: observed.kind,
+      operationId: observed.operationId,
+      projectId: observed.projectId,
+      scheduledAt: observed.scheduledAt,
+    });
+
+    assert.deepEqual(reservations, ['cloud-relinquished', 'lan-activated']);
     dispatcher.close();
   });
 

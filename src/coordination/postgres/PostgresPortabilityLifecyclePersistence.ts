@@ -8,6 +8,7 @@ import {
   decodeCollabTransferredMembershipClaimCustodyReceipt,
   decodeCollabTransferredMembershipRedemptionReceipt,
   encodeCollabProtectedClaimAssociatedData,
+  isCollabGitOid,
   isCollabMemberId,
   isCollabOpaqueId,
   isCollabProjectId,
@@ -32,6 +33,8 @@ import type {
   AdvanceProjectBackupCatalogInput,
   AdvanceProjectLifecycleJournalInput,
   CompleteLeaveFormerPrincipalReplayInput,
+  CompleteLeaveFormerPrincipalReplayRecoveryInput,
+  CleanupTerminalArtifactsInput,
   DeleteTransferredMembershipClaimsInput,
   DeleteProtectedClaimEnvelopesInput,
   DiscardLanToCloudProjectStageInput,
@@ -63,6 +66,8 @@ import type {
   RevokeProjectPrincipalBindingInput,
   RotateTransferredMembershipClaimsInput,
   ScrubProtectedClaimEnvelopeInput,
+  SettleLeaveMembershipInput,
+  SettleLeaveMembershipResult,
   StageLanToCloudProjectInput,
   TerminalResponderInput,
   TerminalResponderRecord,
@@ -88,6 +93,7 @@ interface LifecycleJournalRow {
   readonly created_at: Date;
   readonly direction: string | null;
   readonly expected_authority_generation: string;
+  readonly expected_personal_ref_oid: string | null;
   readonly idempotency_key: string;
   readonly kind: string;
   readonly operation_id: string;
@@ -136,6 +142,7 @@ interface LeaveFormerPrincipalReplayRow {
   readonly completed_at: Date | null;
   readonly created_at: Date;
   readonly expires_at: Date;
+  readonly expected_personal_ref_oid: string;
   readonly intent_id: string;
   readonly member_id: string;
   readonly operation_id: string;
@@ -413,10 +420,18 @@ function canonicalJournalInput(
       && input.direction !== 'lan-to-cloud'
     )
     || (input.kind !== 'authority-transfer' && input.direction !== undefined)
+    || (
+      input.kind === 'leave'
+        ? !isCollabGitOid(input.expectedPersonalRefOid)
+        : input.expectedPersonalRefOid !== undefined
+    )
   ) invalidRecord();
   if (input.actorMemberId !== undefined) memberId(input.actorMemberId);
   return Object.freeze({
     ...input,
+    ...(input.expectedPersonalRefOid === undefined
+      ? {}
+      : { expectedPersonalRefOid: input.expectedPersonalRefOid }),
     expectedAuthorityGeneration: positiveInteger(input.expectedAuthorityGeneration),
     idempotencyKey: opaqueId(input.idempotencyKey),
     operationId: opaqueId(input.operationId),
@@ -457,6 +472,9 @@ function lifecycleJournal(row: LifecycleJournalRow): ProjectLifecycleJournalReco
     expectedAuthorityGeneration: databasePositiveInteger(
       row.expected_authority_generation,
     ),
+    ...(row.expected_personal_ref_oid === null
+      ? {}
+      : { expectedPersonalRefOid: row.expected_personal_ref_oid }),
     idempotencyKey: row.idempotency_key,
     kind: lifecycleKind(row.kind),
     operationId: row.operation_id,
@@ -1035,12 +1053,13 @@ implements PortabilityLifecyclePersistence {
          project_id, operation_id, kind, direction, phase,
          recovery_from_phase, state, expected_authority_generation,
          actor_member_id, idempotency_key, request_fingerprint,
+         expected_personal_ref_oid,
          checkpoint_sha256, batch_revision, batch_sha256, result_sha256,
          scheduled_at, created_at, updated_at
        ) VALUES (
-         $1, $2, $3, $4, $5, NULL, 'active', $6, $7, $8, $9,
-         NULL, NULL, NULL, NULL, $10::timestamptz,
-         $11::timestamptz, $11::timestamptz
+         $1, $2, $3, $4, $5, NULL, 'active', $6, $7, $8, $9, $10,
+         NULL, NULL, NULL, NULL, $11::timestamptz,
+         $12::timestamptz, $12::timestamptz
        )
        ON CONFLICT (project_id, operation_id) DO NOTHING
        RETURNING operation_id`,
@@ -1054,6 +1073,7 @@ implements PortabilityLifecyclePersistence {
         canonical.actorMemberId ?? null,
         canonical.idempotencyKey,
         canonical.requestFingerprint,
+        canonical.expectedPersonalRefOid ?? null,
         canonical.scheduledAt,
         canonical.createdAt,
       ],
@@ -1087,6 +1107,7 @@ implements PortabilityLifecyclePersistence {
       `SELECT project_id, operation_id, kind, direction, phase,
               recovery_from_phase, state, expected_authority_generation,
               actor_member_id, idempotency_key, request_fingerprint,
+              expected_personal_ref_oid,
               checkpoint_sha256, batch_revision, batch_sha256, result_sha256,
               scheduled_at, created_at, updated_at
          FROM claudian_cloud.project_lifecycle_journals
@@ -1103,6 +1124,7 @@ implements PortabilityLifecyclePersistence {
       `SELECT project_id, operation_id, kind, direction, phase,
               recovery_from_phase, state, expected_authority_generation,
               actor_member_id, idempotency_key, request_fingerprint,
+              expected_personal_ref_oid,
               checkpoint_sha256, batch_revision, batch_sha256, result_sha256,
               scheduled_at, created_at, updated_at
          FROM claudian_cloud.project_lifecycle_journals
@@ -1331,6 +1353,7 @@ implements PortabilityLifecyclePersistence {
     const expiresAt = timestamp(input.expiresAt);
     const canonical = Object.freeze({
       createdAt,
+      expectedPersonalRefOid: input.expectedPersonalRefOid,
       expiresAt,
       intentId: opaqueId(input.intentId),
       memberId: memberId(input.memberId),
@@ -1338,6 +1361,7 @@ implements PortabilityLifecyclePersistence {
       principalId: principalId(input.principalId),
       requestFingerprint: sha256(input.requestFingerprint),
     });
+    if (!isCollabGitOid(canonical.expectedPersonalRefOid)) invalidRecord();
     if (Date.parse(expiresAt) <= Date.parse(createdAt)) invalidRecord();
     const journal = await this.getLifecycleJournal(canonical.operationId);
     if (
@@ -1352,11 +1376,11 @@ implements PortabilityLifecyclePersistence {
     const rows = await this.#query<{ readonly operation_id: string }>(
       `INSERT INTO claudian_cloud.leave_former_principal_replays (
          project_id, operation_id, principal_sha256, member_id, intent_id,
-         request_fingerprint, state, result_sha256, created_at,
-         completed_at, expires_at
+         request_fingerprint, expected_personal_ref_oid, state, result_sha256,
+         created_at, completed_at, expires_at
        ) VALUES (
-         $1, $2, $3, $4, $5, $6, 'recovering', NULL,
-         $7::timestamptz, NULL, $8::timestamptz
+         $1, $2, $3, $4, $5, $6, $7, 'recovering', NULL,
+         $8::timestamptz, NULL, $9::timestamptz
        )
        ON CONFLICT DO NOTHING
        RETURNING operation_id`,
@@ -1367,11 +1391,13 @@ implements PortabilityLifecyclePersistence {
         canonical.memberId,
         canonical.intentId,
         canonical.requestFingerprint,
+        canonical.expectedPersonalRefOid,
         canonical.createdAt,
         canonical.expiresAt,
       ],
     );
     const stored = await this.findLeaveFormerPrincipalReplay({
+      expectedPersonalRefOid: canonical.expectedPersonalRefOid,
       intentId: canonical.intentId,
       memberId: canonical.memberId,
       operationId: canonical.operationId,
@@ -1383,14 +1409,37 @@ implements PortabilityLifecyclePersistence {
       stored === undefined
       || stored.createdAt !== canonical.createdAt
       || stored.expiresAt !== canonical.expiresAt
+      || stored.expectedPersonalRefOid !== canonical.expectedPersonalRefOid
       || stored.state !== 'recovering'
     ) stateConflict();
-    await this.revokeProjectPrincipal({
-      memberId: canonical.memberId,
-      principalId: canonical.principalId,
-      revokedAt: canonical.createdAt,
-    });
     return rows.length === 1 ? 'created' : 'replayed';
+  }
+
+  async getLeaveFormerPrincipalReplay(
+    operationId: string,
+  ): Promise<LeaveFormerPrincipalReplayRecord | undefined> {
+    opaqueId(operationId);
+    const rows = await this.#query<LeaveFormerPrincipalReplayRow>(
+      `SELECT operation_id, member_id, intent_id, state, result_sha256,
+              expected_personal_ref_oid, created_at, completed_at, expires_at
+         FROM claudian_cloud.leave_former_principal_replays
+        WHERE project_id = $1 AND operation_id = $2`,
+      [this.#projectId, operationId],
+    );
+    const row = rows[0];
+    if (row === undefined) return undefined;
+    if (row.state !== 'recovering' && row.state !== 'completed') dependencyFailure();
+    return Object.freeze({
+      completedAt: row.completed_at === null ? undefined : dateIso(row.completed_at),
+      createdAt: dateIso(row.created_at),
+      expectedPersonalRefOid: row.expected_personal_ref_oid,
+      expiresAt: dateIso(row.expires_at),
+      intentId: row.intent_id,
+      memberId: memberId(row.member_id),
+      operationId: row.operation_id,
+      resultSha256: optional(row.result_sha256),
+      state: row.state,
+    });
   }
 
   async findLeaveFormerPrincipalReplay(
@@ -1403,17 +1452,19 @@ implements PortabilityLifecyclePersistence {
     const intentId = opaqueId(input.intentId);
     const requestedPrincipalId = principalId(input.principalId);
     const requestFingerprint = sha256(input.requestFingerprint);
+    if (!isCollabGitOid(input.expectedPersonalRefOid)) invalidRecord();
     const requestedAt = timestamp(input.requestedAt);
     const principalSha256 = createHash('sha256')
       .update(requestedPrincipalId)
       .digest('hex');
     const rows = await this.#query<LeaveFormerPrincipalReplayRow>(
       `SELECT operation_id, member_id, intent_id, state, result_sha256,
-              created_at, completed_at, expires_at
+              expected_personal_ref_oid, created_at, completed_at, expires_at
          FROM claudian_cloud.leave_former_principal_replays
         WHERE project_id = $1 AND operation_id = $2
           AND principal_sha256 = $3 AND member_id = $4 AND intent_id = $5
-          AND request_fingerprint = $6 AND expires_at > $7::timestamptz`,
+          AND request_fingerprint = $6 AND expected_personal_ref_oid = $7
+          AND expires_at > $8::timestamptz`,
       [
         this.#projectId,
         operationId,
@@ -1421,6 +1472,7 @@ implements PortabilityLifecyclePersistence {
         requestedMemberId,
         intentId,
         requestFingerprint,
+        input.expectedPersonalRefOid,
         requestedAt,
       ],
     );
@@ -1431,6 +1483,7 @@ implements PortabilityLifecyclePersistence {
       completedAt: row.completed_at === null ? undefined : dateIso(row.completed_at),
       createdAt: dateIso(row.created_at),
       expiresAt: dateIso(row.expires_at),
+      expectedPersonalRefOid: row.expected_personal_ref_oid,
       intentId: row.intent_id,
       memberId: memberId(row.member_id),
       operationId: row.operation_id,
@@ -1451,17 +1504,18 @@ implements PortabilityLifecyclePersistence {
       principalId: principalId(input.principalId),
       requestFingerprint: sha256(input.requestFingerprint),
     };
+    if (!isCollabGitOid(input.expectedPersonalRefOid)) invalidRecord();
     const principalSha256 = createHash('sha256')
       .update(exact.principalId)
       .digest('hex');
     const rows = await this.#query<{ readonly operation_id: string }>(
       `UPDATE claudian_cloud.leave_former_principal_replays
-          SET state = 'completed', result_sha256 = $7,
-              completed_at = $8::timestamptz
+          SET state = 'completed', result_sha256 = $8,
+              completed_at = $9::timestamptz
         WHERE project_id = $1 AND operation_id = $2
           AND principal_sha256 = $3 AND member_id = $4 AND intent_id = $5
-          AND request_fingerprint = $6 AND state = 'recovering'
-          AND expires_at > $8::timestamptz
+          AND request_fingerprint = $6 AND expected_personal_ref_oid = $7
+          AND state = 'recovering' AND expires_at > $9::timestamptz
        RETURNING operation_id`,
       [
         this.#projectId,
@@ -1470,12 +1524,14 @@ implements PortabilityLifecyclePersistence {
         exact.memberId,
         exact.intentId,
         exact.requestFingerprint,
+        input.expectedPersonalRefOid,
         resultSha256,
         completedAt,
       ],
     );
     const stored = await this.findLeaveFormerPrincipalReplay({
       ...exact,
+      expectedPersonalRefOid: input.expectedPersonalRefOid,
       requestedAt: completedAt,
     });
     if (
@@ -1484,6 +1540,121 @@ implements PortabilityLifecyclePersistence {
       || stored.completedAt !== completedAt
     ) stateConflict();
     return rows.length === 1 ? 'advanced' : 'replayed';
+  }
+
+  async completeLeaveFormerPrincipalReplayRecovery(
+    input: CompleteLeaveFormerPrincipalReplayRecoveryInput,
+  ): Promise<PersistenceAdvanceResult> {
+    const operationId = opaqueId(input.operationId);
+    const completedAt = timestamp(input.completedAt);
+    const resultSha256 = sha256(input.resultSha256);
+    const rows = await this.#query<{ readonly operation_id: string }>(
+      `UPDATE claudian_cloud.leave_former_principal_replays
+          SET state = 'completed', result_sha256 = $3,
+              completed_at = $4::timestamptz
+        WHERE project_id = $1 AND operation_id = $2 AND state = 'recovering'
+       RETURNING operation_id`,
+      [this.#projectId, operationId, resultSha256, completedAt],
+    );
+    const stored = await this.getLeaveFormerPrincipalReplay(operationId);
+    if (
+      stored?.state !== 'completed'
+      || stored.resultSha256 !== resultSha256
+      || stored.completedAt !== completedAt
+    ) stateConflict();
+    return rows.length === 1 ? 'advanced' : 'replayed';
+  }
+
+  async settleLeaveMembership(
+    input: SettleLeaveMembershipInput,
+  ): Promise<SettleLeaveMembershipResult> {
+    const operationId = opaqueId(input.operationId);
+    const requestedMemberId = memberId(input.memberId);
+    const leftAt = timestamp(input.leftAt);
+    if (input.expectedMembershipRevision < 1n) invalidRecord();
+    const journal = await this.getLifecycleJournal(operationId);
+    if (
+      journal?.kind !== 'leave'
+      || journal.actorMemberId !== requestedMemberId
+      || journal.state !== 'active'
+      || (journal.phase !== 'prepared' && journal.phase !== 'membership-left')
+    ) stateConflict();
+    const rows = await this.#query<{
+      readonly left_at: Date | null;
+      readonly revision: string;
+      readonly role: string;
+      readonly status: string;
+    }>(
+      `SELECT role, status, revision, left_at
+         FROM claudian_cloud.project_memberships
+        WHERE project_id = $1 AND member_id = $2
+        FOR UPDATE`,
+      [this.#projectId, requestedMemberId],
+    );
+    const membership = rows[0];
+    if (membership === undefined) stateConflict();
+    if (membership.status === 'left') {
+      if (
+        BigInt(membership.revision) !== input.expectedMembershipRevision + 1n
+        || membership.left_at === null
+        || dateIso(membership.left_at) !== leftAt
+        || journal.phase !== 'membership-left'
+      ) stateConflict();
+      return 'replayed';
+    }
+    if (
+      membership.status !== 'active'
+      || BigInt(membership.revision) !== input.expectedMembershipRevision
+      || (membership.role !== 'manager' && membership.role !== 'member')
+      || membership.left_at !== null
+      || journal.phase !== 'prepared'
+    ) stateConflict();
+    if (membership.role === 'manager') {
+      const managers = await this.#query<{ readonly manager_count: string }>(
+        `SELECT count(*)::text AS manager_count
+           FROM claudian_cloud.project_memberships
+          WHERE project_id = $1 AND role = 'manager' AND status = 'active'`,
+        [this.#projectId],
+      );
+      if (managers[0]?.manager_count === '1') return 'last-manager';
+      if (managers[0] === undefined || BigInt(managers[0].manager_count) < 1n) {
+        dependencyFailure();
+      }
+    }
+    const updated = await this.#query<{ readonly member_id: string }>(
+      `UPDATE claudian_cloud.project_memberships
+          SET status = 'left', revision = revision + 1,
+              left_at = $4::timestamptz, updated_at = $4::timestamptz
+        WHERE project_id = $1 AND member_id = $2 AND status = 'active'
+          AND revision = $3
+       RETURNING member_id`,
+      [
+        this.#projectId,
+        requestedMemberId,
+        input.expectedMembershipRevision.toString(),
+        leftAt,
+      ],
+    );
+    if (updated.length !== 1) stateConflict();
+    await this.#query(
+      `UPDATE claudian_cloud.project_principal_bindings
+          SET state = 'revoked', revoked_at = $3::timestamptz
+        WHERE project_id = $1 AND member_id = $2 AND state = 'active'`,
+      [this.#projectId, requestedMemberId, leftAt],
+    );
+    await this.#query(
+      `UPDATE claudian_cloud.change_requests
+          SET status = 'discarded', revision = revision + 1,
+              updated_at = $3::timestamptz
+        WHERE project_id = $1 AND member_id = $2 AND status = 'open'`,
+      [this.#projectId, requestedMemberId, leftAt],
+    );
+    await this.#query(
+      `DELETE FROM claudian_cloud.ticket_mentions
+        WHERE project_id = $1 AND mentioned_member_id = $2`,
+      [this.#projectId, requestedMemberId],
+    );
+    return 'settled';
   }
 
   async putAuthorityTransferRecovery(
@@ -1939,23 +2110,6 @@ implements PortabilityLifecyclePersistence {
                  AND ack.acknowledged_at IS NULL
             )
           )
-          AND NOT EXISTS (
-            SELECT 1
-              FROM claudian_cloud.project_deletion_intents AS intent
-              JOIN claudian_cloud.project_lifecycle_journals AS journal
-                ON journal.project_id = intent.project_id
-               AND journal.operation_id = intent.operation_id
-             WHERE intent.project_id = project_terminal_responders.project_id
-               AND intent.terminal_operation_kind =
-                   project_terminal_responders.operation_kind
-               AND intent.terminal_operation_id =
-                   project_terminal_responders.operation_id
-               AND journal.phase NOT IN (
-                 'coordination-removed',
-                 'tombstoned',
-                 'completed'
-               )
-          )
        RETURNING operation_id`,
       [
         this.#projectId,
@@ -1967,6 +2121,50 @@ implements PortabilityLifecyclePersistence {
     );
     if (rows.length !== 1) stateConflict();
     return 'advanced';
+  }
+
+  async cleanupTerminalArtifacts(
+    input: CleanupTerminalArtifactsInput,
+  ): Promise<PersistenceAdvanceResult> {
+    if (!TERMINAL_OPERATION_KINDS.has(input.operationKind)) invalidRecord();
+    const operationId = opaqueId(input.operationId);
+    if (
+      await this.getTerminalResponder(input.operationKind, operationId)
+      !== undefined
+    ) stateConflict();
+    const tombstone = await this.getProjectTombstone();
+    if (
+      tombstone?.terminalOperationKind !== input.operationKind
+      || tombstone.terminalOperationId !== operationId
+    ) stateConflict();
+    if (input.operationKind === 'retire') return 'replayed';
+    const before = await this.#query<{ readonly row_count: string }>(
+      `SELECT (
+         (SELECT count(*) FROM claudian_cloud.source_protected_claim_envelopes
+           WHERE project_id = $1 AND transfer_id = $2)
+         + (SELECT count(*) FROM claudian_cloud.transfer_redemption_receipts
+           WHERE project_id = $1 AND transfer_id = $2)
+         + (SELECT count(*) FROM claudian_cloud.transfer_receipt_keys
+           WHERE project_id = $1 AND transfer_id = $2)
+       )::text AS row_count`,
+      [this.#projectId, operationId],
+    );
+    await this.#query(
+      `DELETE FROM claudian_cloud.source_protected_claim_envelopes
+        WHERE project_id = $1 AND transfer_id = $2`,
+      [this.#projectId, operationId],
+    );
+    await this.#query(
+      `DELETE FROM claudian_cloud.transfer_redemption_receipts
+        WHERE project_id = $1 AND transfer_id = $2`,
+      [this.#projectId, operationId],
+    );
+    await this.#query(
+      `DELETE FROM claudian_cloud.transfer_receipt_keys
+        WHERE project_id = $1 AND transfer_id = $2`,
+      [this.#projectId, operationId],
+    );
+    return before[0]?.row_count === '0' ? 'replayed' : 'advanced';
   }
 
   async getTransferredMembershipClaim(
@@ -2756,9 +2954,16 @@ implements PortabilityLifecyclePersistence {
       canonical.operationId,
     );
     if (existing !== undefined) {
+      const existingPrincipals = [
+        ...existing.eligiblePrincipals,
+        ...existing.acknowledgements.map(value => ({
+          memberId: value.memberId,
+          principalId: value.principalId,
+        })),
+      ].sort((left, right) => compareMemberIds(left.memberId, right.memberId));
       if (!isDeepStrictEqual({
         createdAt: existing.createdAt,
-        eligiblePrincipals: existing.eligiblePrincipals,
+        eligiblePrincipals: existingPrincipals,
         expiresAt: existing.expiresAt,
         operationId: existing.operationId,
         operationKind: existing.operationKind,
@@ -2809,7 +3014,16 @@ implements PortabilityLifecyclePersistence {
         `INSERT INTO claudian_cloud.project_terminal_acknowledgements (
            project_id, operation_kind, operation_id, principal_id,
            member_id, acknowledged_at
-         ) VALUES ($1, $2, $3, $4, $5, NULL)
+         ) VALUES (
+           $1, $2, $3, $4, $5,
+           CASE WHEN $2::text = 'authority-transfer' THEN (
+             SELECT receipt.acknowledged_at
+               FROM claudian_cloud.transfer_redemption_receipts AS receipt
+              WHERE receipt.project_id = $1::varchar(64)
+                AND receipt.transfer_id = $3::varchar(128)
+                AND receipt.member_id = $5::varchar(64)
+           ) ELSE NULL END
+         )
          ON CONFLICT (project_id, operation_kind, operation_id, member_id)
          DO NOTHING`,
         [
@@ -2825,11 +3039,18 @@ implements PortabilityLifecyclePersistence {
       canonical.operationKind,
       canonical.operationId,
     );
+    const storedPrincipals = stored === undefined ? [] : [
+      ...stored.eligiblePrincipals,
+      ...stored.acknowledgements.map(value => ({
+        memberId: value.memberId,
+        principalId: value.principalId,
+      })),
+    ].sort((left, right) => compareMemberIds(left.memberId, right.memberId));
     if (
       stored === undefined
       || !isDeepStrictEqual({
         createdAt: stored.createdAt,
-        eligiblePrincipals: stored.eligiblePrincipals,
+        eligiblePrincipals: storedPrincipals,
         expiresAt: stored.expiresAt,
         operationId: stored.operationId,
         operationKind: stored.operationKind,
@@ -2910,6 +3131,12 @@ implements PortabilityLifecyclePersistence {
           principalId: principal.principal_id,
         }))),
       ...canonical,
+      eligiblePrincipals: Object.freeze(principals
+        .filter(principal => principal.acknowledged_at === null)
+        .map(principal => Object.freeze({
+          memberId: principal.member_id,
+          principalId: principal.principal_id,
+        }))),
     });
   }
 
@@ -3717,7 +3944,7 @@ implements PortabilityLifecyclePersistence {
       || row.bad_responder_count !== '0'
       || row.candidate_count !== '1'
       || row.deletion_intent_count !== '1'
-      || row.responder_count !== '1'
+      || (row.responder_count !== '0' && row.responder_count !== '1')
       || row.tombstone_count !== '1'
     ) dependencyFailure();
   }
