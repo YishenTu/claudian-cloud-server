@@ -45,8 +45,13 @@ import type {
   ProjectScope,
 } from '../../../coordination/ProjectCoordination.js';
 import type {
+  ExactRepositoryOperationReservation,
+  ExactRepositoryPresencePort,
+} from '../../../repositories/RepositoryCheckpointAuthority.js';
+import type {
   ProjectLifecycleRecoveryOutcome,
   ProjectLifecycleRecoveryOwner,
+  ProjectLifecycleRecoveryReservation,
   RecoverProjectLifecycleInput,
 } from '../ProjectLifecycleRecoveryDispatcher.js';
 
@@ -190,6 +195,7 @@ export interface CloudToLanTransferCoordinatorOptions {
   readonly environmentIdentity: string;
   readonly relinquishmentIntentIdFactory?: (transferId: string) => string;
   readonly relinquishmentSigner: CloudToLanRelinquishmentSigner;
+  readonly repository: ExactRepositoryPresencePort;
   readonly sourceFence: CloudToLanSourceFencePort;
   readonly targetTrust: CloudToLanTargetTrustPort;
 }
@@ -423,6 +429,15 @@ function dependency(error: unknown): never {
   return fail('dependency-failed');
 }
 
+function exactRepositoryReservation(
+  reservation: ProjectLifecycleRecoveryReservation | undefined,
+  projectId: CollabProjectId,
+): reservation is ExactRepositoryOperationReservation {
+  return reservation !== undefined
+    && 'projectId' in reservation
+    && reservation.projectId === projectId;
+}
+
 function sameAuthority(
   left: CollabCheckpointAuthority,
   right: CollabCheckpointAuthority,
@@ -510,6 +525,7 @@ implements ProjectLifecycleRecoveryOwner {
   readonly #environmentIdentity: string;
   readonly #relinquishmentIntentIdFactory: (transferId: string) => string;
   readonly #relinquishmentSigner: CloudToLanRelinquishmentSigner;
+  readonly #repository: ExactRepositoryPresencePort;
   readonly #running = new Set<Promise<void>>();
   readonly #sourceFence: CloudToLanSourceFencePort;
   readonly #targetTrust: CloudToLanTargetTrustPort;
@@ -532,6 +548,7 @@ implements ProjectLifecycleRecoveryOwner {
     this.#relinquishmentIntentIdFactory = options.relinquishmentIntentIdFactory
       ?? defaultRelinquishmentIntentId;
     this.#relinquishmentSigner = options.relinquishmentSigner;
+    this.#repository = options.repository;
     this.#sourceFence = options.sourceFence;
     this.#targetTrust = options.targetTrust;
   }
@@ -790,7 +807,9 @@ implements ProjectLifecycleRecoveryOwner {
     input: ConfirmCloudToLanTargetActiveInput,
   ): Promise<CollabAuthorityTransferStatus> {
     const request = decodeRequest('confirmCloudToLanTargetActive', input.request);
-    return this.#run(request.projectId, async lease => {
+    return this.#runWithRepositoryReservation(
+      request.projectId,
+      async (lease, reservation) => {
       const terminal = await lease.withProjectScope(scope => (
         scope.portability.getTerminalResponder('authority-transfer', request.transferId)
       ));
@@ -865,10 +884,11 @@ implements ProjectLifecycleRecoveryOwner {
         targetActivationRequestSha256,
       )) return fail('state-conflict');
       if (exact.journal.phase === 'lan-activated') {
-        await this.#completeIfNeeded(lease, exact);
+        await this.#completeIfNeeded(lease, exact, reservation);
       }
       return this.#requireStatus(lease, request.transferId);
-    });
+      },
+    );
   }
 
   getStatus(input: GetCloudToLanTransferInput): Promise<CollabAuthorityTransferStatus> {
@@ -935,6 +955,7 @@ implements ProjectLifecycleRecoveryOwner {
         lease,
         request.transferId,
         input.principalId,
+        true,
       );
       const status = await this.#requireStatus(lease, request.transferId);
       if (
@@ -959,12 +980,34 @@ implements ProjectLifecycleRecoveryOwner {
         receiptPublicKey: receiptKey.publicKey,
       });
       const acknowledgedAt = timestampImmediatelyAfter(request.receipt.redeemedAt);
-      await lease.withProjectScope(scope => scope.portability.scrubProtectedClaimEnvelope({
-        acknowledgedAt,
-        memberId,
-        receipt: request.receipt,
-        transferId: request.transferId,
-      }));
+      await lease.withProjectScope(async scope => {
+        await scope.portability.scrubProtectedClaimEnvelope({
+          acknowledgedAt,
+          memberId,
+          receipt: request.receipt,
+          transferId: request.transferId,
+        });
+        const responder = await scope.portability.getTerminalResponder(
+          'authority-transfer',
+          request.transferId,
+        );
+        const eligible = responder?.eligiblePrincipals.find(value => (
+          value.memberId === memberId
+          && value.principalId === input.principalId
+        ));
+        if (eligible !== undefined && !responder?.acknowledgements.some(value => (
+          value.memberId === memberId
+          && value.principalId === input.principalId
+        ))) {
+          await scope.portability.acknowledgeTerminalResponder({
+            acknowledgedAt,
+            memberId,
+            operationId: request.transferId,
+            operationKind: 'authority-transfer',
+            principalId: input.principalId,
+          });
+        }
+      });
       return Object.freeze({
         acknowledgedAt,
         memberId,
@@ -1001,7 +1044,10 @@ implements ProjectLifecycleRecoveryOwner {
   }
 
   expire(projectId: CollabProjectId, transferId: string): Promise<void> {
-    return this.#run(projectId, async lease => {
+    return this.#runWithRepositoryReservation(projectId, async (
+      lease,
+      reservation,
+    ) => {
       const exact = await this.#exactTransfer(lease, transferId);
       if (!this.#isExpired(exact)) return;
       if (
@@ -1009,7 +1055,7 @@ implements ProjectLifecycleRecoveryOwner {
         || exact.journal.phase === 'lan-activated'
         || exact.journal.phase === 'completed'
       ) {
-        await this.#recoverExact(lease, exact);
+        await this.#recoverExact(lease, exact, reservation);
         return;
       }
       if (exact.journal.state !== 'active') return;
@@ -1032,10 +1078,39 @@ implements ProjectLifecycleRecoveryOwner {
       input.journal.kind !== 'authority-transfer'
       || input.journal.direction !== 'cloud-to-lan'
     ) return fail('state-conflict');
+    const suppliedReservation = input.repositoryReservation;
+    if (
+      suppliedReservation !== undefined
+      && !exactRepositoryReservation(suppliedReservation, input.journal.projectId)
+    ) {
+      return fail('recovery-required');
+    }
     return this.#track(async () => {
       const exact = await this.#exactTransfer(input.lease, input.journal.operationId);
-      return this.#recoverExact(input.lease, exact);
+      return this.#recoverExact(input.lease, exact, suppliedReservation);
     });
+  }
+
+  reserveRecovery(
+    projectId: CollabProjectId,
+    journal: ProjectLifecycleJournalRecord,
+  ): Promise<ExactRepositoryOperationReservation | undefined> {
+    if (this.#closed) {
+      return Promise.reject(new CloudToLanTransferCoordinatorError('closed'));
+    }
+    if (
+      journal.kind !== 'authority-transfer'
+      || journal.direction !== 'cloud-to-lan'
+      || journal.projectId !== projectId
+    ) {
+      return Promise.reject(
+        new CloudToLanTransferCoordinatorError('state-conflict'),
+      );
+    }
+    if (journal.state !== 'active' || journal.phase !== 'lan-activated') {
+      return Promise.resolve(undefined);
+    }
+    return this.#repository.reserveExactRepositoryOperation(projectId);
   }
 
   close(): Promise<void> {
@@ -1049,6 +1124,7 @@ implements ProjectLifecycleRecoveryOwner {
   async #recoverExact(
     lease: PinnedProjectLease,
     initial: ExactTransfer,
+    repositoryReservation: ExactRepositoryOperationReservation | undefined,
   ): Promise<ProjectLifecycleRecoveryOutcome> {
     let exact = initial;
     if (exact.journal.state === 'completed' || exact.journal.state === 'cancelled') {
@@ -1127,7 +1203,8 @@ implements ProjectLifecycleRecoveryOwner {
       return 'waiting-for-external-proof';
     }
     if (exact.journal.phase === 'lan-activated') {
-      await this.#completeIfNeeded(lease, exact);
+      if (repositoryReservation === undefined) return fail('recovery-required');
+      await this.#completeIfNeeded(lease, exact, repositoryReservation);
       return 'settled';
     }
     if (exact.journal.phase === 'completed') return 'settled';
@@ -1317,7 +1394,11 @@ implements ProjectLifecycleRecoveryOwner {
     await this.#sourceFence.relinquish({ lease, proof });
   }
 
-  async #completeIfNeeded(lease: PinnedProjectLease, initial: ExactTransfer): Promise<void> {
+  async #completeIfNeeded(
+    lease: PinnedProjectLease,
+    initial: ExactTransfer,
+    repositoryReservation: ExactRepositoryOperationReservation,
+  ): Promise<void> {
     if (initial.journal.phase === 'completed') return;
     let exact = initial;
     if (
@@ -1374,6 +1455,23 @@ implements ProjectLifecycleRecoveryOwner {
       exact.journal.operationId,
     );
     if (!isCollabOpaqueId(deletionOperationId)) return fail('dependency-failed');
+    const repositoryPreflight = await lease.withProjectScope(async scope => {
+      const project = await scope.getProject();
+      const placement = await scope.getRepositoryPlacement();
+      if (
+        project?.serviceState !== 'deleting'
+        || project.authorityGeneration !== exact.recovery.targetAuthority.generation
+        || placement?.active !== true
+      ) return fail('recovery-required');
+      return Object.freeze({
+        authorityStateRevision: project.authorityStateRevision,
+        placement,
+      });
+    });
+    await this.#repository.verifyExactRepository(
+      repositoryReservation,
+      repositoryPreflight.placement,
+    );
     await lease.withProjectScope(async scope => {
       const project = await scope.getProject();
       const placement = await scope.getRepositoryPlacement();
@@ -1382,7 +1480,12 @@ implements ProjectLifecycleRecoveryOwner {
       if (
         project?.serviceState !== 'deleting'
         || project.authorityGeneration !== exact.recovery.targetAuthority.generation
-        || placement === undefined
+        || project.authorityStateRevision !== repositoryPreflight.authorityStateRevision
+        || placement?.active !== true
+        || placement.generation !== repositoryPreflight.placement.generation
+        || placement.repositoryStorageKey
+          !== repositoryPreflight.placement.repositoryStorageKey
+        || placement.storageNodeId !== repositoryPreflight.placement.storageNodeId
       ) return fail('recovery-required');
       this.#assertTerminalPrincipals(
         members,
@@ -1674,6 +1777,7 @@ implements ProjectLifecycleRecoveryOwner {
     lease: PinnedProjectLease,
     transferId: string,
     principalId: string,
+    includeAcknowledged = false,
   ): Promise<CollabMemberId> {
     if (!PRINCIPAL_PATTERN.test(principalId)) return fail('authorization-denied');
     return lease.withProjectScope(async scope => {
@@ -1684,7 +1788,11 @@ implements ProjectLifecycleRecoveryOwner {
       if (responder !== undefined) {
         const terminal = responder.eligiblePrincipals.find(value => (
           value.principalId === principalId
-        ));
+        )) ?? (includeAcknowledged
+          ? responder.acknowledgements.find(value => (
+              value.principalId === principalId
+            ))
+          : undefined);
         if (
           terminal === undefined
           || Date.parse(responder.expiresAt) <= this.#now()
@@ -1876,6 +1984,46 @@ implements ProjectLifecycleRecoveryOwner {
           await lease.close();
         } catch (error: unknown) {
           if (failure === undefined) dependency(error);
+        }
+      }
+    });
+  }
+
+  #runWithRepositoryReservation<Result>(
+    projectId: CollabProjectId,
+    operation: (
+      lease: PinnedProjectLease,
+      reservation: ExactRepositoryOperationReservation,
+    ) => Promise<Result>,
+  ): Promise<Result> {
+    return this.#track(async () => {
+      let reservation: ExactRepositoryOperationReservation;
+      try {
+        reservation = await this.#repository.reserveExactRepositoryOperation(projectId);
+      } catch (error: unknown) {
+        return dependency(error);
+      }
+      let lease: PinnedProjectLease;
+      try {
+        lease = await this.#coordination.acquireProjectLease(projectId);
+      } catch (error: unknown) {
+        await reservation.close().catch(() => undefined);
+        return dependency(error);
+      }
+      let failure: unknown;
+      try {
+        if (this.#closed) return fail('closed');
+        return await operation(lease, reservation);
+      } catch (error: unknown) {
+        failure = error;
+        return dependency(error);
+      } finally {
+        try {
+          await lease.close();
+        } catch (error: unknown) {
+          if (failure === undefined) dependency(error);
+        } finally {
+          await reservation.close().catch(() => undefined);
         }
       }
     });

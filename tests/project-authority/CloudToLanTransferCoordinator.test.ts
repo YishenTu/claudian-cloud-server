@@ -17,6 +17,7 @@ import {
 } from '@claudian-collab/protocol';
 
 import type {
+  AcknowledgeTerminalResponderInput,
   AdvanceProjectLifecycleJournalInput,
   AuthorityTransferRecoveryEvidenceInput,
   AuthorityTransferRecoveryInput,
@@ -44,6 +45,9 @@ import type {
   ProjectRecord,
 } from '../../src/coordination/ProjectPersistence.js';
 import type { RepositoryPlacementLease } from '../../src/repositories/RepositoryPlacement.js';
+import {
+  RepositoryCheckpointError,
+} from '../../src/repositories/RepositoryCheckpointAuthority.js';
 import {
   CloudToLanTransferCoordinator,
   CloudToLanTransferCoordinatorError,
@@ -330,6 +334,32 @@ class MemoryState {
       async getTerminalResponder() {
         return state.responder;
       },
+      async acknowledgeTerminalResponder(input: AcknowledgeTerminalResponderInput) {
+        assert.ok(state.responder);
+        const existing = state.responder.acknowledgements.find(value => (
+          value.memberId === input.memberId
+          && value.principalId === input.principalId
+        ));
+        if (existing !== undefined) return 'replayed' as const;
+        state.responder = Object.freeze({
+          ...state.responder,
+          acknowledgements: Object.freeze([
+            ...state.responder.acknowledgements,
+            Object.freeze({
+              acknowledgedAt: input.acknowledgedAt,
+              memberId: input.memberId,
+              principalId: input.principalId,
+            }),
+          ]),
+          eligiblePrincipals: Object.freeze(
+            state.responder.eligiblePrincipals.filter(value => (
+              value.memberId !== input.memberId
+              || value.principalId !== input.principalId
+            )),
+          ),
+        });
+        return 'advanced' as const;
+      },
       async putProjectTombstone(input: ProjectTombstoneInput) {
         state.tombstone ??= input;
         return 'created' as const;
@@ -410,6 +440,7 @@ class Harness {
   readonly checkpoint: CloudToLanCheckpointCapturePort;
   readonly custody: CloudToLanClaimCustodyPort;
   readonly fence: CloudToLanSourceFencePort;
+  readonly lifecycleOrder: string[] = [];
   readonly state: MemoryState;
   readonly targetTrust: CloudToLanTargetTrustPort;
   captureFailures = 0;
@@ -417,6 +448,8 @@ class Harness {
   discardFailures = 0;
   relinquishCalls = 0;
   relinquishFailures = 0;
+  repositoryAvailable = true;
+  repositoryVerifications = 0;
   signerFailures = 0;
   targetActivationVerifications = 0;
 
@@ -516,7 +549,10 @@ class Harness {
       checkpoint: this.checkpoint,
       clock: () => new Date(tick += 1_000),
       coordination: {
-        acquireProjectLease: async () => new MemoryLease(this.state),
+        acquireProjectLease: async () => {
+          this.lifecycleOrder.push('lease');
+          return new MemoryLease(this.state);
+        },
       },
       custody: this.custody,
       custodyReceiptIdFactory: () => 'custody-receipt',
@@ -530,6 +566,19 @@ class Harness {
             throw new Error('signer-failed');
           }
           return SIGNATURE;
+        },
+      },
+      repository: {
+        reserveExactRepositoryOperation: async projectId => {
+          this.lifecycleOrder.push('reserve');
+          return Object.freeze({ async close() {}, projectId });
+        },
+        verifyExactRepository: async () => {
+          this.lifecycleOrder.push('verify');
+          this.repositoryVerifications += 1;
+          if (!this.repositoryAvailable) {
+            throw new RepositoryCheckpointError('storage-unavailable');
+          }
         },
       },
       sourceFence: this.fence,
@@ -702,6 +751,7 @@ describe('CloudToLanTransferCoordinator', () => {
     assert.equal(harness.state.deletionJournals.get('delete-transfer')?.phase, 'traffic-denied');
     assert.equal(harness.state.responder?.eligiblePrincipals.length, 3);
     assert.equal(harness.targetActivationVerifications, 1);
+    assert.equal(harness.repositoryVerifications, 1);
 
     harness.state.bindings.clear();
     harness.state.recovery = undefined;
@@ -772,6 +822,71 @@ describe('CloudToLanTransferCoordinator', () => {
       },
     })).memberId, OFFLINE_ID);
     assert.equal(harness.state.envelopes.has(OFFLINE_ID), false);
+    assert.deepEqual(harness.state.responder?.acknowledgements, [{
+      acknowledgedAt: '2026-08-28T00:00:00.001Z',
+      memberId: OFFLINE_ID,
+      principalId: OFFLINE_PRINCIPAL,
+    }]);
+    assert.equal(harness.state.responder?.eligiblePrincipals.some(value => (
+      value.principalId === OFFLINE_PRINCIPAL
+    )), false);
+    await assert.rejects(coordinator.getStatus({
+      principalId: OFFLINE_PRINCIPAL,
+      request: { projectId: PROJECT_ID, transferId: begun.transferId },
+    }), (error: unknown) => error instanceof CloudToLanTransferCoordinatorError
+      && error.code === 'authorization-denied');
+    assert.deepEqual(await coordinator.acknowledgeRedemption({
+      principalId: OFFLINE_PRINCIPAL,
+      request: {
+        idempotencyKey: 'ack-intent',
+        projectId: PROJECT_ID,
+        receipt,
+        transferId: begun.transferId,
+      },
+    }), {
+      acknowledgedAt: '2026-08-28T00:00:00.001Z',
+      memberId: OFFLINE_ID,
+      projectId: PROJECT_ID,
+      receiptId: 'redemption-receipt',
+      transferId: begun.transferId,
+    });
+  });
+
+  it('proves exact repository presence before Cloud-to-LAN deletion intent', async () => {
+    const harness = new Harness();
+    const coordinator = harness.coordinator();
+    const begun = await begin(coordinator);
+    await accept(coordinator, begun.transferId);
+    await stage(coordinator, begun.transferId);
+    const proof = harness.state.recovery?.relinquishmentProof;
+    assert.ok(proof);
+    harness.repositoryAvailable = false;
+    harness.lifecycleOrder.length = 0;
+    const request = activationRequest(begun.transferId, proof);
+
+    await assert.rejects(coordinator.confirmTargetActive({
+      principalId: TARGET_PRINCIPAL,
+      request,
+    }), (error: unknown) => error instanceof CloudToLanTransferCoordinatorError
+      && error.code === 'dependency-failed');
+    assert.deepEqual(harness.lifecycleOrder.slice(0, 3), [
+      'reserve',
+      'lease',
+      'verify',
+    ]);
+    assert.equal(harness.state.journal?.phase, 'lan-activated');
+    assert.equal(harness.state.deletionIntent, undefined);
+
+    harness.repositoryAvailable = true;
+    const completed = await coordinator.confirmTargetActive({
+      principalId: TARGET_PRINCIPAL,
+      request,
+    });
+    assert.equal(completed.phase, 'completed');
+    const deletionIntent = harness.state.deletionIntent as
+      | ProjectDeletionIntentInput
+      | undefined;
+    assert.equal(deletionIntent?.reason, 'cloud-to-lan');
   });
 
   it('records the canonical empty claim batch for a single target Host', async () => {
@@ -838,8 +953,13 @@ describe('CloudToLanTransferCoordinator', () => {
     assert.equal(harness.state.journal?.phase, 'cloud-quiesced');
 
     coordinator = harness.coordinator();
+    const relinquishedJournal = harness.state.journal as ProjectLifecycleJournalRecord;
+    assert.equal(
+      await coordinator.reserveRecovery(PROJECT_ID, relinquishedJournal),
+      undefined,
+    );
     assert.equal(await coordinator.recover({
-      journal: harness.state.journal as ProjectLifecycleJournalRecord,
+      journal: relinquishedJournal,
       lease: new MemoryLease(harness.state),
     }), 'waiting-for-external-proof');
     assert.equal(harness.state.journal?.phase, 'checkpoint-captured');
@@ -887,10 +1007,18 @@ describe('CloudToLanTransferCoordinator', () => {
     }));
     assert.equal(harness.state.journal?.phase, 'lan-activated');
     coordinator = harness.coordinator();
+    const activatedJournal = harness.state.journal as ProjectLifecycleJournalRecord;
+    const recoveryReservation = await coordinator.reserveRecovery(
+      PROJECT_ID,
+      activatedJournal,
+    );
+    assert.ok(recoveryReservation);
     assert.equal(await coordinator.recover({
-      journal: harness.state.journal as ProjectLifecycleJournalRecord,
+      journal: activatedJournal,
       lease: new MemoryLease(harness.state),
+      repositoryReservation: recoveryReservation,
     }), 'settled');
+    await recoveryReservation.close();
     assert.equal(harness.state.journal?.phase, 'completed');
   });
 

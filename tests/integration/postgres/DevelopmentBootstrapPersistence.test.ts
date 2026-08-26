@@ -78,6 +78,7 @@ describe('development bootstrap persistence', () => {
           { name: 'portability-lifecycle', state: 'applied', version: 6 },
           { name: 'lan-to-cloud-transfer', state: 'applied', version: 7 },
           { name: 'cloud-to-lan-transfer', state: 'applied', version: 8 },
+          { name: 'terminal-project-lifecycle', state: 'applied', version: 9 },
         ]);
 
         const relations = await migration.query<{

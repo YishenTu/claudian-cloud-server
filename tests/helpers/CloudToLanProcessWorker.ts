@@ -183,6 +183,9 @@ async function recoverThenWrite(): Promise<void> {
     coordination: store,
     owners: {
       authorityTransfer: {
+        reserveRecovery: (candidateProjectId, candidateJournal) => (
+          coordinator.reserveRecovery(candidateProjectId, candidateJournal)
+        ),
         recover: async input => {
           const status = await input.lease.withProjectScope(scope => (
             scope.portability.getAuthorityTransferStatus(transferId)

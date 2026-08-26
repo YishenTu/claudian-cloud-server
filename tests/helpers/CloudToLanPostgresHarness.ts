@@ -549,6 +549,17 @@ export function cloudToLanCoordinator(input: Readonly<{
       `relinquish-${sha256(input.projectId).slice(0, 16)}`
     ),
     relinquishmentSigner: { sign: () => Promise.resolve(SIGNATURE) },
+    repository: {
+      reserveExactRepositoryOperation: projectId => Promise.resolve(Object.freeze({
+        async close() {},
+        projectId,
+      })),
+      verifyExactRepository: async () => {
+        if (input.durableRoot !== undefined) {
+          await access(repositoryPath(input.durableRoot, input.projectId));
+        }
+      },
+    },
     sourceFence,
     targetTrust,
   });
