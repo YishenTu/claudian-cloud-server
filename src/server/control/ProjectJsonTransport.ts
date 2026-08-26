@@ -104,6 +104,30 @@ async function nextRequestChunk(
   }
 }
 
+async function settleOperationBeforeAbort<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  const timeoutFailure = (): ProjectJsonRouteFailure => new ProjectJsonRouteFailure(
+    408,
+    new CollabError({ code: 'operation-timeout', recoveryActions: ['retry'] }),
+  );
+  if (signal.aborted) throw timeoutFailure();
+  let abortListener: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        abortListener = () => reject(timeoutFailure());
+        signal.addEventListener('abort', abortListener, { once: true });
+        if (signal.aborted) abortListener();
+      }),
+    ]);
+  } finally {
+    if (abortListener !== undefined) signal.removeEventListener('abort', abortListener);
+  }
+}
+
 async function readJsonBody(
   request: IncomingMessage,
   maximumBytes: number,
@@ -166,9 +190,16 @@ function statusForCollabError(error: CollabError): number {
     case 'project-not-found':
     case 'ticket-not-found': return 404;
     case 'membership-revoked': return 410;
+    case 'membership-claim-expired':
+    case 'membership-claim-revoked':
+    case 'project-retired': return 410;
+    case 'authority-transfer-not-found': return 404;
     case 'operation-timeout': return 408;
+    case 'authority-transfer-cancellation-forbidden':
+    case 'authority-transfer-stale':
     case 'authority-not-synchronized':
     case 'idempotency-conflict':
+    case 'membership-claim-already-redeemed':
     case 'request-head-not-pushed':
     case 'request-not-open':
     case 'stale-main':
@@ -178,6 +209,7 @@ function statusForCollabError(error: CollabError): number {
     case 'quota-exceeded': return 413;
     case 'protocol-payload-invalid':
     case 'protocol-version-unsupported': return 400;
+    case 'membership-claim-invalid': return 403;
     default: return 500;
   }
 }
@@ -250,11 +282,11 @@ export class ProjectJsonTransport {
         throw projectProtocolFailure('requestId');
       }
       requestId = envelope.value.requestId;
-      const data = await operation({
+      const data = await settleOperationBeforeAbort(operation({
         data: envelope.value.data,
         principal,
         signal: controller.signal,
-      });
+      }), controller.signal);
       this.#sendJson(response, 200, collabCloudSuccessEnvelope(requestId, data));
     } catch (error: unknown) {
       const failure = error instanceof ProjectJsonRouteFailure

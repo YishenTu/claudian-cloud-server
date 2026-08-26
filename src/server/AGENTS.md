@@ -12,9 +12,11 @@
 - `control/` implements the shared operation registry without a duplicate dispatch catalog.
 - `git/` owns Smart HTTP streaming, disconnect detection, response settlement, and child cancellation handoff; receive-pack still enters Project mutation admission and the repository authority.
 - `events/` streams durable Project invalidations. Process-local notification is only a wake-up mechanism, never event authority.
+- `transfer/` owns bounded authority-transfer artifact streaming after trusted ingress. It never interprets checkpoint contents, derives lifecycle phase, or invents digest headers outside the package binding.
 - `health/` distinguishes liveness, readiness, and version without exposing secrets, storage paths, Project existence, or recovery details.
 - The server consumes package-owned wire v6 and Cloud binding v2 only from exact `@claudian-collab/protocol@3.0.0`. It never registers v1 and v2 in parallel, creates a compatibility shim/registry, or reinterprets v1 input as v2.
 - A v2 capability is advertised only after its complete transport-to-owner path and server gate pass. The exact package pin alone advertises nothing; partial JSON or streaming work remains absent.
+- LAN-source-only proposal and Host-acceptance operations remain on the dedicated LAN binding. The Cloud v2 router must not register them or infer a source direction through fallback mutation attempts.
 
 ## Lifecycle tests
 

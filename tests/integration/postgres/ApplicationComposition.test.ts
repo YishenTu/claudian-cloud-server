@@ -21,6 +21,7 @@ import {
 } from 'node:test';
 
 import { Client } from 'pg';
+import { decodeCollabCloudCapabilityDocument } from '@claudian-collab/protocol';
 
 import { createApplication } from '../../../src/composition/createApplication.js';
 import type { ServerConfig } from '../../../src/config/ServerConfig.js';
@@ -771,5 +772,58 @@ while :; do sleep 1; done`,
     } finally {
       await application.close();
     }
+  });
+
+  it('advertises lifecycle support only after its complete runtime is ready', async () => {
+    const lifecycle: string[] = [];
+    const application = createApplication({
+      config: config({
+        postgresUrl: database.runtimeUrl,
+        repositoryRoot,
+      }),
+      lifecycle: {
+        artifacts: {
+          download: () => Promise.reject(new Error('unused')),
+          upload: () => Promise.reject(new Error('unused')),
+        },
+        close: () => {
+          lifecycle.push('close');
+          return Promise.resolve();
+        },
+        control: {
+          execute: () => Promise.reject(new Error('unused')),
+        },
+        reconcileAll: () => {
+          lifecycle.push('reconcile');
+          return Promise.resolve();
+        },
+        recovery: {
+          recoverCandidate: () => Promise.resolve(),
+          recoverProject: () => Promise.resolve(),
+        },
+        start: () => lifecycle.push('start'),
+      },
+      logger: logger([]),
+    });
+    try {
+      const address = await application.start();
+      assert.deepEqual(lifecycle, ['reconcile', 'start']);
+      const response = await fetch(
+        `http://${address.host}:${String(address.port)}/collab/capabilities`,
+      );
+      assert.equal(response.status, 200);
+      const capabilities = decodeCollabCloudCapabilityDocument(
+        await response.json(),
+      ).capabilities;
+      assert.equal(capabilities.includes('authority-transfer'), true);
+      assert.equal(capabilities.includes('project-retirement'), true);
+    } finally {
+      await application.close();
+    }
+    assert.deepEqual(lifecycle, [
+      'reconcile',
+      'start',
+      'close',
+    ]);
   });
 });
