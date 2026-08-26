@@ -122,6 +122,7 @@ describe('Project event persistence', () => {
           { name: 'collaboration', state: 'applied', version: 4 },
           { name: 'accept-recovery', state: 'applied', version: 5 },
           { name: 'portability-lifecycle', state: 'applied', version: 6 },
+          { name: 'lan-to-cloud-transfer', state: 'applied', version: 7 },
         ]);
 
         const rls = await client.query<{

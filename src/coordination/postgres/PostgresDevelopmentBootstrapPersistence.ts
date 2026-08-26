@@ -1041,7 +1041,7 @@ implements DevelopmentBootstrapProjectPersistence {
     );
     for (const member of input.members) {
       await this.#query(
-        `INSERT INTO claudian_cloud.project_memberships (
+         `INSERT INTO claudian_cloud.project_memberships (
            project_id,
            member_id,
            display_name,
@@ -1049,8 +1049,10 @@ implements DevelopmentBootstrapProjectPersistence {
            status,
            revision,
            created_at,
-           updated_at
-         ) VALUES ($1, $2, $3, $4, 'active', 1, $5, $6)`,
+           updated_at,
+           activated_at,
+           revoked_at
+         ) VALUES ($1, $2, $3, $4, 'active', 1, $5, $6, $6, NULL)`,
         [
           this.#projectId,
           member.memberId,

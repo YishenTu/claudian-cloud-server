@@ -2,6 +2,7 @@ import type {
   CollabAuthorityRelinquishmentProof,
   CollabAuthorityTransferStatus,
   CollabCheckpointAuthority,
+  CollabCheckpointPortableRecord,
   CollabCheckpointProtectedClaimEnvelopeRecord,
   CollabIsoTimestamp,
   CollabMemberId,
@@ -28,6 +29,31 @@ export type ProjectLifecycleState =
   | 'cancelled'
   | 'completed'
   | 'recovery-required';
+
+export interface LanToCloudProjectActivationInput {
+  readonly activatedAt: CollabIsoTimestamp;
+  readonly authorityGeneration: number;
+  readonly hostMemberId: CollabMemberId;
+  readonly hostPrincipalId: string;
+  readonly placementGeneration: number;
+  readonly repositoryStorageKey: string;
+  readonly storageNodeId: string;
+  readonly transferId: string;
+}
+
+export interface StageLanToCloudProjectInput {
+  readonly authorityGeneration: number;
+  readonly checkpointSha256: string;
+  readonly records: readonly CollabCheckpointPortableRecord[];
+  readonly stagedAt: CollabIsoTimestamp;
+  readonly transferId: string;
+}
+
+export interface DiscardLanToCloudProjectStageInput {
+  readonly authorityGeneration: number;
+  readonly stageSha256: string | undefined;
+  readonly transferId: string;
+}
 
 export interface PutProjectLifecycleJournalInput {
   readonly actorMemberId: CollabMemberId | undefined;
@@ -111,6 +137,13 @@ export interface RevokeTransferredMembershipClaimsInput {
   readonly batchSha256: string;
   readonly checkpointSha256: string;
   readonly revokedAt: CollabIsoTimestamp;
+  readonly transferId: string;
+}
+
+export interface DeleteTransferredMembershipClaimsInput {
+  readonly batchRevision: number;
+  readonly batchSha256: string;
+  readonly checkpointSha256: string;
   readonly transferId: string;
 }
 
@@ -223,9 +256,12 @@ export interface AuthorityTransferRecoveryInput {
 }
 
 export interface AuthorityTransferRecoveryEvidenceInput {
+  readonly cancellationRequestSha256?: string;
   readonly expectedUpdatedAt: CollabIsoTimestamp;
+  readonly inactivePublicationJson?: string;
   readonly relinquishmentProof?: CollabAuthorityRelinquishmentProof;
   readonly sourceProof?: string;
+  readonly sourceReopenSha256?: string;
   readonly stageSha256?: string;
   readonly targetActivationProof?: string;
   readonly targetProof?: string;
@@ -235,8 +271,11 @@ export interface AuthorityTransferRecoveryEvidenceInput {
 
 export interface AuthorityTransferRecoveryRecord
   extends AuthorityTransferRecoveryInput {
+  readonly cancellationRequestSha256: string | undefined;
+  readonly inactivePublicationJson: string | undefined;
   readonly relinquishmentProof: CollabAuthorityRelinquishmentProof | undefined;
   readonly sourceProof: string | undefined;
+  readonly sourceReopenSha256: string | undefined;
   readonly stageSha256: string | undefined;
   readonly targetActivationProof: string | undefined;
   readonly targetProof: string | undefined;
@@ -406,10 +445,17 @@ export interface PortabilityLifecyclePersistenceReader {
     transferId: string,
     memberId: CollabMemberId,
   ): Promise<TransferredMembershipClaimRecord | undefined>;
+  findTransferredMembershipClaimBySha256(
+    transferId: string,
+    claimSha256: string,
+  ): Promise<TransferredMembershipClaimRecord | undefined>;
 }
 
 export interface PortabilityLifecyclePersistence
   extends PortabilityLifecyclePersistenceReader {
+  activateLanToCloudProject(
+    input: LanToCloudProjectActivationInput,
+  ): Promise<PersistencePutResult>;
   acknowledgeTerminalResponder(
     input: AcknowledgeTerminalResponderInput,
   ): Promise<PersistenceAdvanceResult>;
@@ -430,6 +476,12 @@ export interface PortabilityLifecyclePersistence
   ): Promise<PersistenceAdvanceResult>;
   deleteProtectedClaimEnvelopes(
     input: DeleteProtectedClaimEnvelopesInput,
+  ): Promise<PersistenceAdvanceResult>;
+  deleteTransferredMembershipClaims(
+    input: DeleteTransferredMembershipClaimsInput,
+  ): Promise<PersistenceAdvanceResult>;
+  discardLanToCloudProjectStage(
+    input: DiscardLanToCloudProjectStageInput,
   ): Promise<PersistenceAdvanceResult>;
   findLeaveFormerPrincipalReplay(
     input: Omit<LeaveFormerPrincipalReplayInput, 'createdAt' | 'expiresAt'> & {
@@ -493,4 +545,7 @@ export interface PortabilityLifecyclePersistence
   scrubProtectedClaimEnvelope(
     input: ScrubProtectedClaimEnvelopeInput,
   ): Promise<ProtectedClaimScrubResult>;
+  stageLanToCloudProject(
+    input: StageLanToCloudProjectInput,
+  ): Promise<PersistencePutResult>;
 }

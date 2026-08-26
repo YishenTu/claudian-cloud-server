@@ -648,6 +648,10 @@ exec '${GIT}' "$@"
         placementGeneration: 8,
         repositoryStorageKey: 'repository-imported',
       } as const;
+      const plannedPublication = authority.planInactive(publicationInput);
+      assert.equal(plannedPublication.status, 'inactive');
+      await access(staged);
+      await assert.rejects(access(publishedRepository), { code: 'ENOENT' });
       await git(staged, ['update-ref', 'refs/tags/unmanaged', oid]);
       await assert.rejects(authority.publishInactive(publicationInput), error => {
         assert.ok(error instanceof RepositoryCheckpointError);
@@ -678,6 +682,7 @@ exec '${GIT}' "$@"
       assert.equal(publicationMarkerSyncCount, 2);
       synchronizedDirectories.length = 0;
       const publication = await authority.publishInactive(publicationInput);
+      assert.deepEqual(publication, plannedPublication);
       assert.equal(publication.status, 'inactive');
       assert.equal(publication.placementGeneration, 8);
       assert.equal(publication.storageNodeId, 'node-a');
@@ -717,6 +722,20 @@ exec '${GIT}' "$@"
         refs,
       });
       assert.equal(reimportedCheckpoint.markerSha256, checkpoint.markerSha256);
+      assert.equal(
+        await authority.removeOwnedRepository(plannedPublication),
+        'removed',
+      );
+      await assert.rejects(access(staged), { code: 'ENOENT' });
+      await importer.importCheckpoint({
+        body: createReadStream(bundle, { highWaterMark: 11 }),
+        expectedByteCount: bundleBytes.length,
+        expectedSha256: createHash('sha256').update(bundleBytes).digest('hex'),
+        objectFormat: 'sha1',
+        operationId,
+        projectId,
+        refs,
+      });
       assert.equal(
         (await authority.publishInactive(publicationInput)).publicationMarkerSha256,
         publication.publicationMarkerSha256,

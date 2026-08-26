@@ -180,6 +180,7 @@ class VerticalOwner implements ProjectLifecycleRecoveryOwner {
       })
     ));
     this.controller.trip('after-completed');
+    return 'settled' as const;
   }
 }
 
@@ -371,6 +372,7 @@ describe('Project lifecycle cross-store recovery', () => {
               updatedAt: T2,
             })
           ));
+          return 'settled';
         },
       };
       const dispatcher = new ProjectLifecycleRecoveryDispatcher({

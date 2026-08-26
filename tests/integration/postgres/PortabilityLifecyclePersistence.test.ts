@@ -124,7 +124,7 @@ const PROJECT_TABLES = Object.freeze([
 ]);
 
 describe('portability lifecycle persistence', () => {
-  it('applies schema 0006 with authority generation and forced Project RLS', async () => {
+  it('applies lifecycle schemas with authority generation and forced Project RLS', async () => {
     await withPostgresTestDatabase(async database => {
       await new PostgresMigrator({
         connectionString: database.migrationUrl,
@@ -143,10 +143,10 @@ describe('portability lifecycle persistence', () => {
             ORDER BY version`,
         );
         assert.deepEqual(history.rows.at(-1), {
-          checksum: 'a7c4773253250fc0c02e0e6f02026b22ef7f1767a19ff922947a30f843160de6',
-          name: 'portability-lifecycle',
+          checksum: 'd49bf1335d3410cdd95ff2b928f21264eb6212e7db9baea6561d118038d06a95',
+          name: 'lan-to-cloud-transfer',
           state: 'applied',
-          version: 6,
+          version: 7,
         });
 
         const projectColumns = await migration.query<{
@@ -173,6 +173,22 @@ describe('portability lifecycle persistence', () => {
             column_name: 'authority_state_revision',
             is_nullable: 'NO',
           },
+        ]);
+        const membershipColumns = await migration.query<{
+          readonly column_name: string;
+          readonly is_nullable: string;
+        }>(
+          `SELECT column_name, is_nullable
+             FROM information_schema.columns
+            WHERE table_schema = 'claudian_cloud'
+              AND table_name = 'project_memberships'
+              AND column_name = ANY($1::text[])
+            ORDER BY column_name`,
+          [['activated_at', 'revoked_at']],
+        );
+        assert.deepEqual(membershipColumns.rows, [
+          { column_name: 'activated_at', is_nullable: 'YES' },
+          { column_name: 'revoked_at', is_nullable: 'YES' },
         ]);
 
         const relations = await migration.query<{
@@ -686,8 +702,11 @@ describe('portability lifecycle persistence', () => {
             transferId,
           ), {
             ...recovery,
+            cancellationRequestSha256: undefined,
+            inactivePublicationJson: undefined,
             relinquishmentProof,
             sourceProof: undefined,
+            sourceReopenSha256: undefined,
             stageSha256: '8'.repeat(64),
             targetActivationProof: 'target-activation-proof',
             targetProof: 'target-stage-proof',
@@ -716,6 +735,147 @@ describe('portability lifecycle persistence', () => {
               targetProof: 'different-target-proof',
               transferId,
               updatedAt: T3,
+            }),
+          );
+        });
+      } finally {
+        await store.close();
+      }
+    });
+  });
+
+  it('persists exact LAN cancellation evidence and deletes target claim hashes', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      const store = coordination(database);
+      const projectId = 'project-lan-cancellation';
+      const transferId = 'transfer-lan-cancellation';
+      const cancellationRequestSha256 = '6'.repeat(64);
+      const sourceReopenSha256 = '7'.repeat(64);
+      const inactivePublicationJson = '{"status":"inactive"}';
+      try {
+        await store.withProjectScope(projectId, async scope => {
+          await scope.portability.putLifecycleJournal({
+            actorMemberId: 'member-host',
+            createdAt: T0,
+            direction: 'lan-to-cloud',
+            expectedAuthorityGeneration: 1,
+            idempotencyKey: 'intent-lan-cancellation',
+            kind: 'authority-transfer',
+            operationId: transferId,
+            phase: 'checkpoint-received',
+            projectId,
+            requestFingerprint: '5'.repeat(64),
+            scheduledAt: EXPIRES,
+          });
+          await scope.portability.putAuthorityTransferRecovery({
+            createdAt: T0,
+            expiresAt: EXPIRES,
+            sourceAuthority: { generation: 1, kind: 'lan' },
+            sourceHostMemberId: 'member-host',
+            targetAuthority: { generation: 2, kind: 'cloud' },
+            targetHostMemberId: undefined,
+            targetUrl: 'https://cloud.example.test',
+            transferId,
+          });
+          await scope.portability.advanceAuthorityTransferRecoveryEvidence({
+            expectedUpdatedAt: T0,
+            sourceProof: 'source-proof',
+            transferId,
+            updatedAt: T1,
+          });
+          await scope.portability.advanceLifecycleJournal({
+            batchRevision: 1,
+            batchSha256: BATCH_SHA,
+            checkpointSha256: CHECKPOINT_SHA,
+            expectedPhase: 'checkpoint-received',
+            expectedState: 'active',
+            nextPhase: 'checkpoint-validated',
+            nextState: 'active',
+            operationId: transferId,
+            scheduledAt: EXPIRES,
+            updatedAt: T1,
+          });
+          await scope.portability.putTransferredMembershipClaim({
+            batchRevision: 1,
+            checkpointSha256: CHECKPOINT_SHA,
+            claimSha256: CLAIM_SHA,
+            createdAt: T1,
+            expiresAt: EXPIRES,
+            memberId: 'member-offline',
+            transferId,
+          });
+          await scope.portability.advanceAuthorityTransferRecoveryEvidence({
+            cancellationRequestSha256,
+            expectedUpdatedAt: T1,
+            inactivePublicationJson,
+            transferId,
+            updatedAt: T2,
+          });
+          await scope.portability.advanceLifecycleJournal({
+            batchRevision: 1,
+            batchSha256: BATCH_SHA,
+            checkpointSha256: CHECKPOINT_SHA,
+            expectedPhase: 'checkpoint-validated',
+            expectedState: 'active',
+            nextPhase: 'target-invalidated',
+            nextState: 'active',
+            operationId: transferId,
+            scheduledAt: EXPIRES,
+            updatedAt: T2,
+          });
+          assert.equal(await scope.portability.deleteTransferredMembershipClaims({
+            batchRevision: 1,
+            batchSha256: BATCH_SHA,
+            checkpointSha256: CHECKPOINT_SHA,
+            transferId,
+          }), 'advanced');
+          assert.equal(await scope.portability.deleteTransferredMembershipClaims({
+            batchRevision: 1,
+            batchSha256: BATCH_SHA,
+            checkpointSha256: CHECKPOINT_SHA,
+            transferId,
+          }), 'replayed');
+          assert.equal(
+            await scope.portability.findTransferredMembershipClaimBySha256(
+              transferId,
+              CLAIM_SHA,
+            ),
+            undefined,
+          );
+          await scope.portability.advanceAuthorityTransferRecoveryEvidence({
+            expectedUpdatedAt: T2,
+            sourceReopenSha256,
+            transferId,
+            updatedAt: T3,
+          });
+          assert.deepEqual(await scope.portability.getAuthorityTransferRecovery(
+            transferId,
+          ), {
+            cancellationRequestSha256,
+            createdAt: T0,
+            expiresAt: EXPIRES,
+            inactivePublicationJson,
+            relinquishmentProof: undefined,
+            sourceAuthority: { generation: 1, kind: 'lan' },
+            sourceHostMemberId: 'member-host',
+            sourceProof: 'source-proof',
+            sourceReopenSha256,
+            stageSha256: undefined,
+            targetActivationProof: undefined,
+            targetAuthority: { generation: 2, kind: 'cloud' },
+            targetHostMemberId: undefined,
+            targetProof: undefined,
+            targetUrl: 'https://cloud.example.test',
+            transferId,
+            updatedAt: T3,
+          });
+          await expectStateConflict(
+            scope.portability.advanceAuthorityTransferRecoveryEvidence({
+              cancellationRequestSha256: '8'.repeat(64),
+              expectedUpdatedAt: T3,
+              transferId,
+              updatedAt: new Date(Date.parse(T3) + 1_000).toISOString(),
             }),
           );
         });
@@ -886,6 +1046,23 @@ describe('portability lifecycle persistence', () => {
           assert.equal(
             await scope.portability.putTransferredMembershipClaim(targetClaim),
             'replayed',
+          );
+          assert.deepEqual(
+            await scope.portability.findTransferredMembershipClaimBySha256(
+              targetClaim.transferId,
+              targetClaim.claimSha256,
+            ),
+            await scope.portability.getTransferredMembershipClaim(
+              targetClaim.transferId,
+              targetClaim.memberId,
+            ),
+          );
+          assert.equal(
+            await scope.portability.findTransferredMembershipClaimBySha256(
+              targetClaim.transferId,
+              '9'.repeat(64),
+            ),
+            undefined,
           );
 
           const receiptKey = {
@@ -2034,6 +2211,19 @@ describe('portability lifecycle persistence', () => {
               'shared-transfer',
               'shared-member',
             ))?.claimSha256, project.claimSha256);
+            assert.equal((await scope.portability.findTransferredMembershipClaimBySha256(
+              'shared-transfer',
+              project.claimSha256,
+            ))?.memberId, 'shared-member');
+            assert.equal(
+              await scope.portability.findTransferredMembershipClaimBySha256(
+                'shared-transfer',
+                project.claimSha256 === '1'.repeat(64)
+                  ? '2'.repeat(64)
+                  : '1'.repeat(64),
+              ),
+              undefined,
+            );
             assert.equal((await scope.portability.getBackupCatalogEntry(
               'shared-backup',
             ))?.checkpointSha256, project.claimSha256);

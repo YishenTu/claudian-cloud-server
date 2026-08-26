@@ -8,6 +8,7 @@ import {
   COLLABORATION_SCHEMA,
   DEVELOPMENT_BOOTSTRAP_SCHEMA,
   FOUNDATION_SCHEMA,
+  LAN_TO_CLOUD_TRANSFER_SCHEMA,
   PORTABILITY_LIFECYCLE_SCHEMA,
   PROJECT_READ_EVENTS_SCHEMA,
 } from './PostgresSchema.js';
@@ -120,6 +121,15 @@ const MIGRATION_RESOURCES = Object.freeze([
       import.meta.url,
     ),
     version: PORTABILITY_LIFECYCLE_SCHEMA.version,
+  }),
+  Object.freeze({
+    checksum: LAN_TO_CLOUD_TRANSFER_SCHEMA.checksum,
+    name: LAN_TO_CLOUD_TRANSFER_SCHEMA.name,
+    resource: new URL(
+      './migrations/0007_lan_to_cloud_transfer.sql',
+      import.meta.url,
+    ),
+    version: LAN_TO_CLOUD_TRANSFER_SCHEMA.version,
   }),
 ]);
 

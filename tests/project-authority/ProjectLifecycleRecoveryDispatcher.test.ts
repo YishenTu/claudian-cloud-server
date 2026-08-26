@@ -160,7 +160,7 @@ function handoffOwners(
         }),
         journal(successorKind),
       );
-      return Promise.resolve();
+      return Promise.resolve('settled');
     },
   };
   return Object.freeze({
@@ -176,7 +176,7 @@ function handoffOwners(
           phase: 'completed',
           state: 'completed',
         });
-        return Promise.resolve();
+        return Promise.resolve('settled' as const);
       },
     },
     export: unexpected,
@@ -212,7 +212,7 @@ describe('ProjectLifecycleRecoveryDispatcher', () => {
             phase: 'completed',
             state: 'completed',
           });
-          return Promise.resolve();
+          return Promise.resolve('settled');
         },
       }),
     });
@@ -245,7 +245,7 @@ describe('ProjectLifecycleRecoveryDispatcher', () => {
             phase: 'completed',
             state: 'completed',
           });
-          return Promise.resolve();
+          return Promise.resolve('settled');
         },
       }),
     });
@@ -256,12 +256,51 @@ describe('ProjectLifecycleRecoveryDispatcher', () => {
     dispatcher.close();
   });
 
+  it('preserves external-proof waits during startup and fences ordinary admission', async () => {
+    for (const phase of ['source-quiesced', 'target-cleaned']) {
+      const record = Object.freeze({
+        ...journal('authority-transfer'),
+        phase,
+      });
+      const coordination = new MemoryLifecycleCoordination(record);
+      const dispatcher = new ProjectLifecycleRecoveryDispatcher({
+        coordination,
+        owners: Object.freeze({
+          ...owners({
+            recover: () => Promise.resolve(
+              'waiting-for-external-proof' as const,
+            ),
+          }),
+          authorityTransfer: {
+            recover: () => Promise.resolve(
+              'waiting-for-external-proof' as const,
+            ),
+          },
+        }),
+      });
+
+      await dispatcher.recoverCandidate({
+        kind: record.kind,
+        operationId: record.operationId,
+        projectId: record.projectId,
+        scheduledAt: record.scheduledAt,
+      });
+      assert.equal(coordination.current, record);
+      await expectRecoveryError(
+        dispatcher.recoverProject(record.projectId),
+        'recovery-required',
+      );
+      assert.equal(coordination.current, record);
+      dispatcher.close();
+    }
+  });
+
   it('fails closed for contradictory and isolated journal state', async () => {
     const record = journal();
     const coordination = new MemoryLifecycleCoordination(record);
     const dispatcher = new ProjectLifecycleRecoveryDispatcher({
       coordination,
-      owners: owners({ recover: () => Promise.resolve() }),
+      owners: owners({ recover: () => Promise.resolve('settled') }),
     });
     await expectRecoveryError(dispatcher.recoverCandidate({
       kind: 'export',

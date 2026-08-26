@@ -34,6 +34,12 @@ export const PORTABILITY_LIFECYCLE_SCHEMA = Object.freeze({
   version: 6,
 });
 
+export const LAN_TO_CLOUD_TRANSFER_SCHEMA = Object.freeze({
+  checksum: 'd49bf1335d3410cdd95ff2b928f21264eb6212e7db9baea6561d118038d06a95',
+  name: 'lan-to-cloud-transfer',
+  version: 7,
+});
+
 export const POSTGRES_SCHEMAS = Object.freeze([
   FOUNDATION_SCHEMA,
   DEVELOPMENT_BOOTSTRAP_SCHEMA,
@@ -41,4 +47,5 @@ export const POSTGRES_SCHEMAS = Object.freeze([
   COLLABORATION_SCHEMA,
   ACCEPT_RECOVERY_SCHEMA,
   PORTABILITY_LIFECYCLE_SCHEMA,
+  LAN_TO_CLOUD_TRANSFER_SCHEMA,
 ]);

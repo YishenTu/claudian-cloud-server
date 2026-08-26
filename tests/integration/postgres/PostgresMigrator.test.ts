@@ -18,6 +18,7 @@ const PROJECT_READ_EVENTS_CHECKSUM = 'd490c9083abc5e0294c9d144d832b5070040276d71
 const COLLABORATION_CHECKSUM = '13ee2c7de2b189fb502a6610bff250f9de9133a82d79c153658251cf7f5a5780';
 const ACCEPT_RECOVERY_CHECKSUM = '0f0e91dd7be0ac961222c8802925425b87d6b540f87f1eebca89bde3efb4a1bd';
 const PORTABILITY_LIFECYCLE_CHECKSUM = 'a7c4773253250fc0c02e0e6f02026b22ef7f1767a19ff922947a30f843160de6';
+const LAN_TO_CLOUD_TRANSFER_CHECKSUM = 'd49bf1335d3410cdd95ff2b928f21264eb6212e7db9baea6561d118038d06a95';
 
 async function execute(connectionString: string, sql: string): Promise<void> {
   const client = new Client({ connectionString });
@@ -136,6 +137,12 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
         state: 'applied',
         version: 6,
       },
+      {
+        checksum: LAN_TO_CLOUD_TRANSFER_CHECKSUM,
+        name: 'lan-to-cloud-transfer',
+        state: 'applied',
+        version: 7,
+      },
     ]);
 
     const relations = await client.query<{ readonly relation: string }>(
@@ -205,10 +212,10 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
     await client.query(
       `INSERT INTO claudian_cloud.schema_migrations
         (version, name, checksum, state, applied_at)
-       VALUES (7, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
+       VALUES (8, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
     );
-    await expectMigrationError(migrator, 'schema-newer', 7);
-    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 7');
+    await expectMigrationError(migrator, 'schema-newer', 8);
+    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 8');
 
     await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 1');
     await expectMigrationError(migrator, 'schema-gap', 2);
@@ -400,7 +407,7 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       accept_journals: ['INSERT', 'SELECT'],
       active_repository_placement_catalog: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       authority_transfer_recovery: ['INSERT', 'SELECT'],
-      change_requests: ['INSERT', 'SELECT', 'UPDATE'],
+      change_requests: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       development_actor_mappings: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       development_bootstrap_attempts: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       development_bootstrap_expiry_candidates: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
@@ -423,17 +430,17 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       projects: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       recovery_candidates: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       repository_placements: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
-      request_comments: ['INSERT', 'SELECT'],
+      request_comments: ['DELETE', 'INSERT', 'SELECT'],
       request_ticket_relations: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       schema_migrations: ['SELECT'],
       source_protected_claim_envelopes: ['DELETE', 'INSERT', 'SELECT'],
-      ticket_comments: ['INSERT', 'SELECT'],
+      ticket_comments: ['DELETE', 'INSERT', 'SELECT'],
       ticket_mentions: ['DELETE', 'INSERT', 'SELECT'],
-      tickets: ['INSERT', 'SELECT', 'UPDATE'],
+      tickets: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       transfer_claim_batch_receipts: ['INSERT', 'SELECT'],
       transfer_receipt_keys: ['INSERT', 'SELECT'],
       transfer_redemption_receipts: ['INSERT', 'SELECT'],
-      transferred_membership_claims: ['INSERT', 'SELECT'],
+      transferred_membership_claims: ['DELETE', 'INSERT', 'SELECT'],
     };
     assert.deepEqual(
       tablePrivileges.rows,
@@ -467,8 +474,11 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       ]],
     );
     assert.deepEqual(columnPrivileges.rows, [
+      { column_name: 'cancellation_request_sha256', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
+      { column_name: 'inactive_publication_json', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
       { column_name: 'relinquishment_proof_json', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
       { column_name: 'source_proof', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
+      { column_name: 'source_reopen_sha256', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
       { column_name: 'stage_sha256', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
       { column_name: 'target_activation_proof', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
       { column_name: 'target_proof', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
