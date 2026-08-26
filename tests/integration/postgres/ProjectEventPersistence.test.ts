@@ -208,7 +208,7 @@ describe('Project event persistence', () => {
           occurredAt: YOUNG,
           payload: { memberId: 'member-a' },
           projectId: 'project-a',
-          protocolVersion: 5,
+          protocolVersion: 6,
           sequence: 1,
         });
 
@@ -384,7 +384,7 @@ describe('Project event persistence', () => {
               occurredAt: YOUNG,
               payload: { memberId: `member-${String(index + 3)}` },
               projectId: 'project-retention',
-              protocolVersion: 5,
+              protocolVersion: 6,
               sequence: index + 3,
             })),
             latestSequence: 10004,

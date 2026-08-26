@@ -94,7 +94,7 @@ virtual machine or persistent container per Project.
 15. **Placement generation is an execution fence.** Every repository operation
     carries a server-derived placement lease. Stale generations and demoted
     nodes fail closed; placement is not merely routing metadata.
-16. **Collab has three independent version authorities.** The implemented registry baseline is `@claudian-collab/protocol@2.0.0`, canonical wire version `5`, and Cloud binding version `2`, while Claudian LAN Project control remains independently at version `9`. No adapter infers compatibility from package SemVer alone or couples a Cloud change to the LAN binding.
+16. **Collab has three independent version authorities.** The implemented registry baseline is `@claudian-collab/protocol@3.0.0`, canonical wire version `6`, and Cloud binding version `2`, while Claudian LAN Project control remains independently at version `9`. No adapter infers compatibility from package SemVer alone or couples a Cloud change to the LAN binding.
 17. **Durable phase records are singular authorities.** Activation, cancellation, client binding, and Accept each have one named journal or transition record. Membership, placement, repository directories, refs, indexes, and marker files are observations used to advance or reject that journal; none becomes a parallel phase authority.
 18. **Authority generation fences authority movement.** Existing authorities begin at generation `1`; a supported transfer activates the target at exactly `source + 1`. Pre-cutover cancellation must prove the target has not accepted relinquishment. At or after the one-way source fence, every recovery owner moves forward and the source can never become writable again.
 19. **One semantic checkpoint serves portability.** A versioned manifest, canonical logical coordination stream, and exact Git bundle share profile-specific allowlists for authority transfer, backup, and export. PostgreSQL rows, SQLite images, credentials, CA private keys, working trees, and operational refs are never the portable contract.
@@ -489,7 +489,7 @@ Git command execution remains internal to `GitRepositoryAuthority`. The isolated
 
 ## 8. Protocol ownership and compatibility
 
-The standalone `claudian-collab-protocol` repository produces `@claudian-collab/protocol`. The Cloud Server depends on the exact `2.0.0` npm registry release. That release carries canonical wire version `5` and Cloud binding version `2`; its npm lock entry records the immutable registry artifact integrity used by local development, CI, and deployments. Package SemVer, canonical wire version, Cloud binding version, and the independently owned LAN version are never substituted for one another.
+The standalone `claudian-collab-protocol` repository produces `@claudian-collab/protocol`. The Cloud Server depends on the exact `3.0.0` npm registry release. That release carries canonical wire version `6` and Cloud binding version `2`; its npm lock entry records the immutable registry artifact integrity used by local development, CI, and deployments. Package SemVer, canonical wire version, Cloud binding version, and the independently owned LAN version are never substituted for one another.
 
 The package exposes curated boundaries only:
 
@@ -1336,7 +1336,7 @@ The completed local-milestone merge order was: the original shared protocol prod
 
 Schema evolution is one serial, checksum-verified lane: `0002_development_bootstrap.sql`, `0003_project_read_events.sql`, `0004_collaboration.sql`, `0005_accept_recovery.sql`, then Step 11 `0006_portability_lifecycle.sql`. The task that introduces each migration also owns its checksum/schema registry entry, least-privilege grants, forced-RLS policy, and real PostgreSQL evidence. Gates freeze that ordered catalog; they do not become a second migration owner.
 
-Shared contract files, compatibility policy, and releases belong to the standalone protocol repository. Claudian and Cloud own their consumer package manifests and lockfiles; no later transport tranche edits those manifests opportunistically. Published `2.0.0` is the implemented baseline. Step 11 followed a producer-first order: exact `@claudian-collab/protocol@2.0.0` with wire v5 and Cloud binding v2 was published and independently verified before either consumer pinned it. Each new capability is advertised only after its complete server and client path passes.
+Shared contract files, compatibility policy, and releases belong to the standalone protocol repository. Claudian and Cloud own their consumer package manifests and lockfiles; no later transport tranche edits those manifests opportunistically. Published `3.0.0` is the implemented baseline. Step 11 followed a producer-first order: exact `@claudian-collab/protocol@3.0.0` with wire v6 and Cloud binding v2 was published and independently verified before either consumer pinned it. The exact pin alone advertises nothing; each new capability is advertised only after its complete server and client path passes.
 
 ## 22. Explicit non-goals
 
