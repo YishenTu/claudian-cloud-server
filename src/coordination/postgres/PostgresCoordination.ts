@@ -96,6 +96,7 @@ export interface PostgresCoordinationOptions {
 }
 
 interface MembershipRow {
+  readonly activated_at?: Date;
   readonly created_at?: Date;
   readonly display_name: string;
   readonly member_id: string;
@@ -845,7 +846,7 @@ class PostgresProjectScope
     const rows = await safeQuery<MembershipRow>(
       this.#client,
       `SELECT display_name, member_id, role, status, revision,
-              created_at, updated_at
+              created_at, updated_at, activated_at
          FROM claudian_cloud.project_memberships
         WHERE project_id = $1 AND status = 'active'
         ORDER BY member_id
@@ -869,12 +870,15 @@ class PostgresProjectScope
         || Number.isNaN(row.created_at.valueOf())
         || !(row.updated_at instanceof Date)
         || Number.isNaN(row.updated_at.valueOf())
+        || !(row.activated_at instanceof Date)
+        || Number.isNaN(row.activated_at.valueOf())
         || row.updated_at < row.created_at
+        || row.activated_at < row.created_at
       ) {
         throw dependencyFailure();
       }
       return Object.freeze({
-        activatedAt: row.updated_at.toISOString(),
+        activatedAt: row.activated_at.toISOString(),
         createdAt: row.created_at.toISOString(),
         displayName: row.display_name,
         memberId: row.member_id,

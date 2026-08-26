@@ -16,6 +16,8 @@ import {
   type CollabAuthorityRelinquishmentProof,
   type CollabAuthorityTransferStatus,
   type CollabCheckpointAuthority,
+  type CollabCheckpointMemberRecord,
+  type CollabCheckpointProjectRecord,
   type CollabTransferredMembershipClaimCustodyReceipt,
   type CollabTransferredMembershipRedemptionReceipt,
 } from '@claudian-collab/protocol';
@@ -30,7 +32,10 @@ import type {
   AdvanceProjectBackupCatalogInput,
   AdvanceProjectLifecycleJournalInput,
   CompleteLeaveFormerPrincipalReplayInput,
+  DeleteTransferredMembershipClaimsInput,
   DeleteProtectedClaimEnvelopesInput,
+  DiscardLanToCloudProjectStageInput,
+  LanToCloudProjectActivationInput,
   LeaveFormerPrincipalReplayInput,
   LeaveFormerPrincipalReplayRecord,
   PortabilityLifecyclePersistence,
@@ -57,6 +62,7 @@ import type {
   RevokeProjectPrincipalBindingInput,
   RotateTransferredMembershipClaimsInput,
   ScrubProtectedClaimEnvelopeInput,
+  StageLanToCloudProjectInput,
   TerminalResponderInput,
   TerminalResponderRecord,
   TransferReceiptKeyInput,
@@ -103,13 +109,16 @@ interface PrincipalBindingRow {
 }
 
 interface AuthorityTransferRecoveryRow {
+  readonly cancellation_request_sha256: string | null;
   readonly created_at: Date;
   readonly expires_at: Date;
+  readonly inactive_publication_json: string | null;
   readonly relinquishment_proof_json: string | null;
   readonly source_authority_generation: string;
   readonly source_authority_kind: string;
   readonly source_host_member_id: string | null;
   readonly source_proof: string | null;
+  readonly source_reopen_sha256: string | null;
   readonly stage_sha256: string | null;
   readonly target_activation_proof: string | null;
   readonly target_authority_generation: string;
@@ -301,6 +310,13 @@ function memberId(value: string): CollabMemberId {
   return value;
 }
 
+function compareMemberIds(
+  left: string,
+  right: string,
+): number {
+  return left.localeCompare(right, 'en-US');
+}
+
 function principalId(value: string): string {
   if (!PRINCIPAL_PATTERN.test(value)) invalidRecord();
   return value;
@@ -309,6 +325,12 @@ function principalId(value: string): string {
 function boundedProof(value: string): string {
   const byteCount = Buffer.byteLength(value, 'utf8');
   if (byteCount < 1 || byteCount > 8192) invalidRecord();
+  return value;
+}
+
+function boundedPublicationJson(value: string): string {
+  const byteCount = Buffer.byteLength(value, 'utf8');
+  if (byteCount < 2 || byteCount > 262_144) invalidRecord();
   return value;
 }
 
@@ -528,6 +550,447 @@ implements PortabilityLifecyclePersistence {
     if (!isCollabProjectId(projectId)) invalidRecord();
     this.#projectId = projectId;
     this.#query = query;
+  }
+
+  async stageLanToCloudProject(
+    input: StageLanToCloudProjectInput,
+  ): Promise<PersistencePutResult> {
+    opaqueId(input.transferId);
+    timestamp(input.stagedAt);
+    sha256(input.checkpointSha256);
+    positiveInteger(input.authorityGeneration);
+    const projects = input.records.filter(
+      (record): record is CollabCheckpointProjectRecord => record.kind === 'project',
+    );
+    const members = input.records.filter(
+      (record): record is CollabCheckpointMemberRecord => record.kind === 'member',
+    );
+    const project = projects[0];
+    if (
+      projects.length !== 1
+      || project === undefined
+      || project.value.projectId !== this.#projectId
+      || input.authorityGeneration !== project.value.authorityGeneration + 1
+      || members.length === 0
+      || members.every(member => member.value.role !== 'manager'
+        || member.value.status !== 'active')
+      || input.records.some(record => record.value.projectId !== this.#projectId)
+    ) invalidRecord();
+    const journal = await this.getLifecycleJournal(input.transferId);
+    const recovery = await this.getAuthorityTransferRecovery(input.transferId);
+    if (
+      journal?.kind !== 'authority-transfer'
+      || journal.direction !== 'lan-to-cloud'
+      || journal.phase !== 'checkpoint-received'
+      || journal.state !== 'active'
+      || recovery?.targetAuthority.kind !== 'cloud'
+      || recovery.targetAuthority.generation !== input.authorityGeneration
+      || recovery.stageSha256 !== undefined
+    ) stateConflict();
+    const existing = await this.#query<{ readonly project_id: string }>(
+      `SELECT project_id
+         FROM claudian_cloud.projects
+        WHERE project_id = $1`,
+      [this.#projectId],
+    );
+    if (existing[0] !== undefined) stateConflict();
+
+    await this.#query(
+      `INSERT INTO claudian_cloud.projects (
+         project_id, project_name, manager_set_generation,
+         expected_main_oid, service_state, created_at, activated_at,
+         authority_generation, authority_state_revision
+       ) VALUES ($1, $2, $3, $4, 'maintenance', $5, $6, $7, 1)`,
+      [
+        this.#projectId,
+        project.value.name,
+        project.value.managerSetGeneration,
+        project.value.expectedMainOid,
+        project.value.createdAt,
+        project.value.activatedAt,
+        input.authorityGeneration,
+      ],
+    );
+    for (const member of members) {
+      await this.#query(
+        `INSERT INTO claudian_cloud.project_memberships (
+           project_id, member_id, display_name, role, status, revision,
+           created_at, updated_at, activated_at, revoked_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [
+          this.#projectId,
+          member.value.memberId,
+          member.value.displayName,
+          member.value.role,
+          member.value.status,
+          member.revision,
+          member.value.createdAt,
+          member.value.updatedAt,
+          member.value.activatedAt,
+          member.value.revokedAt,
+        ],
+      );
+    }
+    const insertionOrder = [
+      'request',
+      'ticket',
+      'request-comment',
+      'ticket-comment',
+      'ticket-relation',
+      'ticket-mention',
+    ] as const;
+    for (const kind of insertionOrder) {
+      for (const record of input.records) {
+        if (record.kind !== kind) continue;
+        switch (record.kind) {
+          case 'request':
+          await this.#query(
+            `INSERT INTO claudian_cloud.change_requests (
+               project_id, request_id, member_id, status, first_base_oid,
+               latest_head_oid, merged_oid, description, revision,
+               created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+            [
+              this.#projectId,
+              record.value.requestId,
+              record.value.memberId,
+              record.value.status,
+              record.value.firstBaseOid,
+              record.value.latestHeadOid,
+              record.value.mergedOid,
+              record.value.description,
+              record.revision,
+              record.value.createdAt,
+              record.value.updatedAt,
+            ],
+          );
+          break;
+        case 'request-comment':
+          await this.#query(
+            `INSERT INTO claudian_cloud.request_comments (
+               project_id, comment_id, request_id, author_member_id, body,
+               created_at
+             ) VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+              this.#projectId,
+              record.value.commentId,
+              record.value.requestId,
+              record.value.authorMemberId,
+              record.value.body,
+              record.value.createdAt,
+            ],
+          );
+          break;
+        case 'ticket': {
+          const commentCount = input.records.filter(comment => (
+            comment.kind === 'ticket-comment'
+            && comment.value.ticketId === record.value.ticketId
+          )).length;
+          await this.#query(
+            `INSERT INTO claudian_cloud.tickets (
+               project_id, ticket_id, ticket_number, title, body, status,
+               author_member_id, revision, comment_count, created_at,
+               updated_at, closed_at, closed_by_member_id
+             ) VALUES (
+               $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+             )`,
+            [
+              this.#projectId,
+              record.value.ticketId,
+              record.value.number,
+              record.value.title,
+              record.value.body,
+              record.value.status,
+              record.value.authorMemberId,
+              record.revision,
+              commentCount,
+              record.value.createdAt,
+              record.value.updatedAt,
+              record.value.closedAt,
+              record.value.closedByMemberId,
+            ],
+          );
+          break;
+        }
+        case 'ticket-comment':
+          await this.#query(
+            `INSERT INTO claudian_cloud.ticket_comments (
+               project_id, comment_id, ticket_id, author_member_id, body,
+               created_at
+             ) VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+              this.#projectId,
+              record.value.commentId,
+              record.value.ticketId,
+              record.value.authorMemberId,
+              record.value.body,
+              record.value.createdAt,
+            ],
+          );
+          break;
+        case 'ticket-relation':
+          await this.#query(
+            `INSERT INTO claudian_cloud.request_ticket_relations (
+               project_id, relation_id, request_id, ticket_id, commit_oid,
+               kind, state, created_by_member_id, created_at, updated_at,
+               accepted_at, accepted_merge_oid
+             ) VALUES (
+               $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+             )`,
+            [
+              this.#projectId,
+              record.value.relationId,
+              record.value.requestId,
+              record.value.ticketId,
+              record.value.commitOid,
+              record.value.kind,
+              record.value.state,
+              record.value.createdByMemberId,
+              record.value.createdAt,
+              record.value.updatedAt,
+              record.value.acceptedAt,
+              record.value.acceptedMergeOid,
+            ],
+          );
+          break;
+        case 'ticket-mention':
+          await this.#query(
+            `INSERT INTO claudian_cloud.ticket_mentions (
+               project_id, ticket_id, mentioned_member_id, source_kind,
+               source_id, created_at
+             ) VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+              this.#projectId,
+              record.value.ticketId,
+              record.value.mentionedMemberId,
+              record.value.sourceKind,
+              record.value.sourceId,
+              record.value.createdAt,
+            ],
+          );
+          break;
+        }
+      }
+    }
+    return 'created';
+  }
+
+  async activateLanToCloudProject(
+    input: LanToCloudProjectActivationInput,
+  ): Promise<PersistencePutResult> {
+    opaqueId(input.transferId);
+    const activatedAt = timestamp(input.activatedAt);
+    positiveInteger(input.authorityGeneration);
+    positiveInteger(input.placementGeneration);
+    memberId(input.hostMemberId);
+    principalId(input.hostPrincipalId);
+    if (
+      !/^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$/u.test(input.storageNodeId)
+      || !/^[a-z0-9][a-z0-9_-]{0,127}$/u.test(input.repositoryStorageKey)
+    ) invalidRecord();
+    const journal = await this.getLifecycleJournal(input.transferId);
+    const recovery = await this.getAuthorityTransferRecovery(input.transferId);
+    if (
+      journal?.kind !== 'authority-transfer'
+      || journal.direction !== 'lan-to-cloud'
+      || journal.phase !== 'source-relinquished'
+      || journal.state !== 'active'
+      || journal.checkpointSha256 === undefined
+      || journal.batchRevision === undefined
+      || journal.batchSha256 === undefined
+      || recovery?.targetAuthority.kind !== 'cloud'
+      || recovery.targetAuthority.generation !== input.authorityGeneration
+      || recovery.relinquishmentProof === undefined
+      || recovery.stageSha256 !== journal.checkpointSha256
+    ) stateConflict();
+    const batchRevision = journal.batchRevision;
+    const checkpointSha256 = journal.checkpointSha256;
+    const projects = await this.#query<{
+      readonly authority_generation: string;
+      readonly service_state: string;
+    }>(
+      `SELECT authority_generation, service_state
+         FROM claudian_cloud.projects
+        WHERE project_id = $1`,
+      [this.#projectId],
+    );
+    if (
+      projects.length !== 1
+      || projects[0]?.service_state !== 'maintenance'
+      || databasePositiveInteger(projects[0].authority_generation)
+        !== input.authorityGeneration
+    ) stateConflict();
+    const members = await this.#query<{
+      readonly member_id: string;
+      readonly role: string;
+      readonly status: string;
+    }>(
+      `SELECT member_id, role, status
+         FROM claudian_cloud.project_memberships
+        WHERE project_id = $1
+        ORDER BY member_id`,
+      [this.#projectId],
+    );
+    if (
+      !members.some(member => member.member_id === input.hostMemberId
+        && member.status === 'active')
+      || members.every(member => member.role !== 'manager'
+        || member.status !== 'active')
+    ) stateConflict();
+    const expectedClaimMembers = members
+      .filter(member => member.status === 'active'
+        && member.member_id !== input.hostMemberId)
+      .map(member => member.member_id)
+      .sort(compareMemberIds);
+    const claims = await this.#query<{
+      readonly batch_revision: string;
+      readonly checkpoint_sha256: string;
+      readonly member_id: string;
+      readonly state: string;
+    }>(
+      `SELECT member_id, batch_revision, checkpoint_sha256, state
+         FROM claudian_cloud.transferred_membership_claims
+        WHERE project_id = $1 AND transfer_id = $2
+        ORDER BY batch_revision, member_id`,
+      [this.#projectId, input.transferId],
+    );
+    const currentClaims = claims
+      .filter(claim => (
+        databasePositiveInteger(claim.batch_revision) === batchRevision
+      ))
+      .sort((left, right) => compareMemberIds(left.member_id, right.member_id));
+    const historicalClaimsAreRevoked = claims.every(claim => {
+      const revision = databasePositiveInteger(claim.batch_revision);
+      return revision === batchRevision
+        || (revision < batchRevision && claim.state === 'revoked');
+    });
+    if (
+      !historicalClaimsAreRevoked
+      || currentClaims.length !== expectedClaimMembers.length
+      || currentClaims.some((claim, index) => (
+        claim.member_id !== expectedClaimMembers[index]
+        || claim.state !== 'unclaimed'
+        || claim.checkpoint_sha256 !== checkpointSha256
+      ))
+    ) stateConflict();
+    const unexpectedPublishedState = await this.#query<{ readonly count: string }>(
+      `SELECT (
+         (SELECT count(*) FROM claudian_cloud.repository_placements
+           WHERE project_id = $1)
+         + (SELECT count(*) FROM claudian_cloud.project_principal_bindings
+           WHERE project_id = $1)
+         + (SELECT count(*) FROM claudian_cloud.project_events
+           WHERE project_id = $1)
+       )::text AS count`,
+      [this.#projectId],
+    );
+    if (unexpectedPublishedState[0]?.count !== '0') stateConflict();
+    const promoted = await this.#query<{ readonly project_id: string }>(
+      `UPDATE claudian_cloud.projects
+          SET service_state = 'active',
+              authority_state_revision = authority_state_revision + 1
+        WHERE project_id = $1
+          AND authority_generation = $2
+          AND service_state = 'maintenance'
+       RETURNING project_id`,
+      [this.#projectId, input.authorityGeneration],
+    );
+    if (promoted.length !== 1) stateConflict();
+    await this.#query(
+      `INSERT INTO claudian_cloud.repository_placements (
+         project_id, storage_node_id, repository_storage_key, generation,
+         active, created_at, updated_at
+       ) VALUES ($1, $2, $3, $4, true, $5, $5)`,
+      [
+        this.#projectId,
+        input.storageNodeId,
+        input.repositoryStorageKey,
+        input.placementGeneration,
+        activatedAt,
+      ],
+    );
+    await this.#query(
+      `INSERT INTO claudian_cloud.active_repository_placement_catalog (
+         project_id, storage_node_id, repository_storage_key, generation
+       ) VALUES ($1, $2, $3, $4)`,
+      [
+        this.#projectId,
+        input.storageNodeId,
+        input.repositoryStorageKey,
+        input.placementGeneration,
+      ],
+    );
+    await this.bindProjectPrincipal({
+      boundAt: activatedAt,
+      memberId: input.hostMemberId,
+      principalId: input.hostPrincipalId,
+    });
+    return 'created';
+  }
+
+  async discardLanToCloudProjectStage(
+    input: DiscardLanToCloudProjectStageInput,
+  ): Promise<PersistenceAdvanceResult> {
+    opaqueId(input.transferId);
+    positiveInteger(input.authorityGeneration);
+    const stageSha256 = input.stageSha256 === undefined
+      ? undefined
+      : sha256(input.stageSha256);
+    const journal = await this.getLifecycleJournal(input.transferId);
+    const recovery = await this.getAuthorityTransferRecovery(input.transferId);
+    if (
+      journal?.kind !== 'authority-transfer'
+      || journal.direction !== 'lan-to-cloud'
+      || journal.phase !== 'target-invalidated'
+      || journal.state !== 'active'
+      || recovery?.targetAuthority.kind !== 'cloud'
+      || recovery.targetAuthority.generation !== input.authorityGeneration
+      || recovery.stageSha256 !== stageSha256
+    ) stateConflict();
+    const projects = await this.#query<{
+      readonly authority_generation: string;
+      readonly service_state: string;
+    }>(
+      `SELECT authority_generation, service_state
+         FROM claudian_cloud.projects
+        WHERE project_id = $1`,
+      [this.#projectId],
+    );
+    if (projects.length === 0) return 'replayed';
+    if (
+      projects.length !== 1
+      || projects[0]?.service_state !== 'maintenance'
+      || databasePositiveInteger(projects[0].authority_generation)
+        !== input.authorityGeneration
+    ) stateConflict();
+    const forbiddenState = await this.#query<{ readonly count: string }>(
+      `SELECT (
+         (SELECT count(*) FROM claudian_cloud.repository_placements
+           WHERE project_id = $1)
+         + (SELECT count(*) FROM claudian_cloud.project_principal_bindings
+           WHERE project_id = $1)
+         + (SELECT count(*) FROM claudian_cloud.project_events
+           WHERE project_id = $1)
+       )::text AS count`,
+      [this.#projectId],
+    );
+    if (forbiddenState[0]?.count !== '0') stateConflict();
+    for (const relation of [
+      'request_ticket_relations',
+      'ticket_mentions',
+      'ticket_comments',
+      'request_comments',
+      'tickets',
+      'change_requests',
+      'project_memberships',
+      'projects',
+    ]) {
+      await this.#query(
+        `DELETE FROM claudian_cloud.${relation} WHERE project_id = $1`,
+        [this.#projectId],
+      );
+    }
+    return 'advanced';
   }
 
   async putLifecycleJournal(
@@ -1016,10 +1479,13 @@ implements PortabilityLifecyclePersistence {
          target_authority_generation, source_host_member_id,
          target_host_member_id, target_url, expires_at, source_proof,
          target_proof, stage_sha256, target_activation_proof,
-         relinquishment_proof_json, created_at, updated_at
+         relinquishment_proof_json, cancellation_request_sha256,
+         source_reopen_sha256, inactive_publication_json,
+         created_at, updated_at
        ) VALUES (
          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::timestamptz,
-         NULL, NULL, NULL, NULL, NULL, $11::timestamptz, $11::timestamptz
+         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+         $11::timestamptz, $11::timestamptz
        )
        ON CONFLICT (project_id, transfer_id) DO NOTHING
        RETURNING transfer_id`,
@@ -1040,8 +1506,11 @@ implements PortabilityLifecyclePersistence {
     const stored = await this.getAuthorityTransferRecovery(canonical.transferId);
     const expected: AuthorityTransferRecoveryRecord = Object.freeze({
       ...canonical,
+      cancellationRequestSha256: undefined,
+      inactivePublicationJson: undefined,
       relinquishmentProof: undefined,
       sourceProof: undefined,
+      sourceReopenSha256: undefined,
       stageSha256: undefined,
       targetActivationProof: undefined,
       targetProof: undefined,
@@ -1061,7 +1530,9 @@ implements PortabilityLifecyclePersistence {
               target_authority_generation, source_host_member_id,
               target_host_member_id, target_url, expires_at, source_proof,
               target_proof, stage_sha256, target_activation_proof,
-              relinquishment_proof_json, created_at, updated_at
+              relinquishment_proof_json, cancellation_request_sha256,
+              source_reopen_sha256, inactive_publication_json,
+              created_at, updated_at
          FROM claudian_cloud.authority_transfer_recovery
         WHERE project_id = $1 AND transfer_id = $2`,
       [this.#projectId, transferId],
@@ -1079,8 +1550,10 @@ implements PortabilityLifecyclePersistence {
       dependencyFailure();
     }
     return Object.freeze({
+      cancellationRequestSha256: optional(row.cancellation_request_sha256),
       createdAt: dateIso(row.created_at),
       expiresAt: dateIso(row.expires_at),
+      inactivePublicationJson: optional(row.inactive_publication_json),
       relinquishmentProof,
       sourceAuthority: checkpointAuthority({
         generation: databasePositiveInteger(row.source_authority_generation),
@@ -1090,6 +1563,7 @@ implements PortabilityLifecyclePersistence {
         ? undefined
         : memberId(row.source_host_member_id),
       sourceProof: optional(row.source_proof),
+      sourceReopenSha256: optional(row.source_reopen_sha256),
       stageSha256: optional(row.stage_sha256),
       targetActivationProof: optional(row.target_activation_proof),
       targetAuthority: checkpointAuthority({
@@ -1116,6 +1590,15 @@ implements PortabilityLifecyclePersistence {
     const sourceProof = input.sourceProof === undefined
       ? undefined
       : boundedProof(input.sourceProof);
+    const cancellationRequestSha256 = input.cancellationRequestSha256 === undefined
+      ? undefined
+      : sha256(input.cancellationRequestSha256);
+    const sourceReopenSha256 = input.sourceReopenSha256 === undefined
+      ? undefined
+      : sha256(input.sourceReopenSha256);
+    const inactivePublicationJson = input.inactivePublicationJson === undefined
+      ? undefined
+      : boundedPublicationJson(input.inactivePublicationJson);
     const targetProof = input.targetProof === undefined
       ? undefined
       : boundedProof(input.targetProof);
@@ -1130,6 +1613,9 @@ implements PortabilityLifecyclePersistence {
       : decodedRelinquishmentProof(input.relinquishmentProof);
     if (
       sourceProof === undefined
+      && cancellationRequestSha256 === undefined
+      && sourceReopenSha256 === undefined
+      && inactivePublicationJson === undefined
       && targetProof === undefined
       && targetActivationProof === undefined
       && stageSha256 === undefined
@@ -1162,7 +1648,16 @@ implements PortabilityLifecyclePersistence {
               stage_sha256 = COALESCE(stage_sha256, $6),
               target_activation_proof = COALESCE(target_activation_proof, $7),
               relinquishment_proof_json = COALESCE(relinquishment_proof_json, $8),
-              updated_at = $9::timestamptz
+              cancellation_request_sha256 = COALESCE(
+                cancellation_request_sha256,
+                $9
+              ),
+              source_reopen_sha256 = COALESCE(source_reopen_sha256, $10),
+              inactive_publication_json = COALESCE(
+                inactive_publication_json,
+                $11
+              ),
+              updated_at = $12::timestamptz
         WHERE project_id = $1 AND transfer_id = $2
           AND updated_at = $3::timestamptz
           AND ($4::text IS NULL OR source_proof IS NULL OR source_proof = $4)
@@ -1178,6 +1673,21 @@ implements PortabilityLifecyclePersistence {
             OR relinquishment_proof_json IS NULL
             OR relinquishment_proof_json = $8
           )
+          AND (
+            $9::char(64) IS NULL
+            OR cancellation_request_sha256 IS NULL
+            OR cancellation_request_sha256 = $9
+          )
+          AND (
+            $10::char(64) IS NULL
+            OR source_reopen_sha256 IS NULL
+            OR source_reopen_sha256 = $10
+          )
+          AND (
+            $11::text IS NULL
+            OR inactive_publication_json IS NULL
+            OR inactive_publication_json = $11
+          )
        RETURNING transfer_id`,
       [
         this.#projectId,
@@ -1188,14 +1698,22 @@ implements PortabilityLifecyclePersistence {
         stageSha256 ?? null,
         targetActivationProof ?? null,
         canonicalProofJson ?? null,
+        cancellationRequestSha256 ?? null,
+        sourceReopenSha256 ?? null,
+        inactivePublicationJson ?? null,
         updatedAt,
       ],
     );
     const stored = await this.getAuthorityTransferRecovery(input.transferId);
     const expected: AuthorityTransferRecoveryRecord = Object.freeze({
       ...current,
+      cancellationRequestSha256: cancellationRequestSha256
+        ?? current.cancellationRequestSha256,
+      inactivePublicationJson: inactivePublicationJson
+        ?? current.inactivePublicationJson,
       relinquishmentProof: relinquishmentProof ?? current.relinquishmentProof,
       sourceProof: sourceProof ?? current.sourceProof,
+      sourceReopenSha256: sourceReopenSha256 ?? current.sourceReopenSha256,
       stageSha256: stageSha256 ?? current.stageSha256,
       targetActivationProof: targetActivationProof ?? current.targetActivationProof,
       targetProof: targetProof ?? current.targetProof,
@@ -1395,6 +1913,24 @@ implements PortabilityLifecyclePersistence {
     return rows[0] === undefined ? undefined : transferredClaim(rows[0]);
   }
 
+  async findTransferredMembershipClaimBySha256(
+    transferId: string,
+    requestedClaimSha256: string,
+  ): Promise<TransferredMembershipClaimRecord | undefined> {
+    opaqueId(transferId);
+    sha256(requestedClaimSha256);
+    const rows = await this.#query<ClaimRow>(
+      `SELECT transfer_id, member_id, batch_revision, checkpoint_sha256,
+              claim_sha256, state, target_principal_id, operation_intent_id,
+              redemption_receipt_id, expires_at, created_at, updated_at
+         FROM claudian_cloud.transferred_membership_claims
+        WHERE project_id = $1 AND transfer_id = $2 AND claim_sha256 = $3`,
+      [this.#projectId, transferId, requestedClaimSha256],
+    );
+    if (rows.length > 1) dependencyFailure();
+    return rows[0] === undefined ? undefined : transferredClaim(rows[0]);
+  }
+
   async rotateTransferredMembershipClaims(
     input: RotateTransferredMembershipClaimsInput,
   ): Promise<PersistenceAdvanceResult> {
@@ -1415,7 +1951,7 @@ implements PortabilityLifecyclePersistence {
         expiresAt: timestamp(value.expiresAt),
         memberId: memberId(value.memberId),
       }))
-      .sort((left, right) => left.memberId.localeCompare(right.memberId));
+      .sort((left, right) => compareMemberIds(left.memberId, right.memberId));
     if (
       replacements.length === 0
       || new Set(replacements.map(value => value.memberId)).size !== replacements.length
@@ -1585,6 +2121,53 @@ implements PortabilityLifecyclePersistence {
       value.state === 'unclaimed'
       || (value.state === 'revoked' && value.updatedAt !== revokedAt)
     ))) stateConflict();
+    return rows.length > 0 ? 'advanced' : 'replayed';
+  }
+
+  async deleteTransferredMembershipClaims(
+    input: DeleteTransferredMembershipClaimsInput,
+  ): Promise<PersistenceAdvanceResult> {
+    opaqueId(input.transferId);
+    positiveInteger(input.batchRevision);
+    sha256(input.batchSha256);
+    sha256(input.checkpointSha256);
+    const journal = await this.getLifecycleJournal(input.transferId);
+    if (
+      journal?.kind !== 'authority-transfer'
+      || journal.direction !== 'lan-to-cloud'
+      || journal.batchRevision !== input.batchRevision
+      || journal.batchSha256 !== input.batchSha256
+      || journal.checkpointSha256 !== input.checkpointSha256
+      || (
+        journal.phase !== 'target-invalidated'
+        && journal.phase !== 'target-cleaned'
+        && journal.phase !== 'source-reopened'
+        && journal.phase !== 'cancelled'
+      )
+    ) stateConflict();
+    const contradictory = await this.#query<{ readonly member_id: string }>(
+      `SELECT member_id
+         FROM claudian_cloud.transferred_membership_claims
+        WHERE project_id = $1 AND transfer_id = $2 AND state = 'redeemed'
+        LIMIT 1`,
+      [this.#projectId, input.transferId],
+    );
+    if (contradictory.length !== 0) stateConflict();
+    const rows = await this.#query<{ readonly member_id: string }>(
+      `DELETE FROM claudian_cloud.transferred_membership_claims
+        WHERE project_id = $1 AND transfer_id = $2
+          AND state IN ('unclaimed', 'revoked')
+      RETURNING member_id`,
+      [this.#projectId, input.transferId],
+    );
+    const remaining = await this.#query<{ readonly member_id: string }>(
+      `SELECT member_id
+         FROM claudian_cloud.transferred_membership_claims
+        WHERE project_id = $1 AND transfer_id = $2
+        LIMIT 1`,
+      [this.#projectId, input.transferId],
+    );
+    if (remaining.length !== 0) stateConflict();
     return rows.length > 0 ? 'advanced' : 'replayed';
   }
 
@@ -1840,10 +2423,10 @@ implements PortabilityLifecyclePersistence {
         claimSha256: sha256(value.claimSha256),
         memberId: memberId(value.memberId),
       }))
-      .sort((left, right) => left.memberId.localeCompare(right.memberId));
+      .sort((left, right) => compareMemberIds(left.memberId, right.memberId));
     const replacements = [...input.replacements]
       .map(value => this.#canonicalProtectedEnvelope(value))
-      .sort((left, right) => left.memberId.localeCompare(right.memberId));
+      .sort((left, right) => compareMemberIds(left.memberId, right.memberId));
     if (
       expectedClaims.length === 0
       || expectedClaims.length !== replacements.length
@@ -2591,7 +3174,9 @@ implements PortabilityLifecyclePersistence {
         ORDER BY member_id`,
       [this.#projectId, transferId, batchRevision],
     );
-    return Object.freeze(rows.map(transferredClaim));
+    return Object.freeze(rows
+      .map(transferredClaim)
+      .sort((left, right) => compareMemberIds(left.memberId, right.memberId)));
   }
 
   async #listProtectedClaimEnvelopes(
@@ -2608,7 +3193,9 @@ implements PortabilityLifecyclePersistence {
         ORDER BY member_id`,
       [this.#projectId, transferId],
     );
-    return Object.freeze(rows.map(row => this.#protectedClaimEnvelope(row)));
+    return Object.freeze(rows
+      .map(row => this.#protectedClaimEnvelope(row))
+      .sort((left, right) => compareMemberIds(left.memberId, right.memberId)));
   }
 
   #protectedClaimEnvelope(row: ProtectedEnvelopeRow): ProtectedClaimEnvelopeInput {
@@ -2771,7 +3358,7 @@ implements PortabilityLifecyclePersistence {
         memberId: memberId(value.memberId),
         principalId: principalId(value.principalId),
       }))
-      .sort((left, right) => left.memberId.localeCompare(right.memberId, 'en-US'));
+      .sort((left, right) => compareMemberIds(left.memberId, right.memberId));
     if (
       eligiblePrincipals.length === 0
       || new Set(eligiblePrincipals.map(value => value.memberId)).size

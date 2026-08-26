@@ -481,6 +481,49 @@ describe('ProjectCheckpointCoordinator', () => {
     await coordinator.close();
   });
 
+  it('revalidates manifest and coordination against an already verified repository', async () => {
+    const expected = fixture();
+    const staging = new MemoryStaging(expected.attempt, expected.artifacts);
+    const repository = new MemoryRepositoryStaging();
+    const coordinator = new ProjectCheckpointCoordinator({ repository, staging });
+    const validated = await coordinator.validateStaged({
+      attempt: expected.attempt,
+      expectedProfile: 'authority-transfer',
+      expectedSourceAuthority: expected.manifest.sourceAuthority,
+      expectedTargetAuthority: expected.manifest.targetAuthority,
+    });
+    repository.events.length = 0;
+
+    const replayed = await coordinator.validateStagedWithRepository({
+      attempt: expected.attempt,
+      expectedProfile: 'authority-transfer',
+      expectedSourceAuthority: expected.manifest.sourceAuthority,
+      expectedTargetAuthority: expected.manifest.targetAuthority,
+    }, validated.repository);
+    assert.deepEqual(replayed, validated);
+    assert.deepEqual(repository.events, []);
+    await coordinator.close();
+  });
+
+  it('replays exact attempt cleanup without requiring staged artifacts', async () => {
+    const expected = fixture();
+    const staging = new MemoryStaging(expected.attempt, expected.artifacts);
+    const repository = new MemoryRepositoryStaging();
+    const coordinator = new ProjectCheckpointCoordinator({ repository, staging });
+
+    await coordinator.discardAttempt(expected.attempt);
+    await coordinator.discardAttempt(expected.attempt);
+    assert.deepEqual(repository.events, [
+      'repository-discard',
+      'repository-discard',
+    ]);
+    assert.deepEqual(staging.events, [
+      'staging-discard',
+      'staging-discard',
+    ]);
+    await coordinator.close();
+  });
+
   it('removes a contradictory imported repository without deleting receipt staging', async () => {
     const expected = fixture();
     const staging = new MemoryStaging(expected.attempt, expected.artifacts);

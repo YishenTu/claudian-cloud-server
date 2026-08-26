@@ -182,6 +182,9 @@ export interface RepositoryCheckpointCapturePort {
 }
 
 export interface InactiveRepositoryPublicationPort {
+  planInactive(
+    input: Omit<PublishInactiveRepositoryInput, 'signal'>,
+  ): InactiveRepositoryPublication;
   publishInactive(
     input: PublishInactiveRepositoryInput,
   ): Promise<InactiveRepositoryPublication>;
@@ -910,6 +913,23 @@ async function assertFileDigest(path: string, expectedSha256: string): Promise<v
   }
 }
 
+async function regularFileExists(path: string): Promise<boolean> {
+  try {
+    const entry = await lstat(path);
+    if (!entry.isFile() || entry.isSymbolicLink()) fail('invalid-checkpoint');
+    return true;
+  } catch (error: unknown) {
+    if (error instanceof RepositoryCheckpointError) throw error;
+    if (
+      typeof error === 'object'
+      && error !== null
+      && 'code' in error
+      && error.code === 'ENOENT'
+    ) return false;
+    fail('storage-unavailable');
+  }
+}
+
 async function ensureDirectory(path: string): Promise<boolean> {
   let created = false;
   try {
@@ -1328,16 +1348,22 @@ ExactRepositoryMutationPort {
     );
   }
 
-  async #publishInactive(
-    input: PublishInactiveRepositoryInput,
-    signal: AbortSignal,
-  ): Promise<InactiveRepositoryPublication> {
-    const publication = inactivePublication(
+  planInactive(
+    input: Omit<PublishInactiveRepositoryInput, 'signal'>,
+  ): InactiveRepositoryPublication {
+    return inactivePublication(
       input.checkpoint,
       input.placementGeneration,
       input.repositoryStorageKey,
       this.#storageNodeId,
     );
+  }
+
+  async #publishInactive(
+    input: PublishInactiveRepositoryInput,
+    signal: AbortSignal,
+  ): Promise<InactiveRepositoryPublication> {
+    const publication = this.planInactive(input);
     let permit;
     try {
       permit = await this.#resourceAdmission.acquireGitChild({
@@ -1670,10 +1696,23 @@ ExactRepositoryMutationPort {
           : paths.repository;
         const cleanup = publicationCleanupFact(publication, location);
         return this.#removeDurableTree({
-          assertTargetOwned: () => this.#assertPublicationMarker(
-            ownedRepository,
-            publication,
-          ),
+          assertTargetOwned: async () => {
+            if (
+              location === 'published'
+              || await regularFileExists(paths.publicationMarker)
+            ) {
+              await this.#assertPublicationMarker(
+                ownedRepository,
+                publication,
+              );
+              return;
+            }
+            await this.#assertCheckpointAttemptMarker(paths, publication);
+            await assertFileDigest(
+              paths.validationMarker,
+              publication.validationMarkerSha256,
+            );
+          },
           cleanupKey: cleanup.cleanupKey,
           markerJson: cleanup.markerJson,
           parentPath: dirname(ownedRepository),

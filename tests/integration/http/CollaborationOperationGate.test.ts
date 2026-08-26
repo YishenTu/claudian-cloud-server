@@ -177,8 +177,8 @@ async function seedProject(
       await client.query(
         `INSERT INTO claudian_cloud.project_memberships (
            project_id, member_id, display_name, role, status, revision,
-           created_at, updated_at
-         ) VALUES ($1, $2, $2, $3, 'active', 1, $4, $4)`,
+           created_at, updated_at, activated_at
+         ) VALUES ($1, $2, $2, $3, 'active', 1, $4, $4, $4)`,
         [fixture.projectId, actor, index === 0 ? 'manager' : 'member', CREATED_AT],
       );
       await client.query(

@@ -25,8 +25,14 @@ export interface RecoverProjectLifecycleInput {
   readonly lease: PinnedProjectLease;
 }
 
+export type ProjectLifecycleRecoveryOutcome =
+  | 'settled'
+  | 'waiting-for-external-proof';
+
 export interface ProjectLifecycleRecoveryOwner {
-  recover(input: RecoverProjectLifecycleInput): Promise<void>;
+  recover(
+    input: RecoverProjectLifecycleInput,
+  ): Promise<ProjectLifecycleRecoveryOutcome>;
 }
 
 export interface ProjectLifecycleRecoveryOwners {
@@ -179,7 +185,10 @@ implements ProjectLifecycleRecoveryPort {
       ));
       if (journal === undefined) return;
       exactJournal(journal, { projectId });
-      await this.#recover(lease, journal);
+      const outcome = await this.#recover(lease, journal);
+      if (outcome === 'waiting-for-external-proof') {
+        fail('recovery-required');
+      }
     });
   }
 
@@ -190,7 +199,7 @@ implements ProjectLifecycleRecoveryPort {
   async #recover(
     lease: PinnedProjectLease,
     initial: ProjectLifecycleJournalRecord,
-  ): Promise<void> {
+  ): Promise<ProjectLifecycleRecoveryOutcome> {
     let journal = initial;
     const seen = new Set<string>();
     for (
@@ -202,13 +211,24 @@ implements ProjectLifecycleRecoveryPort {
       seen.add(journal.operationId);
       if (journal.state === 'recovery-required') fail('recovery-required');
       if (journal.state !== 'cancelled' && journal.state !== 'completed') {
-        await this.#owner(journal.kind).recover(Object.freeze({ journal, lease }));
+        const outcome = await this.#owner(journal.kind).recover(Object.freeze({
+          journal,
+          lease,
+        }));
         const settled = await lease.withProjectScope(scope => (
           scope.portability.getLifecycleJournal(journal.operationId)
         ));
         if (settled === undefined) fail('dependency-failed');
         exactJournal(settled, journal);
         if (settled.state === 'recovery-required') fail('recovery-required');
+        if (outcome === 'waiting-for-external-proof') {
+          if (
+            settled.state === 'cancelled'
+            || settled.state === 'completed'
+            || settled.operationId !== journal.operationId
+          ) fail('dependency-failed');
+          return 'waiting-for-external-proof';
+        }
         if (settled.state !== 'cancelled' && settled.state !== 'completed') {
           fail('dependency-failed');
         }
@@ -217,7 +237,7 @@ implements ProjectLifecycleRecoveryPort {
       const successor = await lease.withProjectScope(scope => (
         scope.portability.getNonterminalLifecycleJournal()
       ));
-      if (successor === undefined) return;
+      if (successor === undefined) return 'settled';
       exactJournal(successor, { projectId: initial.projectId });
       if (
         successor.kind !== 'delete'

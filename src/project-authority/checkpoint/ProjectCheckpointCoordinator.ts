@@ -451,6 +451,25 @@ export class ProjectCheckpointCoordinator {
     ));
   }
 
+  validateStagedWithRepository(
+    input: ValidateStagedProjectCheckpointInput,
+    repository: ValidatedRepositoryCheckpoint,
+  ): Promise<ValidatedProjectCheckpoint> {
+    let snapshot: ValidationInputSnapshot;
+    try {
+      snapshot = snapshotInput(input);
+    } catch (error: unknown) {
+      return Promise.reject(
+        error instanceof Error
+          ? error
+          : new ProjectCheckpointCoordinatorError('invalid-checkpoint'),
+      );
+    }
+    return this.#run(snapshot.signal, signal => (
+      this.#validateStaged(snapshot, signal, repository)
+    ));
+  }
+
   discard(
     checkpoint: ValidatedProjectCheckpoint,
     signal?: AbortSignal,
@@ -477,9 +496,36 @@ export class ProjectCheckpointCoordinator {
           : new ProjectCheckpointCoordinatorError('invalid-checkpoint'),
       );
     }
+    return this.#discardAttempt(attempt, signal);
+  }
+
+  discardAttempt(
+    input: PreparedProductionCheckpointAttempt,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    let attempt: PreparedProductionCheckpointAttempt;
+    try {
+      attempt = snapshotAttempt(input);
+    } catch (error: unknown) {
+      return Promise.reject(
+        error instanceof ProjectCheckpointCoordinatorError
+          ? error
+          : new ProjectCheckpointCoordinatorError('invalid-checkpoint'),
+      );
+    }
+    return this.#discardAttempt(attempt, signal);
+  }
+
+  #discardAttempt(
+    attempt: PreparedProductionCheckpointAttempt,
+    signal?: AbortSignal,
+  ): Promise<void> {
     return this.#run(signal, async operationSignal => {
       try {
-        await this.#repository.discardCheckpoint({ operationId, projectId });
+        await this.#repository.discardCheckpoint({
+          operationId: attempt.operationId,
+          projectId: attempt.projectId,
+        });
         await this.#staging.discardAttempt(attempt, operationSignal);
       } catch (error: unknown) {
         mapDependency(error, operationSignal);
@@ -524,6 +570,7 @@ export class ProjectCheckpointCoordinator {
   async #validateStaged(
     input: ValidationInputSnapshot,
     signal: AbortSignal,
+    expectedRepository?: ValidatedRepositoryCheckpoint,
   ): Promise<ValidatedProjectCheckpoint> {
     let coordinationValidationOwned = false;
     try {
@@ -603,21 +650,25 @@ export class ProjectCheckpointCoordinator {
         ),
       ));
       let importedRepository: ValidatedRepositoryCheckpoint;
-      try {
-        importedRepository = await this.#importRepository(
-          input.attempt,
-          repositoryFact,
-          manifest,
-          signal,
-        );
-      } catch (error: unknown) {
-        if (invalidRepositoryStaging(error)) {
-          await this.#repository.discardCheckpoint({
-            operationId: input.attempt.operationId,
-            projectId: input.attempt.projectId,
-          });
+      if (expectedRepository === undefined) {
+        try {
+          importedRepository = await this.#importRepository(
+            input.attempt,
+            repositoryFact,
+            manifest,
+            signal,
+          );
+        } catch (error: unknown) {
+          if (invalidRepositoryStaging(error)) {
+            await this.#repository.discardCheckpoint({
+              operationId: input.attempt.operationId,
+              projectId: input.attempt.projectId,
+            });
+          }
+          throw error;
         }
-        throw error;
+      } else {
+        importedRepository = expectedRepository;
       }
       let repository: ValidatedRepositoryCheckpoint;
       try {
@@ -628,13 +679,15 @@ export class ProjectCheckpointCoordinator {
           manifest,
         );
       } catch (error: unknown) {
-        try {
-          await this.#repository.discardCheckpoint({
-            operationId: input.attempt.operationId,
-            projectId: input.attempt.projectId,
-          });
-        } catch (cleanupError: unknown) {
-          return mapDependency(cleanupError, signal);
+        if (expectedRepository === undefined) {
+          try {
+            await this.#repository.discardCheckpoint({
+              operationId: input.attempt.operationId,
+              projectId: input.attempt.projectId,
+            });
+          } catch (cleanupError: unknown) {
+            return mapDependency(cleanupError, signal);
+          }
         }
         throw error;
       }

@@ -26,6 +26,7 @@ const execFileAsync = promisify(execFile);
 const GIT_EXECUTABLE = '/usr/bin/git';
 const CREATED = '2026-08-20T00:00:00.000Z';
 const ACTIVATED = '2026-08-21T00:00:00.000Z';
+const UPDATED = '2026-08-22T00:00:00.000Z';
 
 function coordination(database: PostgresTestDatabase): PostgresCoordination {
   return new PostgresCoordination({
@@ -111,11 +112,11 @@ describe('Project read authority integration', () => {
           'member-b', 'Member B', 'member',
         ]] as const) {
           await seed.query(
-            `INSERT INTO claudian_cloud.project_memberships (
+             `INSERT INTO claudian_cloud.project_memberships (
                project_id, member_id, display_name, role, status, revision,
-               created_at, updated_at
-             ) VALUES ($1, $2, $3, $4, 'active', 1, $5, $6)`,
-            [projectId, memberId, displayName, role, CREATED, ACTIVATED],
+               created_at, updated_at, activated_at
+             ) VALUES ($1, $2, $3, $4, 'active', 1, $5, $6, $7)`,
+            [projectId, memberId, displayName, role, CREATED, UPDATED, ACTIVATED],
           );
           await seed.query(
             `INSERT INTO claudian_cloud.development_actor_mappings (
