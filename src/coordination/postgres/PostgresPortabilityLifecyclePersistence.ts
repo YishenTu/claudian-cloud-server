@@ -57,6 +57,7 @@ import type {
   RemoveProjectCoordinationContentInput,
   RemoveTerminalResponderInput,
   ReplaceProtectedClaimEnvelopesInput,
+  RenewProtectedClaimEnvelopesInput,
   RedeemTransferredMembershipClaimInput,
   RevokeTransferredMembershipClaimsInput,
   RevokeProjectPrincipalBindingInput,
@@ -121,6 +122,7 @@ interface AuthorityTransferRecoveryRow {
   readonly source_reopen_sha256: string | null;
   readonly stage_sha256: string | null;
   readonly target_activation_proof: string | null;
+  readonly target_activation_request_sha256: string | null;
   readonly target_authority_generation: string;
   readonly target_authority_kind: string;
   readonly target_host_member_id: string | null;
@@ -183,6 +185,8 @@ interface TerminalResponderRow {
   readonly operation_kind: string;
   readonly response_json: string;
   readonly response_sha256: string;
+  readonly replay_member_id: string | null;
+  readonly replay_request_sha256: string | null;
 }
 
 interface TerminalPrincipalRow {
@@ -1266,6 +1270,30 @@ implements PortabilityLifecyclePersistence {
     });
   }
 
+  async listActiveProjectPrincipalBindings(): Promise<
+    readonly ProjectPrincipalBindingRecord[]
+  > {
+    const rows = await this.#query<PrincipalBindingRow>(
+      `SELECT principal_id, member_id, state, bound_at, revoked_at
+         FROM claudian_cloud.project_principal_bindings
+        WHERE project_id = $1 AND state = 'active'
+        ORDER BY member_id COLLATE "C", principal_id COLLATE "C"`,
+      [this.#projectId],
+    );
+    return Object.freeze(rows.map(row => {
+      if (!isCollabMemberId(row.member_id) || row.revoked_at !== null) {
+        dependencyFailure();
+      }
+      return Object.freeze({
+        boundAt: dateIso(row.bound_at),
+        memberId: row.member_id,
+        principalId: row.principal_id,
+        revokedAt: undefined,
+        state: 'active' as const,
+      });
+    }));
+  }
+
   async revokeProjectPrincipal(
     input: RevokeProjectPrincipalBindingInput,
   ): Promise<PersistenceAdvanceResult> {
@@ -1513,6 +1541,7 @@ implements PortabilityLifecyclePersistence {
       sourceReopenSha256: undefined,
       stageSha256: undefined,
       targetActivationProof: undefined,
+      targetActivationRequestSha256: undefined,
       targetProof: undefined,
       updatedAt: canonical.createdAt,
     });
@@ -1530,6 +1559,7 @@ implements PortabilityLifecyclePersistence {
               target_authority_generation, source_host_member_id,
               target_host_member_id, target_url, expires_at, source_proof,
               target_proof, stage_sha256, target_activation_proof,
+              target_activation_request_sha256,
               relinquishment_proof_json, cancellation_request_sha256,
               source_reopen_sha256, inactive_publication_json,
               created_at, updated_at
@@ -1566,6 +1596,9 @@ implements PortabilityLifecyclePersistence {
       sourceReopenSha256: optional(row.source_reopen_sha256),
       stageSha256: optional(row.stage_sha256),
       targetActivationProof: optional(row.target_activation_proof),
+      targetActivationRequestSha256: optional(
+        row.target_activation_request_sha256,
+      ),
       targetAuthority: checkpointAuthority({
         generation: databasePositiveInteger(row.target_authority_generation),
         kind: row.target_authority_kind as CollabCheckpointAuthority['kind'],
@@ -1605,12 +1638,19 @@ implements PortabilityLifecyclePersistence {
     const targetActivationProof = input.targetActivationProof === undefined
       ? undefined
       : boundedProof(input.targetActivationProof);
+    const targetActivationRequestSha256 = input.targetActivationRequestSha256
+      === undefined
+      ? undefined
+      : sha256(input.targetActivationRequestSha256);
     const stageSha256 = input.stageSha256 === undefined
       ? undefined
       : sha256(input.stageSha256);
     const relinquishmentProof = input.relinquishmentProof === undefined
       ? undefined
       : decodedRelinquishmentProof(input.relinquishmentProof);
+    const nextExpiresAt = input.nextExpiresAt === undefined
+      ? undefined
+      : timestamp(input.nextExpiresAt);
     if (
       sourceProof === undefined
       && cancellationRequestSha256 === undefined
@@ -1618,11 +1658,20 @@ implements PortabilityLifecyclePersistence {
       && inactivePublicationJson === undefined
       && targetProof === undefined
       && targetActivationProof === undefined
+      && targetActivationRequestSha256 === undefined
       && stageSha256 === undefined
       && relinquishmentProof === undefined
+      && nextExpiresAt === undefined
     ) invalidRecord();
     const current = await this.getAuthorityTransferRecovery(input.transferId);
     if (current === undefined) stateConflict();
+    if (
+      nextExpiresAt !== undefined
+      && (
+        Date.parse(nextExpiresAt) <= Date.parse(current.expiresAt)
+        || Date.parse(nextExpiresAt) <= Date.parse(updatedAt)
+      )
+    ) invalidRecord();
     if (relinquishmentProof !== undefined) {
       const journal = await this.getLifecycleJournal(input.transferId);
       if (
@@ -1657,7 +1706,12 @@ implements PortabilityLifecyclePersistence {
                 inactive_publication_json,
                 $11
               ),
-              updated_at = $12::timestamptz
+              expires_at = COALESCE($12::timestamptz, expires_at),
+              target_activation_request_sha256 = COALESCE(
+                target_activation_request_sha256,
+                $13
+              ),
+              updated_at = $14::timestamptz
         WHERE project_id = $1 AND transfer_id = $2
           AND updated_at = $3::timestamptz
           AND ($4::text IS NULL OR source_proof IS NULL OR source_proof = $4)
@@ -1688,6 +1742,12 @@ implements PortabilityLifecyclePersistence {
             OR inactive_publication_json IS NULL
             OR inactive_publication_json = $11
           )
+          AND ($12::timestamptz IS NULL OR expires_at < $12::timestamptz)
+          AND (
+            $13::char(64) IS NULL
+            OR target_activation_request_sha256 IS NULL
+            OR target_activation_request_sha256 = $13
+          )
        RETURNING transfer_id`,
       [
         this.#projectId,
@@ -1701,6 +1761,8 @@ implements PortabilityLifecyclePersistence {
         cancellationRequestSha256 ?? null,
         sourceReopenSha256 ?? null,
         inactivePublicationJson ?? null,
+        nextExpiresAt ?? null,
+        targetActivationRequestSha256 ?? null,
         updatedAt,
       ],
     );
@@ -1711,11 +1773,14 @@ implements PortabilityLifecyclePersistence {
         ?? current.cancellationRequestSha256,
       inactivePublicationJson: inactivePublicationJson
         ?? current.inactivePublicationJson,
+      expiresAt: nextExpiresAt ?? current.expiresAt,
       relinquishmentProof: relinquishmentProof ?? current.relinquishmentProof,
       sourceProof: sourceProof ?? current.sourceProof,
       sourceReopenSha256: sourceReopenSha256 ?? current.sourceReopenSha256,
       stageSha256: stageSha256 ?? current.stageSha256,
       targetActivationProof: targetActivationProof ?? current.targetActivationProof,
+      targetActivationRequestSha256: targetActivationRequestSha256
+        ?? current.targetActivationRequestSha256,
       targetProof: targetProof ?? current.targetProof,
       updatedAt,
     });
@@ -1731,6 +1796,16 @@ implements PortabilityLifecyclePersistence {
       this.getAuthorityTransferRecovery(transferId),
     ]);
     if (journal === undefined && recovery === undefined) return undefined;
+    if (
+      journal?.kind === 'authority-transfer'
+      && journal.state === 'completed'
+      && recovery === undefined
+    ) {
+      if (await this.getTerminalResponder('authority-transfer', transferId) === undefined) {
+        dependencyFailure();
+      }
+      return undefined;
+    }
     if (journal?.kind !== 'authority-transfer' || recovery === undefined) {
       dependencyFailure();
     }
@@ -2488,6 +2563,42 @@ implements PortabilityLifecyclePersistence {
     return 'advanced';
   }
 
+  async renewProtectedClaimEnvelopes(
+    input: RenewProtectedClaimEnvelopesInput,
+  ): Promise<PersistenceAdvanceResult> {
+    opaqueId(input.transferId);
+    const expiresAt = timestamp(input.expiresAt);
+    const [journal, recovery] = await Promise.all([
+      this.getLifecycleJournal(input.transferId),
+      this.getAuthorityTransferRecovery(input.transferId),
+    ]);
+    if (
+      journal?.kind !== 'authority-transfer'
+      || journal.direction !== 'cloud-to-lan'
+      || (journal.phase !== 'lan-activated' && journal.phase !== 'completed')
+      || recovery?.expiresAt !== expiresAt
+    ) stateConflict();
+    const rows = await this.#query<{ readonly member_id: string }>(
+      `UPDATE claudian_cloud.source_protected_claim_envelopes
+          SET expires_at = $3::timestamptz
+        WHERE project_id = $1 AND transfer_id = $2
+          AND expires_at < $3::timestamptz
+          AND created_at < $3::timestamptz
+       RETURNING member_id`,
+      [this.#projectId, input.transferId, expiresAt],
+    );
+    const contradictory = await this.#query<{ readonly member_id: string }>(
+      `SELECT member_id
+         FROM claudian_cloud.source_protected_claim_envelopes
+        WHERE project_id = $1 AND transfer_id = $2
+          AND expires_at <> $3::timestamptz
+        LIMIT 1`,
+      [this.#projectId, input.transferId, expiresAt],
+    );
+    if (contradictory.length !== 0) stateConflict();
+    return rows.length === 0 ? 'replayed' : 'advanced';
+  }
+
   async scrubProtectedClaimEnvelope(
     input: ScrubProtectedClaimEnvelopeInput,
   ): Promise<ProtectedClaimScrubResult> {
@@ -2651,6 +2762,7 @@ implements PortabilityLifecyclePersistence {
         expiresAt: existing.expiresAt,
         operationId: existing.operationId,
         operationKind: existing.operationKind,
+        replayAuthorization: existing.replayAuthorization,
         responseJson: existing.responseJson,
         responseSha256: existing.responseSha256,
       }, canonical)) stateConflict();
@@ -2659,8 +2771,12 @@ implements PortabilityLifecyclePersistence {
     const rows = await this.#query<{ readonly operation_id: string }>(
       `INSERT INTO claudian_cloud.project_terminal_responders (
          project_id, operation_kind, operation_id, response_sha256,
-         response_json, expires_at, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz, $7::timestamptz)
+         response_json, replay_member_id, replay_request_sha256,
+         expires_at, created_at, updated_at
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7,
+         $8::timestamptz, $9::timestamptz, $9::timestamptz
+       )
        ON CONFLICT (project_id, operation_kind, operation_id) DO NOTHING
        RETURNING operation_id`,
       [
@@ -2669,6 +2785,8 @@ implements PortabilityLifecyclePersistence {
         canonical.operationId,
         canonical.responseSha256,
         canonical.responseJson,
+        canonical.replayAuthorization?.memberId ?? null,
+        canonical.replayAuthorization?.requestSha256 ?? null,
         canonical.expiresAt,
         canonical.createdAt,
       ],
@@ -2715,6 +2833,7 @@ implements PortabilityLifecyclePersistence {
         expiresAt: stored.expiresAt,
         operationId: stored.operationId,
         operationKind: stored.operationKind,
+        replayAuthorization: stored.replayAuthorization,
         responseJson: stored.responseJson,
         responseSha256: stored.responseSha256,
       }, canonical)
@@ -2733,7 +2852,7 @@ implements PortabilityLifecyclePersistence {
     opaqueId(operationId);
     const rows = await this.#query<TerminalResponderRow>(
       `SELECT operation_kind, operation_id, response_sha256, response_json,
-              expires_at, created_at
+              replay_member_id, replay_request_sha256, expires_at, created_at
          FROM claudian_cloud.project_terminal_responders
         WHERE project_id = $1 AND operation_kind = $2 AND operation_id = $3`,
       [this.#projectId, operationKind, operationId],
@@ -2747,7 +2866,7 @@ implements PortabilityLifecyclePersistence {
         ORDER BY member_id`,
       [this.#projectId, operationKind, operationId],
     );
-    const canonical = this.#canonicalTerminalResponder({
+    const common = {
       createdAt: dateIso(row.created_at),
       eligiblePrincipals: principals.map(principal => ({
         memberId: principal.member_id,
@@ -2755,10 +2874,33 @@ implements PortabilityLifecyclePersistence {
       })),
       expiresAt: dateIso(row.expires_at),
       operationId: row.operation_id,
-      operationKind: row.operation_kind as TerminalResponderRecord['operationKind'],
       responseJson: row.response_json,
       responseSha256: row.response_sha256,
-    });
+    };
+    let canonical: TerminalResponderInput;
+    if (row.operation_kind === 'authority-transfer') {
+      if (row.replay_member_id === null || row.replay_request_sha256 === null) {
+        dependencyFailure();
+      }
+      canonical = this.#canonicalTerminalResponder({
+        ...common,
+        operationKind: 'authority-transfer',
+        replayAuthorization: {
+          memberId: row.replay_member_id,
+          requestSha256: row.replay_request_sha256,
+        },
+      });
+    } else if (row.operation_kind === 'retire') {
+      if (row.replay_member_id !== null || row.replay_request_sha256 !== null) {
+        dependencyFailure();
+      }
+      canonical = this.#canonicalTerminalResponder({
+        ...common,
+        operationKind: 'retire',
+      });
+    } else {
+      dependencyFailure();
+    }
     return Object.freeze({
       acknowledgements: Object.freeze(principals
         .filter(principal => principal.acknowledged_at !== null)
@@ -3366,7 +3508,37 @@ implements PortabilityLifecyclePersistence {
       || new Set(eligiblePrincipals.map(value => value.principalId)).size
         !== eligiblePrincipals.length
     ) invalidRecord();
-    return Object.freeze({ ...input, createdAt, eligiblePrincipals, expiresAt });
+    const replayAuthorization = input.replayAuthorization === undefined
+      ? undefined
+      : Object.freeze({
+          memberId: memberId(input.replayAuthorization.memberId),
+          requestSha256: sha256(input.replayAuthorization.requestSha256),
+        });
+    if (input.operationKind === 'authority-transfer') {
+      if (
+        replayAuthorization === undefined
+        || !eligiblePrincipals.some(value => (
+          value.memberId === replayAuthorization.memberId
+        ))
+      ) invalidRecord();
+      return Object.freeze({
+        ...input,
+        createdAt,
+        eligiblePrincipals,
+        expiresAt,
+        operationKind: 'authority-transfer',
+        replayAuthorization,
+      });
+    }
+    if (replayAuthorization !== undefined) invalidRecord();
+    return Object.freeze({
+      ...input,
+      createdAt,
+      eligiblePrincipals,
+      expiresAt,
+      operationKind: 'retire',
+      replayAuthorization: undefined,
+    });
   }
 
   #canonicalTombstone(input: ProjectTombstoneInput): ProjectTombstoneInput {
@@ -3449,8 +3621,6 @@ implements PortabilityLifecyclePersistence {
              FROM claudian_cloud.transferred_membership_claims WHERE project_id = $1
            UNION ALL SELECT 'transfer_claim_batch_receipts', count(*)::text
              FROM claudian_cloud.transfer_claim_batch_receipts WHERE project_id = $1
-           UNION ALL SELECT 'transfer_redemption_receipts', count(*)::text
-             FROM claudian_cloud.transfer_redemption_receipts WHERE project_id = $1
            UNION ALL SELECT 'leave_former_principal_replays', count(*)::text
              FROM claudian_cloud.leave_former_principal_replays WHERE project_id = $1
            UNION ALL SELECT 'project_backup_catalog', count(*)::text
@@ -3465,6 +3635,7 @@ implements PortabilityLifecyclePersistence {
       readonly bad_candidate_count: string;
       readonly bad_journal_count: string;
       readonly bad_key_count: string;
+      readonly bad_receipt_count: string;
       readonly bad_responder_count: string;
       readonly candidate_count: string;
       readonly deletion_intent_count: string;
@@ -3496,7 +3667,22 @@ implements PortabilityLifecyclePersistence {
                 WHERE envelope.project_id = receipt_key.project_id
                   AND envelope.transfer_id = receipt_key.transfer_id
                   AND envelope.receipt_key_id = receipt_key.receipt_key_id
+             )
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM claudian_cloud.transfer_redemption_receipts AS receipt
+                WHERE receipt.project_id = receipt_key.project_id
+                  AND receipt.transfer_id = receipt_key.transfer_id
+                  AND receipt.receipt_key_id = receipt_key.receipt_key_id
              )) AS bad_key_count,
+         (SELECT count(*)::text
+            FROM claudian_cloud.transfer_redemption_receipts AS receipt
+           WHERE receipt.project_id = $1
+             AND (
+               $3 <> 'authority-transfer'
+               OR receipt.transfer_id <> $4
+               OR receipt.acknowledged_at IS NULL
+             )) AS bad_receipt_count,
          (SELECT count(*)::text
             FROM claudian_cloud.project_terminal_responders
            WHERE project_id = $1
@@ -3527,6 +3713,7 @@ implements PortabilityLifecyclePersistence {
       || row.bad_candidate_count !== '0'
       || row.bad_journal_count !== '0'
       || row.bad_key_count !== '0'
+      || row.bad_receipt_count !== '0'
       || row.bad_responder_count !== '0'
       || row.candidate_count !== '1'
       || row.deletion_intent_count !== '1'

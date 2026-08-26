@@ -40,6 +40,12 @@ export const LAN_TO_CLOUD_TRANSFER_SCHEMA = Object.freeze({
   version: 7,
 });
 
+export const CLOUD_TO_LAN_TRANSFER_SCHEMA = Object.freeze({
+  checksum: '12e60f0ef26d2906687635cc4bdc59f33cb3bbfbc2095d2e7196b57417eb0e12',
+  name: 'cloud-to-lan-transfer',
+  version: 8,
+});
+
 export const POSTGRES_SCHEMAS = Object.freeze([
   FOUNDATION_SCHEMA,
   DEVELOPMENT_BOOTSTRAP_SCHEMA,
@@ -48,4 +54,5 @@ export const POSTGRES_SCHEMAS = Object.freeze([
   ACCEPT_RECOVERY_SCHEMA,
   PORTABILITY_LIFECYCLE_SCHEMA,
   LAN_TO_CLOUD_TRANSFER_SCHEMA,
+  CLOUD_TO_LAN_TRANSFER_SCHEMA,
 ]);

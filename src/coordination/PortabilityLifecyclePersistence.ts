@@ -191,6 +191,11 @@ export interface DeleteProtectedClaimEnvelopesInput {
   readonly transferId: string;
 }
 
+export interface RenewProtectedClaimEnvelopesInput {
+  readonly expiresAt: CollabIsoTimestamp;
+  readonly transferId: string;
+}
+
 export type ProtectedClaimScrubResult = 'replayed' | 'scrubbed';
 
 export interface TerminalPrincipalInput {
@@ -198,21 +203,34 @@ export interface TerminalPrincipalInput {
   readonly principalId: string;
 }
 
-export interface TerminalResponderInput {
+interface TerminalResponderBaseInput {
   readonly createdAt: CollabIsoTimestamp;
   readonly eligiblePrincipals: readonly TerminalPrincipalInput[];
   readonly expiresAt: CollabIsoTimestamp;
   readonly operationId: string;
-  readonly operationKind: 'authority-transfer' | 'retire';
   readonly responseJson: string;
   readonly responseSha256: string;
 }
 
-export interface TerminalResponderRecord extends TerminalResponderInput {
+export type TerminalResponderInput = TerminalResponderBaseInput & (
+  | Readonly<{
+    readonly operationKind: 'authority-transfer';
+    readonly replayAuthorization: Readonly<{
+      readonly memberId: CollabMemberId;
+      readonly requestSha256: string;
+    }>;
+  }>
+  | Readonly<{
+    readonly operationKind: 'retire';
+    readonly replayAuthorization?: undefined;
+  }>
+);
+
+export type TerminalResponderRecord = TerminalResponderInput & Readonly<{
   readonly acknowledgements: readonly Readonly<TerminalPrincipalInput & {
     acknowledgedAt: CollabIsoTimestamp;
   }>[];
-}
+}>;
 
 export interface AcknowledgeTerminalResponderInput extends TerminalPrincipalInput {
   readonly acknowledgedAt: CollabIsoTimestamp;
@@ -259,11 +277,13 @@ export interface AuthorityTransferRecoveryEvidenceInput {
   readonly cancellationRequestSha256?: string;
   readonly expectedUpdatedAt: CollabIsoTimestamp;
   readonly inactivePublicationJson?: string;
+  readonly nextExpiresAt?: CollabIsoTimestamp;
   readonly relinquishmentProof?: CollabAuthorityRelinquishmentProof;
   readonly sourceProof?: string;
   readonly sourceReopenSha256?: string;
   readonly stageSha256?: string;
   readonly targetActivationProof?: string;
+  readonly targetActivationRequestSha256?: string;
   readonly targetProof?: string;
   readonly transferId: string;
   readonly updatedAt: CollabIsoTimestamp;
@@ -278,6 +298,7 @@ export interface AuthorityTransferRecoveryRecord
   readonly sourceReopenSha256: string | undefined;
   readonly stageSha256: string | undefined;
   readonly targetActivationProof: string | undefined;
+  readonly targetActivationRequestSha256: string | undefined;
   readonly targetProof: string | undefined;
   readonly updatedAt: CollabIsoTimestamp;
 }
@@ -407,6 +428,7 @@ export interface PortabilityLifecyclePersistenceReader {
   findProjectPrincipalBinding(
     principalId: string,
   ): Promise<ProjectPrincipalBindingRecord | undefined>;
+  listActiveProjectPrincipalBindings(): Promise<readonly ProjectPrincipalBindingRecord[]>;
   getAuthorityTransferRecovery(
     transferId: string,
   ): Promise<AuthorityTransferRecoveryRecord | undefined>;
@@ -529,6 +551,9 @@ export interface PortabilityLifecyclePersistence
   ): Promise<PersistenceAdvanceResult>;
   replaceProtectedClaimEnvelopes(
     input: ReplaceProtectedClaimEnvelopesInput,
+  ): Promise<PersistenceAdvanceResult>;
+  renewProtectedClaimEnvelopes(
+    input: RenewProtectedClaimEnvelopesInput,
   ): Promise<PersistenceAdvanceResult>;
   redeemTransferredMembershipClaim(
     input: RedeemTransferredMembershipClaimInput,

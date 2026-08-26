@@ -156,6 +156,7 @@ class MemoryPortability {
       sourceReopenSha256: undefined,
       stageSha256: undefined,
       targetActivationProof: undefined,
+      targetActivationRequestSha256: undefined,
       targetProof: undefined,
       updatedAt: input.createdAt,
     });

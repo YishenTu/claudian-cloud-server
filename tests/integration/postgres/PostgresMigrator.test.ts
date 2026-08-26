@@ -19,6 +19,7 @@ const COLLABORATION_CHECKSUM = '13ee2c7de2b189fb502a6610bff250f9de9133a82d79c153
 const ACCEPT_RECOVERY_CHECKSUM = '0f0e91dd7be0ac961222c8802925425b87d6b540f87f1eebca89bde3efb4a1bd';
 const PORTABILITY_LIFECYCLE_CHECKSUM = 'a7c4773253250fc0c02e0e6f02026b22ef7f1767a19ff922947a30f843160de6';
 const LAN_TO_CLOUD_TRANSFER_CHECKSUM = 'd49bf1335d3410cdd95ff2b928f21264eb6212e7db9baea6561d118038d06a95';
+const CLOUD_TO_LAN_TRANSFER_CHECKSUM = '12e60f0ef26d2906687635cc4bdc59f33cb3bbfbc2095d2e7196b57417eb0e12';
 
 async function execute(connectionString: string, sql: string): Promise<void> {
   const client = new Client({ connectionString });
@@ -143,6 +144,12 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
         state: 'applied',
         version: 7,
       },
+      {
+        checksum: CLOUD_TO_LAN_TRANSFER_CHECKSUM,
+        name: 'cloud-to-lan-transfer',
+        state: 'applied',
+        version: 8,
+      },
     ]);
 
     const relations = await client.query<{ readonly relation: string }>(
@@ -197,6 +204,31 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
     );
 
     await client.query(
+      `SELECT set_config(
+         'claudian_cloud.project_id',
+         'project-invalid-terminal',
+         false
+       )`,
+    );
+    await assert.rejects(client.query(
+      `INSERT INTO claudian_cloud.project_terminal_responders (
+         project_id, operation_kind, operation_id, response_sha256,
+         response_json, expires_at, created_at, updated_at,
+         replay_member_id, replay_request_sha256
+       ) VALUES (
+         'project-invalid-terminal', 'authority-transfer', 'transfer-invalid',
+         repeat('1', 64), '{}', '2026-09-01T00:00:00.000Z',
+         '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z', NULL, NULL
+       )`,
+    ), (error: unknown) => {
+      assert.equal(
+        (error as Readonly<{ readonly constraint?: unknown }>).constraint,
+        'project_terminal_responders_replay',
+      );
+      return true;
+    });
+
+    await client.query(
       `UPDATE claudian_cloud.schema_migrations
           SET checksum = repeat('0', 64)
         WHERE version = 1`,
@@ -212,10 +244,10 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
     await client.query(
       `INSERT INTO claudian_cloud.schema_migrations
         (version, name, checksum, state, applied_at)
-       VALUES (8, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
+       VALUES (9, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
     );
-    await expectMigrationError(migrator, 'schema-newer', 8);
-    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 8');
+    await expectMigrationError(migrator, 'schema-newer', 9);
+    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 9');
 
     await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 1');
     await expectMigrationError(migrator, 'schema-gap', 2);
@@ -475,12 +507,14 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
     );
     assert.deepEqual(columnPrivileges.rows, [
       { column_name: 'cancellation_request_sha256', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
+      { column_name: 'expires_at', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
       { column_name: 'inactive_publication_json', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
       { column_name: 'relinquishment_proof_json', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
       { column_name: 'source_proof', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
       { column_name: 'source_reopen_sha256', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
       { column_name: 'stage_sha256', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
       { column_name: 'target_activation_proof', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
+      { column_name: 'target_activation_request_sha256', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
       { column_name: 'target_proof', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
       { column_name: 'updated_at', privilege: 'UPDATE', relation: 'authority_transfer_recovery' },
       { column_name: 'completed_at', privilege: 'UPDATE', relation: 'leave_former_principal_replays' },

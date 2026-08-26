@@ -5,6 +5,7 @@ import { Client } from 'pg';
 
 import {
   ACCEPT_RECOVERY_SCHEMA,
+  CLOUD_TO_LAN_TRANSFER_SCHEMA,
   COLLABORATION_SCHEMA,
   DEVELOPMENT_BOOTSTRAP_SCHEMA,
   FOUNDATION_SCHEMA,
@@ -130,6 +131,15 @@ const MIGRATION_RESOURCES = Object.freeze([
       import.meta.url,
     ),
     version: LAN_TO_CLOUD_TRANSFER_SCHEMA.version,
+  }),
+  Object.freeze({
+    checksum: CLOUD_TO_LAN_TRANSFER_SCHEMA.checksum,
+    name: CLOUD_TO_LAN_TRANSFER_SCHEMA.name,
+    resource: new URL(
+      './migrations/0008_cloud_to_lan_transfer.sql',
+      import.meta.url,
+    ),
+    version: CLOUD_TO_LAN_TRANSFER_SCHEMA.version,
   }),
 ]);
 

@@ -1037,6 +1037,18 @@ class PostgresProjectScope
     ) {
       throw new CoordinationError('state-conflict');
     }
+    if (
+      input.nextServiceState === 'deleting'
+      || input.nextServiceState === 'deleted'
+    ) {
+      await safeQuery(
+        this.#client,
+        `DELETE FROM claudian_cloud.active_repository_placement_catalog
+          WHERE project_id = $1`,
+        [this.#projectId],
+        this.#markBroken,
+      );
+    }
     return rows.length === 1 ? 'advanced' : 'replayed';
   }
 

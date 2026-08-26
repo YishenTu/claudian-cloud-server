@@ -90,6 +90,38 @@ async function seedMembership(
   }
 }
 
+async function seedPlacement(
+  database: PostgresTestDatabase,
+  projectId: string,
+): Promise<void> {
+  const client = new Client({ connectionString: database.migrationUrl });
+  try {
+    await client.connect();
+    await client.query('BEGIN');
+    await client.query(
+      `SELECT set_config('claudian_cloud.project_id', $1, true)`,
+      [projectId],
+    );
+    await client.query(
+      `INSERT INTO claudian_cloud.repository_placements (
+         project_id, storage_node_id, repository_storage_key, generation,
+         active, created_at, updated_at
+       ) VALUES ($1, 'local', 'repository_authority_state', 1, true,
+                 $2::timestamptz, $2::timestamptz)`,
+      [projectId, T0],
+    );
+    await client.query(
+      `INSERT INTO claudian_cloud.active_repository_placement_catalog (
+         project_id, storage_node_id, repository_storage_key, generation
+       ) VALUES ($1, 'local', 'repository_authority_state', 1)`,
+      [projectId],
+    );
+    await client.query('COMMIT');
+  } finally {
+    await client.end();
+  }
+}
+
 async function expectStateConflict(operation: Promise<unknown>): Promise<void> {
   await assert.rejects(operation, error => {
     assert.ok(error instanceof CoordinationError);
@@ -143,10 +175,10 @@ describe('portability lifecycle persistence', () => {
             ORDER BY version`,
         );
         assert.deepEqual(history.rows.at(-1), {
-          checksum: 'd49bf1335d3410cdd95ff2b928f21264eb6212e7db9baea6561d118038d06a95',
-          name: 'lan-to-cloud-transfer',
+          checksum: '12e60f0ef26d2906687635cc4bdc59f33cb3bbfbc2095d2e7196b57417eb0e12',
+          name: 'cloud-to-lan-transfer',
           state: 'applied',
-          version: 7,
+          version: 8,
         });
 
         const projectColumns = await migration.query<{
@@ -225,6 +257,7 @@ describe('portability lifecycle persistence', () => {
     await withPostgresTestDatabase(async database => {
       await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-authority-state');
+      await seedPlacement(database, 'project-authority-state');
       let store = coordination(database);
       try {
         await store.withProjectScope('project-authority-state', async scope => {
@@ -291,6 +324,12 @@ describe('portability lifecycle persistence', () => {
 
       store = coordination(database);
       try {
+        assert.equal(
+          (await store.listActiveRepositoryPlacements()).placements.some(
+            placement => placement.projectId === 'project-authority-state',
+          ),
+          false,
+        );
         await store.withProjectScope('project-authority-state', async scope => {
           assert.deepEqual(await scope.getProject(), {
             activatedAt: T0,
@@ -675,6 +714,7 @@ describe('portability lifecycle persistence', () => {
             expectedUpdatedAt: T1,
             relinquishmentProof,
             targetActivationProof: 'target-activation-proof',
+            targetActivationRequestSha256: AUTHORIZATION_SHA,
             transferId,
             updatedAt: T2,
           }), 'advanced');
@@ -709,6 +749,7 @@ describe('portability lifecycle persistence', () => {
             sourceReopenSha256: undefined,
             stageSha256: '8'.repeat(64),
             targetActivationProof: 'target-activation-proof',
+            targetActivationRequestSha256: AUTHORIZATION_SHA,
             targetProof: 'target-stage-proof',
             updatedAt: T2,
           });
@@ -863,6 +904,7 @@ describe('portability lifecycle persistence', () => {
             sourceReopenSha256,
             stageSha256: undefined,
             targetActivationProof: undefined,
+            targetActivationRequestSha256: undefined,
             targetAuthority: { generation: 2, kind: 'cloud' },
             targetHostMemberId: undefined,
             targetProof: undefined,
@@ -1135,6 +1177,16 @@ describe('portability lifecycle persistence', () => {
               revokedAt: undefined,
               state: 'active',
             },
+          );
+          assert.deepEqual(
+            await scope.portability.listActiveProjectPrincipalBindings(),
+            [{
+              boundAt: T1,
+              memberId: targetClaim.memberId,
+              principalId: 'principal:offline',
+              revokedAt: undefined,
+              state: 'active',
+            }],
           );
           assert.equal(
             await scope.findPrincipalMember('principal:offline'),
@@ -1600,6 +1652,10 @@ describe('portability lifecycle persistence', () => {
             expiresAt: EXPIRES,
             operationId: transferId,
             operationKind: 'authority-transfer',
+            replayAuthorization: {
+              memberId: 'member-manager',
+              requestSha256: AUTHORIZATION_SHA,
+            },
             responseJson: activeJson,
             responseSha256: createHash('sha256').update(activeJson).digest('hex'),
           }));
@@ -1647,6 +1703,10 @@ describe('portability lifecycle persistence', () => {
             expiresAt: EXPIRES,
             operationId: transferId,
             operationKind: 'authority-transfer' as const,
+            replayAuthorization: {
+              memberId: 'member-manager',
+              requestSha256: AUTHORIZATION_SHA,
+            },
             responseJson,
             responseSha256: createHash('sha256').update(responseJson).digest('hex'),
           };
