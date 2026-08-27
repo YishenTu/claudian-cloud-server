@@ -356,11 +356,15 @@ class CloudApplication implements Application {
       principalAdapter,
       profile: bootstrapProfile,
     });
+    const lifecycleControl = options.lifecycle?.control;
     const projectSnapshotRoutes = new ProjectSnapshotRoutes({
       authority: this.#projectReadAuthority,
       maximumJsonBytes: COLLAB_LIMITS.maxJsonPayloadUtf8Bytes,
       operationTimeoutMs: options.config.repository.operationTimeoutMs,
       principalAdapter,
+      ...(lifecycleControl === undefined
+        ? {}
+        : { retirementTerminal: lifecycleControl }),
     });
     const projectCollaborationRoutes = new ProjectCollaborationRoutes({
       acceptAuthority: this.#acceptCoordinator,

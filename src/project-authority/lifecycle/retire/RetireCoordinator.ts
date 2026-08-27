@@ -4,6 +4,7 @@ import {
   decodeCollabProjectRetirementAcknowledgement,
   decodeCollabProjectRetirementOperationRequest,
   decodeCollabProjectRetirementResult,
+  isCollabProjectId,
   type CollabIsoTimestamp,
   type CollabProjectId,
   type CollabProjectRetirementAcknowledgement,
@@ -30,6 +31,7 @@ import type {
 
 export type RetireCoordinatorErrorCode =
   | 'authorization-denied'
+  | 'cancelled'
   | 'closed'
   | 'dependency-failed'
   | 'expired'
@@ -51,7 +53,10 @@ export class RetireCoordinatorError extends Error {
 export interface RetireCoordinatorOptions {
   readonly clock?: () => Date;
   readonly coordination: Readonly<{
-    acquireProjectLease(projectId: CollabProjectId): Promise<PinnedProjectLease>;
+    acquireProjectLease(
+      projectId: CollabProjectId,
+      options?: Readonly<{ readonly signal?: AbortSignal }>,
+    ): Promise<PinnedProjectLease>;
   }>;
   readonly repository: ExactRepositoryPresencePort;
 }
@@ -105,6 +110,7 @@ function now(clock: () => Date): CollabIsoTimestamp {
 function mapDependency(error: unknown): never {
   if (error instanceof RetireCoordinatorError) throw error;
   if (error instanceof CoordinationError) {
+    if (error.code === 'cancelled') return fail('cancelled');
     if (error.code === 'closed') return fail('closed');
     if (error.code === 'invalid-record' || error.code === 'state-conflict') {
       return fail('state-conflict');
@@ -142,6 +148,62 @@ export class RetireCoordinator implements ProjectLifecycleRecoveryOwner {
 
   close(): void {
     this.#closed = true;
+  }
+
+  async getTerminalResult(input: Readonly<{
+    readonly principalId: string;
+    readonly projectId: string;
+    readonly signal?: AbortSignal;
+  }>): Promise<CollabProjectRetirementResult | null> {
+    if (this.#closed) return fail('closed');
+    if (input.signal?.aborted) return fail('cancelled');
+    if (
+      !PRINCIPAL_PATTERN.test(input.principalId)
+      || !isCollabProjectId(input.projectId)
+    ) return null;
+    const lease = await this.#acquire(input.projectId, input.signal);
+    try {
+      return await lease.withProjectScope(async scope => {
+        if (input.signal?.aborted) return fail('cancelled');
+        const tombstone = await scope.portability.getProjectTombstone();
+        if (input.signal?.aborted) return fail('cancelled');
+        if (tombstone === undefined) return null;
+        if (tombstone.projectId !== input.projectId) return fail('recovery-required');
+        if (tombstone.terminalOperationKind !== 'retire') return null;
+        if (Date.parse(now(this.#clock)) >= Date.parse(tombstone.terminalExpiresAt)) {
+          return null;
+        }
+        const responder = await scope.portability.getTerminalResponder(
+          'retire',
+          tombstone.terminalOperationId,
+        );
+        if (input.signal?.aborted) return fail('cancelled');
+        if (responder === undefined) return null;
+        const eligible = [
+          ...responder.eligiblePrincipals,
+          ...responder.acknowledgements,
+        ].some(value => value.principalId === input.principalId);
+        if (!eligible) return null;
+        if (
+          responder.operationId !== tombstone.terminalOperationId
+          || responder.operationKind !== tombstone.terminalOperationKind
+          || responder.responseSha256 !== tombstone.resultSha256
+          || responder.expiresAt !== tombstone.terminalExpiresAt
+        ) return fail('recovery-required');
+        const result = decodeResponse(responder);
+        if (
+          result.projectId !== tombstone.projectId
+          || result.retirementId !== tombstone.terminalOperationId
+          || result.retiredAt !== tombstone.retiredAt
+          || result.terminalExpiresAt !== tombstone.terminalExpiresAt
+        ) return fail('recovery-required');
+        return result;
+      }, input.signal ? { signal: input.signal } : {});
+    } catch (error: unknown) {
+      return mapDependency(error);
+    } finally {
+      await lease.close().catch(() => undefined);
+    }
   }
 
   async retire(input: Readonly<{
@@ -418,10 +480,17 @@ export class RetireCoordinator implements ProjectLifecycleRecoveryOwner {
     return Promise.reject(new RetireCoordinatorError('recovery-required'));
   }
 
-  async #acquire(projectId: CollabProjectId): Promise<PinnedProjectLease> {
+  async #acquire(
+    projectId: CollabProjectId,
+    signal?: AbortSignal,
+  ): Promise<PinnedProjectLease> {
     if (this.#closed) return fail('closed');
+    if (signal?.aborted) return fail('cancelled');
     try {
-      return await this.#coordination.acquireProjectLease(projectId);
+      return await this.#coordination.acquireProjectLease(
+        projectId,
+        signal ? { signal } : {},
+      );
     } catch (error: unknown) {
       return mapDependency(error);
     }

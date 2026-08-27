@@ -6,6 +6,7 @@ import {
   matchCollabCloudRoute,
   type CollabCloudProjectSnapshot,
   type CollabProjectId,
+  type CollabProjectRetirementResult,
 } from '@claudian-collab/protocol';
 
 import {
@@ -27,12 +28,21 @@ export interface ProjectSnapshotHandler {
   ): Promise<CollabCloudProjectSnapshot>;
 }
 
+export interface ProjectRetirementTerminalHandler {
+  getRetirementTerminal(
+    principalId: string,
+    projectId: string,
+    options?: Readonly<{ readonly signal?: AbortSignal }>,
+  ): Promise<CollabProjectRetirementResult | null>;
+}
+
 export interface ProjectSnapshotRoutesOptions {
   readonly authority: ProjectSnapshotHandler;
   readonly maximumJsonBytes: number;
   readonly operationTimeoutMs: number;
   readonly principalAdapter: DevelopmentPrincipalAdapter;
   readonly requestIdFactory?: () => string;
+  readonly retirementTerminal?: ProjectRetirementTerminalHandler;
 }
 
 function authorityFailure(error: ProjectReadAuthorityError): ProjectJsonRouteFailure {
@@ -66,10 +76,12 @@ function authorityFailure(error: ProjectReadAuthorityError): ProjectJsonRouteFai
 
 export class ProjectSnapshotRoutes {
   readonly #authority: ProjectSnapshotHandler;
+  readonly #retirementTerminal: ProjectRetirementTerminalHandler | undefined;
   readonly #transport: ProjectJsonTransport;
 
   constructor(options: ProjectSnapshotRoutesOptions) {
     this.#authority = options.authority;
+    this.#retirementTerminal = options.retirementTerminal;
     this.#transport = new ProjectJsonTransport(options);
   }
 
@@ -97,7 +109,41 @@ export class ProjectSnapshotRoutes {
         );
         return COLLAB_CLOUD_PROJECT_SNAPSHOT_CODEC.decodeResponse(result);
       } catch (error: unknown) {
-        if (error instanceof ProjectReadAuthorityError) throw authorityFailure(error);
+        if (error instanceof ProjectReadAuthorityError) {
+          if (
+            this.#retirementTerminal !== undefined
+            && (
+              error.code === 'authorization-denied'
+              || error.code === 'project-not-found'
+              || error.code === 'recovery-required'
+            )
+          ) {
+            let terminal: CollabProjectRetirementResult | null;
+            try {
+              terminal = await this.#retirementTerminal.getRetirementTerminal(
+                context.principal.actorId,
+                decoded.value.projectId,
+                { signal: context.signal },
+              );
+            } catch {
+              throw new ProjectJsonRouteFailure(503, new CollabError({
+                code: 'operation-failed',
+                recoveryActions: ['retry'],
+              }));
+            }
+            if (terminal !== null) {
+              throw new ProjectJsonRouteFailure(410, new CollabError({
+                code: 'project-retired',
+                safeContext: {
+                  operationId: terminal.retirementId,
+                  projectId: terminal.projectId,
+                  retiredAt: terminal.retiredAt,
+                },
+              }));
+            }
+          }
+          throw authorityFailure(error);
+        }
         if (error instanceof ProjectJsonRouteFailure) throw error;
         throw new ProjectJsonRouteFailure(
           500,

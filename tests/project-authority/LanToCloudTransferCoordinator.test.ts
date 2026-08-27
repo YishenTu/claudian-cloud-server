@@ -15,6 +15,7 @@ import {
   type CancelProjectAuthorityTransferRequest,
 } from '@claudian-collab/protocol';
 
+import { CoordinationError } from '../../src/coordination/CoordinationError.js';
 import type {
   AdvanceProjectLifecycleJournalInput,
   AuthorityTransferRecoveryEvidenceInput,
@@ -374,6 +375,10 @@ class MemoryPortability {
 }
 
 class MemoryCoordination {
+  acquireBarrier: Promise<void> | undefined;
+  closeCalls = 0;
+  projectScopeBarrier: Promise<void> | undefined;
+  projectScopeSignal: AbortSignal | undefined;
   readonly portability = new MemoryPortability();
   readonly members: readonly ProjectMembershipRecord[];
   failMembershipEnumeration = false;
@@ -389,8 +394,22 @@ class MemoryCoordination {
     })));
   }
 
-  acquireProjectLease(): Promise<PinnedProjectLease> {
-    return Promise.resolve(this.lease());
+  async acquireProjectLease(
+    _projectId?: string,
+    options: Readonly<{ readonly signal?: AbortSignal }> = {},
+  ): Promise<PinnedProjectLease> {
+    const barrier = this.acquireBarrier;
+    if (barrier) {
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = (): void => reject(new CoordinationError('cancelled'));
+        options.signal?.addEventListener('abort', onAbort, { once: true });
+        void barrier.then(resolve, reject).finally(() => {
+          options.signal?.removeEventListener('abort', onAbort);
+        });
+        if (options.signal?.aborted) onAbort();
+      });
+    }
+    return this.lease();
   }
 
   lease(): PinnedProjectLease {
@@ -415,10 +434,27 @@ class MemoryCoordination {
         : Promise.resolve(this.members),
     } as unknown as ProjectScope;
     return {
-      close: () => Promise.resolve(),
+      close: () => {
+        this.closeCalls += 1;
+        return Promise.resolve();
+      },
       drainDevelopmentBootstrapUploads: () => Promise.resolve(),
       handoffToDevelopmentBootstrapUpload: () => Promise.reject(new Error('unused')),
-      withProjectScope: operation => operation(scope),
+      withProjectScope: async (operation, options = {}) => {
+        this.projectScopeSignal = options.signal;
+        const barrier = this.projectScopeBarrier;
+        if (barrier) {
+          await new Promise<void>((resolve, reject) => {
+            const onAbort = (): void => reject(new CoordinationError('cancelled'));
+            options.signal?.addEventListener('abort', onAbort, { once: true });
+            void barrier.then(resolve, reject).finally(() => {
+              options.signal?.removeEventListener('abort', onAbort);
+            });
+            if (options.signal?.aborted) onAbort();
+          });
+        }
+        return operation(scope);
+      },
     };
   }
 }
@@ -665,6 +701,10 @@ interface Fixture {
   readonly restart: () => LanToCloudTransferCoordinator;
   readonly signer: MemoryReceiptSigner;
   readonly staging: MemoryStaging;
+  readonly trust: Readonly<{
+    readonly blockSourceProof: () => Promise<void>;
+    readonly verifySourceProofCalls: () => number;
+  }>;
   readonly loseCheckpoint: () => void;
 }
 
@@ -697,6 +737,8 @@ function fixture(includeOfflineMember = true): Fixture {
   let checkpointAvailable = true;
   let now = Date.parse(CREATED_AT) - 1_000;
   let claimSequence = 0;
+  let sourceProofBarrier: Promise<void> | undefined;
+  let verifySourceProofCalls = 0;
   const sourceProof: VerifiedLanToCloudSourceProof = Object.freeze({
     checkpointManifestSha256: validated.manifest.manifestSha256,
     projectId: PROJECT_ID,
@@ -708,7 +750,11 @@ function fixture(includeOfflineMember = true): Fixture {
   });
   const trust: LanToCloudSourceTrustPort = {
     verifyRelinquishmentProof: () => Promise.resolve(),
-    verifySourceProof: () => Promise.resolve(sourceProof),
+    verifySourceProof: async () => {
+      verifySourceProofCalls += 1;
+      await sourceProofBarrier;
+      return sourceProof;
+    },
   };
   const restart = () => new LanToCloudTransferCoordinator({
       activation,
@@ -757,6 +803,13 @@ function fixture(includeOfflineMember = true): Fixture {
     restart,
     signer,
     staging,
+    trust: Object.freeze({
+      blockSourceProof: () => {
+        sourceProofBarrier = new Promise(() => undefined);
+        return Promise.resolve();
+      },
+      verifySourceProofCalls: () => verifySourceProofCalls,
+    }),
   };
 }
 
@@ -873,6 +926,95 @@ describe('LanToCloudTransferCoordinator', () => {
 
     assert.deepEqual(replay, first);
     assert.equal(first.expiresAt, EXPIRES_AT);
+  });
+
+  it('returns the persisted receipt verifier only to the exact source principal', async () => {
+    const test = fixture();
+    await test.coordinator.begin(beginInput(test));
+    const request = { projectId: PROJECT_ID, transferId: TRANSFER_ID };
+
+    assert.deepEqual(await test.restart().getReceiptVerifier({
+      principalId: HOST_PRINCIPAL_ID,
+      request,
+    }), {
+      projectId: PROJECT_ID,
+      receiptKeyId: 'receipt-key',
+      receiptPublicKey: PUBLIC_KEY,
+      receiptPublicKeyEncoding: 'base64url-raw',
+      signatureAlgorithm: 'ed25519',
+      transferId: TRANSFER_ID,
+    });
+    const trustCallsBeforeUnauthorizedRead = test.trust.verifySourceProofCalls();
+    await assertCode(test.restart().getReceiptVerifier({
+      principalId: OFFLINE_PRINCIPAL_ID,
+      request,
+    }), 'authorization-denied');
+    assert.equal(test.trust.verifySourceProofCalls(), trustCallsBeforeUnauthorizedRead);
+    await assertCode(test.restart().getReceiptVerifier({
+      principalId: OFFLINE_PRINCIPAL_ID,
+      request: { projectId: PROJECT_ID, transferId: 'transfer-unknown' },
+    }), 'authorization-denied');
+  });
+
+  it('cancels a receipt verifier read while Project lease acquisition is blocked', async () => {
+    const test = fixture();
+    await test.coordinator.begin(beginInput(test));
+    test.coordination.acquireBarrier = new Promise(() => undefined);
+    const controller = new AbortController();
+    const pending = test.restart().getReceiptVerifier({
+      principalId: HOST_PRINCIPAL_ID,
+      request: { projectId: PROJECT_ID, transferId: TRANSFER_ID },
+      signal: controller.signal,
+    });
+
+    controller.abort();
+    await assertCode(pending, 'cancelled');
+  });
+
+  it('cancels a receipt verifier read after Project lease acquisition', async () => {
+    const test = fixture();
+    await test.coordinator.begin(beginInput(test));
+    test.coordination.projectScopeBarrier = new Promise(() => undefined);
+    const controller = new AbortController();
+    const pending = test.restart().getReceiptVerifier({
+      principalId: HOST_PRINCIPAL_ID,
+      request: { projectId: PROJECT_ID, transferId: TRANSFER_ID },
+      signal: controller.signal,
+    });
+
+    await Promise.resolve();
+    controller.abort();
+    await assertCode(pending, 'cancelled');
+    assert.equal(test.coordination.projectScopeSignal, controller.signal);
+  });
+
+  it('releases the Project lease when receipt proof verification stalls', async () => {
+    const test = fixture();
+    await test.coordinator.begin(beginInput(test));
+    await test.trust.blockSourceProof();
+    const closeCallsBeforeRead = test.coordination.closeCalls;
+    const controller = new AbortController();
+    const pending = test.restart().getReceiptVerifier({
+      principalId: HOST_PRINCIPAL_ID,
+      request: { projectId: PROJECT_ID, transferId: TRANSFER_ID },
+      signal: controller.signal,
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    controller.abort();
+    await assertCode(pending, 'cancelled');
+    assert.equal(test.coordination.closeCalls, closeCallsBeforeRead + 1);
+  });
+
+  it('rejects a receipt verifier key that is not exactly 32 raw bytes', () => {
+    const test = fixture();
+    test.signer.activeKey = Object.freeze({
+      publicKey: Buffer.alloc(33, 7).toString('base64url'),
+      receiptKeyId: 'receipt-key-invalid',
+    });
+
+    assert.throws(() => test.restart(), TypeError);
   });
 
   it('rotates ambiguous delivery, activates one writer, and binds offline identity exactly', async () => {

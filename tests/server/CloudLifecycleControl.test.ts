@@ -31,6 +31,7 @@ function adapter(calls: string[]) {
       begin: () => calls.push('lan.begin'),
       claimMembership: () => calls.push('lan.claimMembership'),
       commitRelinquishment: () => calls.push('lan.commitRelinquishment'),
+      getReceiptVerifier: () => calls.push('lan.getReceiptVerifier'),
       rotateClaims: () => calls.push('lan.rotateClaims'),
     }),
     retire: coordinator({
@@ -101,6 +102,10 @@ describe('CloudLifecycleControlAdapter', () => {
       projectId: PROJECT_ID,
       transferId: TRANSFER_ID,
     }));
+    await control.execute('getAuthorityTransferReceiptVerifier', context({
+      projectId: PROJECT_ID,
+      transferId: TRANSFER_ID,
+    }));
     await control.execute('cancelProjectAuthorityTransfer', context({
       projectId: PROJECT_ID,
       transferId: TRANSFER_ID,
@@ -123,6 +128,7 @@ describe('CloudLifecycleControlAdapter', () => {
       'cloud.getClaim',
       'cloud.acknowledgeRedemption',
       'transfer.getStatus',
+      'lan.getReceiptVerifier',
       'transfer.cancel',
       'retire.retire',
       'retire.acknowledge',
@@ -147,6 +153,35 @@ describe('CloudLifecycleControlAdapter', () => {
     assert.deepEqual(observed, {
       principalId: 'member-manager',
       request,
+    });
+  });
+
+  it('passes request cancellation to the receipt verifier owner', async () => {
+    let observed: unknown;
+    const control = new CloudLifecycleControlAdapter({
+      cloudToLan: coordinator({}),
+      lanToCloud: coordinator({
+        getReceiptVerifier: (input: never) => {
+          observed = input;
+          return undefined;
+        },
+      }),
+      retire: coordinator({}),
+      transfer: coordinator({}),
+    });
+    const request = { projectId: PROJECT_ID, transferId: TRANSFER_ID };
+    const signal = new AbortController().signal;
+    const operationContext = {
+      principalId: 'member-manager',
+      request,
+      signal,
+    } as never;
+
+    await control.execute('getAuthorityTransferReceiptVerifier', operationContext);
+    assert.deepEqual(observed, {
+      principalId: 'member-manager',
+      request,
+      signal,
     });
   });
 

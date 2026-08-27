@@ -639,6 +639,199 @@ describe('terminal Project lifecycle', () => {
     );
   });
 
+  it('returns an exact Retire terminal result only to an eligible former principal', async () => {
+    const retirementId = 'retire-terminal-read';
+    const terminalExpiresAt = '2026-09-26T00:00:00.000Z';
+    const result = {
+      acknowledgementRequired: true as const,
+      kind: 'project-retired' as const,
+      projectId: PROJECT_ID,
+      retiredAt: NOW,
+      retirementId,
+      terminalExpiresAt,
+    };
+    const responseJson = JSON.stringify(result);
+    const resultSha256 = sha256(responseJson);
+    const portability = {
+      async getProjectTombstone() {
+        return {
+          authorityGeneration: 4,
+          projectId: PROJECT_ID,
+          resultSha256,
+          retiredAt: NOW,
+          terminalExpiresAt,
+          terminalOperationId: retirementId,
+          terminalOperationKind: 'retire' as const,
+        };
+      },
+      async getTerminalResponder() {
+        return {
+          acknowledgements: [],
+          createdAt: NOW,
+          eligiblePrincipals: [{
+            memberId: MEMBER_ID,
+            principalId: MEMBER_PRINCIPAL,
+          }],
+          expiresAt: terminalExpiresAt,
+          operationId: retirementId,
+          operationKind: 'retire' as const,
+          replayAuthorization: undefined,
+          responseJson,
+          responseSha256: resultSha256,
+        };
+      },
+    };
+    const coordinator = new RetireCoordinator({
+      clock: () => new Date(NOW),
+      coordination: {
+        async acquireProjectLease() {
+          return {
+            async close() {},
+            async withProjectScope<T>(operation: (scope: ProjectScope) => Promise<T>) {
+              return operation({ portability } as unknown as ProjectScope);
+            },
+          } as PinnedProjectLease;
+        },
+      },
+      repository: {
+        async reserveExactRepositoryOperation() { throw new Error('must not reserve'); },
+        async verifyExactRepository() { throw new Error('must not verify'); },
+      },
+    });
+
+    assert.deepEqual(await coordinator.getTerminalResult({
+      principalId: MEMBER_PRINCIPAL,
+      projectId: PROJECT_ID,
+    }), result);
+    assert.equal(await coordinator.getTerminalResult({
+      principalId: OTHER_PRINCIPAL,
+      projectId: PROJECT_ID,
+    }), null);
+  });
+
+  it('fails closed when a Retire terminal responder disagrees with its tombstone', async () => {
+    const retirementId = 'retire-terminal-corrupt';
+    const terminalExpiresAt = '2026-09-26T00:00:00.000Z';
+    const result = {
+      acknowledgementRequired: true as const,
+      kind: 'project-retired' as const,
+      projectId: PROJECT_ID,
+      retiredAt: NOW,
+      retirementId,
+      terminalExpiresAt,
+    };
+    const responseJson = JSON.stringify(result);
+    const resultSha256 = sha256(responseJson);
+
+    for (const mismatch of [
+      { responseSha256: 'f'.repeat(64) },
+      { expiresAt: '2026-09-25T00:00:00.000Z' },
+    ]) {
+      const coordinator = new RetireCoordinator({
+        clock: () => new Date(NOW),
+        coordination: {
+          async acquireProjectLease() {
+            return {
+              async close() {},
+              async withProjectScope<T>(operation: (scope: ProjectScope) => Promise<T>) {
+                return operation({
+                  portability: {
+                    async getProjectTombstone() {
+                      return {
+                        authorityGeneration: 4,
+                        projectId: PROJECT_ID,
+                        resultSha256,
+                        retiredAt: NOW,
+                        terminalExpiresAt,
+                        terminalOperationId: retirementId,
+                        terminalOperationKind: 'retire' as const,
+                      };
+                    },
+                    async getTerminalResponder() {
+                      return {
+                        acknowledgements: [],
+                        createdAt: NOW,
+                        eligiblePrincipals: [{
+                          memberId: MEMBER_ID,
+                          principalId: MEMBER_PRINCIPAL,
+                        }],
+                        expiresAt: terminalExpiresAt,
+                        operationId: retirementId,
+                        operationKind: 'retire' as const,
+                        replayAuthorization: undefined,
+                        responseJson,
+                        responseSha256: resultSha256,
+                        ...mismatch,
+                      };
+                    },
+                  },
+                } as unknown as ProjectScope);
+              },
+            } as PinnedProjectLease;
+          },
+        },
+        repository: {
+          async reserveExactRepositoryOperation() { throw new Error('must not reserve'); },
+          async verifyExactRepository() { throw new Error('must not verify'); },
+        },
+      });
+
+      await assert.rejects(
+        coordinator.getTerminalResult({
+          principalId: MEMBER_PRINCIPAL,
+          projectId: PROJECT_ID,
+        }),
+        (error: unknown) => error instanceof RetireCoordinatorError
+          && error.code === 'recovery-required',
+      );
+    }
+  });
+
+  it('releases the terminal lookup lease when request cancellation arrives', async () => {
+    const controller = new AbortController();
+    let closeCount = 0;
+    let observedSignal: AbortSignal | undefined;
+    const coordinator = new RetireCoordinator({
+      clock: () => new Date(NOW),
+      coordination: {
+        async acquireProjectLease(_projectId, options) {
+          observedSignal = options?.signal;
+          return {
+            async close() { closeCount += 1; },
+            async withProjectScope<T>(operation: (scope: ProjectScope) => Promise<T>) {
+              return operation({
+                portability: {
+                  getProjectTombstone: () => new Promise(resolve => {
+                    controller.signal.addEventListener('abort', () => resolve(undefined), {
+                      once: true,
+                    });
+                  }),
+                },
+              } as unknown as ProjectScope);
+            },
+          } as PinnedProjectLease;
+        },
+      },
+      repository: {
+        async reserveExactRepositoryOperation() { throw new Error('must not reserve'); },
+        async verifyExactRepository() { throw new Error('must not verify'); },
+      },
+    });
+
+    const lookup = coordinator.getTerminalResult({
+      principalId: MEMBER_PRINCIPAL,
+      projectId: PROJECT_ID,
+      signal: controller.signal,
+    });
+    controller.abort();
+
+    await assert.rejects(lookup, (error: unknown) => (
+      error instanceof RetireCoordinatorError && error.code === 'cancelled'
+    ));
+    assert.equal(observedSignal, controller.signal);
+    assert.equal(closeCount, 1);
+  });
+
   it('rejects Retire acknowledgement at the terminal deadline before cleanup', async () => {
     const retirementId = 'retire-expired-acknowledgement';
     const expiresAt = '2026-09-26T00:00:00.000Z';

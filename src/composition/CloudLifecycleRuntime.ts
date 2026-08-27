@@ -9,12 +9,16 @@ import type { TerminalResponderExpiryReconciler } from './TerminalResponderExpir
  */
 export interface CloudLifecycleRuntime {
   readonly artifacts: AuthorityTransferArtifactAuthority;
-  readonly control: CloudLifecycleControl;
+  readonly control: CompleteCloudLifecycleControl;
   readonly recovery: ProjectLifecycleRecoveryPort;
   close(timeoutMs: number): Promise<void>;
   reconcileAll(): Promise<void>;
   start(): void;
 }
+
+export type CompleteCloudLifecycleControl = CloudLifecycleControl & Required<
+  Pick<CloudLifecycleControl, 'getRetirementTerminal'>
+>;
 
 export interface CloudLifecycleCloseOwner {
   close(): Promise<void> | void;
@@ -23,7 +27,7 @@ export interface CloudLifecycleCloseOwner {
 export interface ComposedCloudLifecycleRuntimeOptions {
   readonly artifacts: AuthorityTransferArtifactAuthority;
   readonly closeOrder: readonly CloudLifecycleCloseOwner[];
-  readonly control: CloudLifecycleControl;
+  readonly control: CompleteCloudLifecycleControl;
   readonly expiry: Pick<
     TerminalResponderExpiryReconciler,
     'close' | 'reconcileAll' | 'start'
@@ -33,7 +37,7 @@ export interface ComposedCloudLifecycleRuntimeOptions {
 
 export class ComposedCloudLifecycleRuntime implements CloudLifecycleRuntime {
   readonly artifacts: AuthorityTransferArtifactAuthority;
-  readonly control: CloudLifecycleControl;
+  readonly control: CompleteCloudLifecycleControl;
   readonly recovery: ProjectLifecycleRecoveryPort;
   readonly #closeOrder: readonly CloudLifecycleCloseOwner[];
   readonly #expiry: ComposedCloudLifecycleRuntimeOptions['expiry'];

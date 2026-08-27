@@ -15,7 +15,10 @@ describe('ComposedCloudLifecycleRuntime', () => {
         { close: () => { calls.push('transfer-owners'); } },
         { close: () => { calls.push('checkpoint-owners'); } },
       ],
-      control: { execute: () => Promise.reject(new Error('unused')) },
+      control: {
+        execute: () => Promise.reject(new Error('unused')),
+        getRetirementTerminal: () => Promise.resolve(null),
+      },
       expiry: {
         close: () => {
           calls.push('expiry-close');
@@ -64,7 +67,10 @@ describe('ComposedCloudLifecycleRuntime', () => {
         },
         { close: () => { calls.push('checkpoint-owners'); } },
       ],
-      control: { execute: () => Promise.reject(new Error('unused')) },
+      control: {
+        execute: () => Promise.reject(new Error('unused')),
+        getRetirementTerminal: () => Promise.resolve(null),
+      },
       expiry: {
         close: () => {
           calls.push('expiry-close');
@@ -102,7 +108,10 @@ describe('ComposedCloudLifecycleRuntime', () => {
         upload: () => Promise.reject(new Error('unused')),
       },
       closeOrder: [{ close: () => { calls.push('transfer-owners'); } }],
-      control: { execute: () => Promise.reject(new Error('unused')) },
+      control: {
+        execute: () => Promise.reject(new Error('unused')),
+        getRetirementTerminal: () => Promise.resolve(null),
+      },
       expiry: {
         close: () => {
           calls.push('expiry-close');
