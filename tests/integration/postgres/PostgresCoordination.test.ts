@@ -228,6 +228,31 @@ async function waitForBlockedPoolConnections(client: Client): Promise<void> {
   throw new Error('postgres-test-pool-queries-not-blocked');
 }
 
+async function waitForPinnedTableLock(database: PostgresTestDatabase): Promise<void> {
+  const client = new Client({ connectionString: database.adminUrl });
+  try {
+    await client.connect();
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      await client.query('SELECT pg_stat_clear_snapshot()');
+      const result = await client.query<{ readonly blocked: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1
+             FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND application_name = 'claudian-cloud-pinned'
+              AND wait_event_type = 'Lock'
+         ) AS blocked`,
+      );
+      if (result.rows[0]?.blocked) return;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error('postgres-test-pinned-query-not-blocked');
+  } finally {
+    await client.end();
+  }
+}
+
 async function cloudConnectionCount(adminUrl: string): Promise<number> {
   const client = new Client({ connectionString: adminUrl });
   try {
@@ -318,6 +343,96 @@ describe('PostgresCoordination', () => {
           first.close().catch(() => undefined),
           second.close().catch(() => undefined),
         ]);
+      }
+    });
+  });
+
+  it('cancels a blocked pinned Project transaction and releases its lock', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({
+        connectionString: database.migrationUrl,
+      }).apply();
+      const coordination = new PostgresCoordination({
+        ordinaryPoolMax: 1,
+        pinnedPoolMax: 1,
+        projectLockTimeoutMs: 1_000,
+        reservedPoolMax: 1,
+        runtimeConnectionString: database.runtimeUrl,
+        shutdownTimeoutMs: 2_000,
+      });
+      const blocker = new Client({ connectionString: database.migrationUrl });
+      try {
+        await blocker.connect();
+        await blocker.query('BEGIN');
+        await blocker.query(
+          'LOCK TABLE claudian_cloud.project_tombstones IN ACCESS EXCLUSIVE MODE',
+        );
+        const lease = await coordination.acquireProjectLease('project-cancelled-pinned');
+        const controller = new AbortController();
+        const blocked = lease.withProjectScope(
+          scope => scope.portability.getProjectTombstone(),
+          { signal: controller.signal },
+        );
+        await waitForPinnedTableLock(database);
+
+        controller.abort();
+        await expectCoordinationError(blocked, 'cancelled');
+        await expectCoordinationError(lease.close(), 'dependency-failed');
+        await blocker.query('ROLLBACK');
+
+        const recovered = await coordination.acquireProjectLease(
+          'project-cancelled-pinned',
+        );
+        await recovered.close();
+      } finally {
+        await blocker.query('ROLLBACK').catch(() => undefined);
+        await blocker.end().catch(() => undefined);
+        await coordination.close().catch(() => undefined);
+      }
+    });
+  });
+
+  it('cancels a blocked pinned lifecycle read and releases its lock', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({
+        connectionString: database.migrationUrl,
+      }).apply();
+      const coordination = new PostgresCoordination({
+        ordinaryPoolMax: 1,
+        pinnedPoolMax: 1,
+        projectLockTimeoutMs: 1_000,
+        reservedPoolMax: 1,
+        runtimeConnectionString: database.runtimeUrl,
+        shutdownTimeoutMs: 2_000,
+      });
+      const blocker = new Client({ connectionString: database.migrationUrl });
+      try {
+        await blocker.connect();
+        await blocker.query('BEGIN');
+        await blocker.query(
+          'LOCK TABLE claudian_cloud.project_lifecycle_journals IN ACCESS EXCLUSIVE MODE',
+        );
+        const lease = await coordination.acquireProjectLease('project-cancelled-lifecycle');
+        const controller = new AbortController();
+        const blocked = lease.withProjectScope(
+          scope => scope.portability.getLifecycleJournal('transfer-cancelled-lifecycle'),
+          { signal: controller.signal },
+        );
+        await waitForPinnedTableLock(database);
+
+        controller.abort();
+        await expectCoordinationError(blocked, 'cancelled');
+        await expectCoordinationError(lease.close(), 'dependency-failed');
+        await blocker.query('ROLLBACK');
+
+        const recovered = await coordination.acquireProjectLease(
+          'project-cancelled-lifecycle',
+        );
+        await recovered.close();
+      } finally {
+        await blocker.query('ROLLBACK').catch(() => undefined);
+        await blocker.end().catch(() => undefined);
+        await coordination.close().catch(() => undefined);
       }
     });
   });

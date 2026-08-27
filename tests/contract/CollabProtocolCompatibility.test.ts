@@ -39,6 +39,7 @@ const expectedOperations = [
   'createTicket',
   'createTicketComment',
   'ensureMyRequest',
+  'getAuthorityTransferReceiptVerifier',
   'getProjectAuthorityTransfer',
   'getRequest',
   'getTicket',

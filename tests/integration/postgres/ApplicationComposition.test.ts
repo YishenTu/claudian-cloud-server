@@ -333,7 +333,10 @@ describe('application composition', { concurrency: false }, () => {
           upload: () => Promise.reject(new Error('unused')),
         },
         close: () => Promise.resolve(),
-        control: { execute: () => Promise.reject(new Error('unused')) },
+        control: {
+          execute: () => Promise.reject(new Error('unused')),
+          getRetirementTerminal: () => Promise.resolve(null),
+        },
         reconcileAll: () => Promise.resolve(),
         recovery: {
           recoverCandidate: () => Promise.resolve(),
@@ -810,6 +813,7 @@ while :; do sleep 1; done`,
         },
         control: {
           execute: () => Promise.reject(new Error('unused')),
+          getRetirementTerminal: () => Promise.resolve(null),
         },
         reconcileAll: () => {
           lifecycle.push('reconcile');
@@ -872,7 +876,10 @@ while :; do sleep 1; done`,
         upload: () => Promise.reject(new Error('unused')),
       },
       closeOrder: [{ close: () => { closed.push('transfer-owners'); } }],
-      control: { execute: () => Promise.reject(new Error('unused')) },
+      control: {
+        execute: () => Promise.reject(new Error('unused')),
+        getRetirementTerminal: () => Promise.resolve(null),
+      },
       expiry,
       recovery: {
         close: () => { closed.push('recovery'); },

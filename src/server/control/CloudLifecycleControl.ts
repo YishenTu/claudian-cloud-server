@@ -10,9 +10,11 @@ import {
   type CollabControlOperationMap,
   type CollabProjectRetirementAcknowledgementRequest,
   type CollabProjectRetirementRequest,
+  type CollabProjectRetirementResult,
   type CommitLanToCloudRelinquishmentRequest,
   type ConfirmCloudToLanTargetActiveRequest,
   type GetProjectAuthorityTransferRequest,
+  type GetAuthorityTransferReceiptVerifierRequest,
   type GetTransferredMembershipClaimRequest,
   type ReportCloudToLanTargetStagedRequest,
   type RotateTransferredMembershipClaimsRequest,
@@ -46,6 +48,7 @@ type LanToCloudControl = Pick<
   | 'begin'
   | 'claimMembership'
   | 'commitRelinquishment'
+  | 'getReceiptVerifier'
   | 'rotateClaims'
 >;
 
@@ -59,7 +62,10 @@ type CloudToLanControl = Pick<
   | 'reportTargetStaged'
 >;
 
-type RetireControl = Pick<RetireCoordinator, 'acknowledge' | 'retire'>;
+type RetireControl = Pick<
+  RetireCoordinator,
+  'acknowledge' | 'getTerminalResult' | 'retire'
+>;
 
 type AuthorityTransferControl = Pick<
   AuthorityTransferControlDispatcher,
@@ -145,6 +151,18 @@ export class CloudLifecycleControlAdapter implements CloudLifecycleControl {
     this.#transfer = options.transfer;
   }
 
+  getRetirementTerminal(
+    principalId: string,
+    projectId: string,
+    options: Readonly<{ readonly signal?: AbortSignal }> = {},
+  ): Promise<CollabProjectRetirementResult | null> {
+    return this.#retire.getTerminalResult({
+      principalId,
+      projectId,
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+  }
+
   execute<Operation extends CloudLifecycleOperation>(
     operation: Operation,
     context: CloudLifecycleOperationContext<Operation>,
@@ -192,6 +210,12 @@ export class CloudLifecycleControlAdapter implements CloudLifecycleControl {
         return this.#lanToCloud.commitRelinquishment({
           principalId,
           request: context.request as CommitLanToCloudRelinquishmentRequest,
+        });
+      case 'getAuthorityTransferReceiptVerifier':
+        return this.#lanToCloud.getReceiptVerifier({
+          principalId,
+          request: context.request as GetAuthorityTransferReceiptVerifierRequest,
+          signal: context.signal,
         });
       case 'beginCloudToLanTransfer':
         return this.#cloudToLan.begin({

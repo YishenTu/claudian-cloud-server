@@ -9,6 +9,7 @@ import {
   type CollabAuthorityTransferOperation,
   type CollabControlOperationMap,
   type CollabProjectRetirementOperation,
+  type CollabProjectRetirementResult,
 } from '@claudian-collab/protocol';
 
 import type { DevelopmentPrincipalAdapter } from '../../request-context/DevelopmentPrincipalAdapter.js';
@@ -41,6 +42,11 @@ export interface CloudLifecycleControl {
     operation: Operation,
     context: CloudLifecycleOperationContext<Operation>,
   ): Promise<CollabControlOperationMap[Operation]['response']>;
+  getRetirementTerminal?(
+    principalId: string,
+    projectId: string,
+    options?: Readonly<{ readonly signal?: AbortSignal }>,
+  ): Promise<CollabProjectRetirementResult | null>;
 }
 
 export interface ProjectLifecycleRoutesOptions {

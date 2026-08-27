@@ -73,7 +73,10 @@ export interface PinnedProjectLease {
   handoffToDevelopmentBootstrapUpload(
     attemptId: string,
   ): Promise<DevelopmentBootstrapUploadLease>;
-  withProjectScope<T>(operation: (scope: ProjectScope) => Promise<T>): Promise<T>;
+  withProjectScope<T>(
+    operation: (scope: ProjectScope) => Promise<T>,
+    options?: Readonly<{ readonly signal?: AbortSignal }>,
+  ): Promise<T>;
 }
 
 export interface DevelopmentBootstrapUploadLease {

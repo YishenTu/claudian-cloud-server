@@ -115,6 +115,43 @@ describe('ProjectLifecycleRoutes', () => {
     assert.equal(call.context.request.projectId, PROJECT_ID);
   });
 
+  it('returns the exact source-pinnable transfer receipt verifier', async () => {
+    const verifier = {
+      projectId: PROJECT_ID,
+      receiptKeyId: 'receipt-key',
+      receiptPublicKey: Buffer.alloc(32, 8).toString('base64url'),
+      receiptPublicKeyEncoding: 'base64url-raw',
+      signatureAlgorithm: 'ed25519',
+      transferId: TRANSFER_ID,
+    } as const;
+    const calls: unknown[] = [];
+    const response = await request({
+      execute: (operation, context) => {
+        calls.push({ operation, context });
+        return Promise.resolve(verifier) as never;
+      },
+    }, 'getAuthorityTransferReceiptVerifier', {
+      projectId: PROJECT_ID,
+      transferId: TRANSFER_ID,
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(decodeCollabCloudSuccessEnvelope(await response.json()).data, verifier);
+    assert.equal(calls.length, 1);
+    const call = calls[0] as {
+      readonly context: {
+        readonly principalId: string;
+        readonly request: unknown;
+        readonly signal: AbortSignal;
+      };
+      readonly operation: string;
+    };
+    assert.equal(call.operation, 'getAuthorityTransferReceiptVerifier');
+    assert.equal(call.context.principalId, 'member-manager');
+    assert.deepEqual(call.context.request, { projectId: PROJECT_ID, transferId: TRANSFER_ID });
+    assert.equal(call.context.signal.aborted, false);
+  });
+
   it('keeps LAN-source-only operations and binding v1 unsupported', async () => {
     const control: CloudLifecycleControl = {
       execute: () => Promise.reject(new Error('must not execute')),

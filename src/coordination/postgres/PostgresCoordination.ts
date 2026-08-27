@@ -1232,6 +1232,7 @@ async function runProjectTransaction<T>(
     return value;
   } catch (error: unknown) {
     if (transactionStarted) await rollback(client, options.markBroken);
+    if (options.signal?.aborted) throw new CoordinationError('cancelled');
     throw error;
   }
 }
@@ -1377,11 +1378,18 @@ class PostgresPinnedProjectLease implements PinnedProjectLease {
 
   async withProjectScope<T>(
     operation: (scope: ProjectScope) => Promise<T>,
+    options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<T> {
     if (this.#closed) throw new CoordinationError('closed');
     if (this.#checkedOutClient.isBroken()) throw dependencyFailure();
     if (this.#transactionActive) throw new CoordinationError('lease-busy');
     this.#transactionActive = true;
+    if (options.signal?.aborted) {
+      this.#transactionActive = false;
+      throw new CoordinationError('cancelled');
+    }
+    const onAbort = (): void => this.#checkedOutClient.release(true);
+    options.signal?.addEventListener('abort', onAbort, { once: true });
     const transaction = runProjectTransaction(
       this.#client,
       this.#projectId,
@@ -1391,7 +1399,7 @@ class PostgresPinnedProjectLease implements PinnedProjectLease {
         lockKey: undefined,
         markBroken: this.#checkedOutClient.markBroken,
         onProjectEventCommitted: this.#onProjectEventCommitted,
-        signal: undefined,
+        signal: options.signal,
       },
     );
     this.#activeOperation = transaction.then(
@@ -1401,6 +1409,7 @@ class PostgresPinnedProjectLease implements PinnedProjectLease {
     try {
       return await transaction;
     } finally {
+      options.signal?.removeEventListener('abort', onAbort);
       this.#transactionActive = false;
       this.#activeOperation = undefined;
     }

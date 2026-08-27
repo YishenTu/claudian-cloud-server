@@ -13,6 +13,7 @@ import {
   type CancelProjectAuthorityTransferRequest,
   type ClaimTransferredMembershipRequest,
   type CollabAuthorityRelinquishmentProof,
+  type CollabAuthorityTransferReceiptVerifier,
   type CollabAuthorityTransferStatus,
   type CollabCheckpointMemberRecord,
   type CollabCheckpointPortableRecord,
@@ -27,6 +28,7 @@ import {
   type CollabTransferredMembershipRedemptionReceiptSigningPayload,
   type CommitLanToCloudRelinquishmentRequest,
   type GetProjectAuthorityTransferRequest,
+  type GetAuthorityTransferReceiptVerifierRequest,
   type RotateTransferredMembershipClaimsRequest,
 } from '@claudian-collab/protocol';
 
@@ -95,7 +97,10 @@ export class LanToCloudTransferCoordinatorError extends Error {
 }
 
 export interface LanToCloudTransferCoordination {
-  acquireProjectLease(projectId: CollabProjectId): Promise<PinnedProjectLease>;
+  acquireProjectLease(
+    projectId: CollabProjectId,
+    options?: Readonly<{ readonly signal?: AbortSignal }>,
+  ): Promise<PinnedProjectLease>;
 }
 
 export interface VerifiedLanToCloudSourceProof {
@@ -213,6 +218,12 @@ export interface GetLanToCloudTransferInput {
   readonly request: GetProjectAuthorityTransferRequest;
 }
 
+export interface GetLanToCloudReceiptVerifierInput {
+  readonly principalId: string;
+  readonly request: GetAuthorityTransferReceiptVerifierRequest;
+  readonly signal?: AbortSignal;
+}
+
 interface StoredSourceEvidence {
   readonly checkpointManifestSha256: string;
   readonly principalId: string;
@@ -281,8 +292,7 @@ function defaultRepositoryStorageKey(projectId: CollabProjectId): string {
 function canonicalSigningPublicKey(value: unknown): value is string {
   if (typeof value !== 'string' || !BASE64URL_PATTERN.test(value)) return false;
   const decoded = Buffer.from(value, 'base64url');
-  return decoded.byteLength >= 32
-    && decoded.byteLength <= 64
+  return decoded.byteLength === 32
     && decoded.toString('base64url') === value;
 }
 
@@ -296,6 +306,7 @@ type LanToCloudControlOperation =
   | 'cancelProjectAuthorityTransfer'
   | 'claimTransferredMembership'
   | 'commitLanToCloudRelinquishment'
+  | 'getAuthorityTransferReceiptVerifier'
   | 'getProjectAuthorityTransfer'
   | 'rotateTransferredMembershipClaims';
 
@@ -461,11 +472,33 @@ function dependency(error: unknown): never {
     if (error.code === 'invalid-checkpoint') return fail('invalid-checkpoint');
   }
   if (error instanceof CoordinationError) {
+    if (error.code === 'cancelled') return fail('cancelled');
     if (error.code === 'closed') return fail('closed');
     if (error.code === 'invalid-record') return fail('invalid-checkpoint');
     if (error.code === 'state-conflict') return fail('state-conflict');
   }
   return fail('dependency-failed');
+}
+
+async function settleBeforeCancellation<Result>(
+  operation: Promise<Result>,
+  signal: AbortSignal | undefined,
+): Promise<Result> {
+  if (signal === undefined) return operation;
+  if (signal.aborted) return fail('cancelled');
+  let abortListener: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        abortListener = () => reject(new LanToCloudTransferCoordinatorError('cancelled'));
+        signal.addEventListener('abort', abortListener, { once: true });
+        if (signal.aborted) abortListener();
+      }),
+    ]);
+  } finally {
+    if (abortListener !== undefined) signal.removeEventListener('abort', abortListener);
+  }
 }
 
 export class LanToCloudTransferCoordinator
@@ -645,6 +678,37 @@ implements ProjectLifecycleRecoveryOwner {
       }
       return this.#requireStatus(lease, request.transferId);
     });
+  }
+
+  getReceiptVerifier(
+    input: GetLanToCloudReceiptVerifierInput,
+  ): Promise<CollabAuthorityTransferReceiptVerifier> {
+    const request = decodeRequest('getAuthorityTransferReceiptVerifier', input.request);
+    return this.#run(request.projectId, async lease => {
+      let exact: ExactTransfer;
+      try {
+        exact = await this.#authorizeSource(
+          lease,
+          request.transferId,
+          input.principalId,
+          input.signal,
+        );
+      } catch (error) {
+        if (
+          error instanceof LanToCloudTransferCoordinatorError
+          && error.code === 'recovery-required'
+        ) return fail('authorization-denied');
+        throw error;
+      }
+      return Object.freeze({
+        projectId: request.projectId,
+        receiptKeyId: exact.evidence.receiptKeyId,
+        receiptPublicKey: exact.evidence.receiptPublicKey,
+        receiptPublicKeyEncoding: 'base64url-raw' as const,
+        signatureAlgorithm: 'ed25519' as const,
+        transferId: request.transferId,
+      });
+    }, input.signal);
   }
 
   completeCheckpoint(
@@ -1217,24 +1281,23 @@ implements ProjectLifecycleRecoveryOwner {
     lease: PinnedProjectLease,
     transferId: string,
     principalId: string,
+    signal?: AbortSignal,
   ): Promise<ExactTransfer> {
-    const exact = await this.#exactTransfer(lease, transferId);
-    if (exact.evidence.principalId !== principalId) {
-      return fail('authorization-denied');
-    }
-    return exact;
+    return this.#exactTransfer(lease, transferId, signal, principalId);
   }
 
   async #exactTransfer(
     lease: PinnedProjectLease,
     transferId: string,
+    signal?: AbortSignal,
+    authorizedPrincipalId?: string,
   ): Promise<ExactTransfer> {
     const [journal, recovery] = await lease.withProjectScope(async scope => (
       Promise.all([
         scope.portability.getLifecycleJournal(transferId),
         scope.portability.getAuthorityTransferRecovery(transferId),
       ])
-    ));
+    ), signal ? { signal } : {});
     if (
       journal?.kind !== 'authority-transfer'
       || journal.direction !== 'lan-to-cloud'
@@ -1245,10 +1308,17 @@ implements ProjectLifecycleRecoveryOwner {
       || recovery.targetHostMemberId !== undefined
     ) return fail('recovery-required');
     const evidence = decodeSourceEvidence(recovery.sourceProof);
-    const proof = await this.#relinquishmentTrust.verifySourceProof({
-      principalId: evidence.principalId,
-      proof: evidence.proof,
-    });
+    if (
+      authorizedPrincipalId !== undefined
+      && evidence.principalId !== authorizedPrincipalId
+    ) return fail('authorization-denied');
+    const proof = await settleBeforeCancellation(
+      this.#relinquishmentTrust.verifySourceProof({
+        principalId: evidence.principalId,
+        proof: evidence.proof,
+      }),
+      signal,
+    );
     if (!exactSourceProof(proof, {
       checkpointManifestSha256: evidence.checkpointManifestSha256,
       projectId: journal.projectId,
@@ -1680,11 +1750,15 @@ implements ProjectLifecycleRecoveryOwner {
   #run<Result>(
     projectId: CollabProjectId,
     operation: (lease: PinnedProjectLease) => Promise<Result>,
+    signal?: AbortSignal,
   ): Promise<Result> {
     return this.#track(async () => {
       let lease: PinnedProjectLease;
       try {
-        lease = await this.#coordination.acquireProjectLease(projectId);
+        lease = await this.#coordination.acquireProjectLease(
+          projectId,
+          signal ? { signal } : {},
+        );
       } catch (error: unknown) {
         return dependency(error);
       }
