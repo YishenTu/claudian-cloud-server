@@ -290,6 +290,28 @@ describe('AuthorityTransferArtifactRoutes', () => {
     await assert.rejects(response.arrayBuffer());
   });
 
+  it('terminates a download before forwarding beyond its declared size', async () => {
+    const baseUrl = await start({
+      download: () => Promise.resolve({
+        body: Readable.from(['abcdef']),
+        byteCount: 5,
+      }),
+      upload: () => Promise.reject(new Error('unused')),
+    });
+    const route = collabCloudAuthorityTransferArtifactRoute(
+      PROJECT_ID,
+      TRANSFER_ID,
+      'download',
+      'repository.bundle',
+    );
+    await assert.rejects(async () => {
+      const response = await fetch(`${baseUrl}${route.target}`, {
+        headers: { 'x-claudian-development-actor': 'member-manager' },
+      });
+      await response.arrayBuffer();
+    });
+  });
+
   it('owns the deadline while a download owner is uncooperative', async () => {
     let signal: AbortSignal | undefined;
     const baseUrl = await start({

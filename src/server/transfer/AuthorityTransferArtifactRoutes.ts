@@ -125,22 +125,28 @@ function statusForError(error: CollabError): number {
 function boundedMeter(
   maximumBytes: number,
   expectedBytes?: number,
+  expectedByteFailure: () => Error = () => protocolFailure('content-length'),
 ): Transform {
   let bytes = 0;
   return new Transform({
     flush(callback) {
       if (expectedBytes !== undefined && bytes !== expectedBytes) {
-        callback(protocolFailure('content-length'));
+        callback(expectedByteFailure());
         return;
       }
       callback();
     },
     transform(chunk: Buffer, _encoding, callback) {
-      bytes += chunk.byteLength;
-      if (bytes > maximumBytes) {
+      const nextBytes = bytes + chunk.byteLength;
+      if (nextBytes > maximumBytes) {
         callback(quotaFailure(maximumBytes));
         return;
       }
+      if (expectedBytes !== undefined && nextBytes > expectedBytes) {
+        callback(expectedByteFailure());
+        return;
+      }
+      bytes = nextBytes;
       callback(null, chunk);
     },
   });
@@ -376,7 +382,11 @@ export class AuthorityTransferArtifactRoutes {
     });
     await pipeline(
       result.body,
-      boundedMeter(maximumBytes, result.byteCount),
+      boundedMeter(
+        maximumBytes,
+        result.byteCount,
+        () => new CollabError({ code: 'operation-failed' }),
+      ),
       response,
       { signal },
     );
