@@ -146,6 +146,30 @@ function boundedMeter(
   });
 }
 
+async function settleOperationBeforeAbort<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  const timeoutFailure = (): ArtifactRouteFailure => new ArtifactRouteFailure(
+    408,
+    new CollabError({ code: 'operation-timeout', recoveryActions: ['retry'] }),
+  );
+  if (signal.aborted) throw timeoutFailure();
+  let abortListener: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        abortListener = () => reject(timeoutFailure());
+        signal.addEventListener('abort', abortListener, { once: true });
+        if (signal.aborted) abortListener();
+      }),
+    ]);
+  } finally {
+    if (abortListener !== undefined) signal.removeEventListener('abort', abortListener);
+  }
+}
+
 export class AuthorityTransferArtifactRoutes {
   readonly #authority: AuthorityTransferArtifactAuthority;
   readonly #limits: AuthorityTransferArtifactRoutesOptions['limits'];
@@ -306,13 +330,13 @@ export class AuthorityTransferArtifactRoutes {
     principalId: string,
     signal: AbortSignal,
   ): Promise<void> {
-    const result = await this.#authority.download({
+    const result = await settleOperationBeforeAbort(this.#authority.download({
       artifact: match.artifact,
       principalId,
       projectId: match.projectId,
       signal,
       transferId: match.transferId,
-    });
+    }), signal);
     const maximumBytes = this.#limits[match.artifact];
     if (
       !Number.isSafeInteger(result.byteCount)

@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   COLLAB_AUTHORITY_TRANSFER_OPERATIONS,
   COLLAB_PROJECT_RETIREMENT_OPERATIONS,
+  CollabError,
   collabControlOperationCodec,
   matchCollabCloudRoute,
   type CollabAuthorityTransferOperation,
@@ -120,6 +121,13 @@ export class ProjectLifecycleRoutes {
       request,
       signal: context.signal,
     });
-    return collabControlOperationCodec(operation).decodeResponse(response);
+    try {
+      return collabControlOperationCodec(operation).decodeResponse(response);
+    } catch {
+      throw new ProjectJsonRouteFailure(
+        500,
+        new CollabError({ code: 'operation-failed' }),
+      );
+    }
   }
 }

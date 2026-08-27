@@ -418,7 +418,6 @@ async function beginValidateAndRotate(
 ): Promise<Readonly<{ batchRevision: number; batchSha256: string; checkpointSha256: string }>> {
   try {
     await coordinator.begin({
-    expiresAt: EXPIRES_AT,
     principalId: transfer.principalId,
     request: {
       checkpointManifestSha256: transfer.checkpoint.manifest.manifestSha256,
@@ -580,6 +579,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
           ? new FaultInjectingCoordination(coordination, fault)
           : coordination,
         custodyReceiptIdFactory: () => `custody-${transfer.transferId}`,
+        expiresAtFactory: () => EXPIRES_AT,
         receiptIdFactory: () => `redemption-${transfer.transferId}`,
         receiptSigner: {
           activeKey: { publicKey: PUBLIC_KEY, receiptKeyId: 'receipt-key' },

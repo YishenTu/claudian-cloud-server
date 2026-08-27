@@ -36,8 +36,8 @@ describe('ComposedCloudLifecycleRuntime', () => {
 
     await runtime.reconcileAll();
     runtime.start();
-    await runtime.close();
-    await runtime.close();
+    await runtime.close(1_000);
+    await runtime.close(1_000);
     assert.deepEqual(calls, [
       'reconcile',
       'expiry-start',
@@ -83,14 +83,46 @@ describe('ComposedCloudLifecycleRuntime', () => {
       },
     });
 
-    const closing = runtime.close();
+    const closing = runtime.close(1_000);
     await assert.rejects(closing, /cloud-lifecycle-runtime\.close-failed/u);
-    await assert.rejects(runtime.close(), /cloud-lifecycle-runtime\.close-failed/u);
+    await assert.rejects(runtime.close(1_000), /cloud-lifecycle-runtime\.close-failed/u);
     assert.deepEqual(calls, [
       'expiry-close',
       'recovery-close',
       'transfer-owners',
       'checkpoint-owners',
+    ]);
+  });
+
+  it('attempts later owners when an earlier close never settles', async () => {
+    const calls: string[] = [];
+    const runtime = new ComposedCloudLifecycleRuntime({
+      artifacts: {
+        download: () => Promise.reject(new Error('unused')),
+        upload: () => Promise.reject(new Error('unused')),
+      },
+      closeOrder: [{ close: () => { calls.push('transfer-owners'); } }],
+      control: { execute: () => Promise.reject(new Error('unused')) },
+      expiry: {
+        close: () => {
+          calls.push('expiry-close');
+          return new Promise(() => undefined);
+        },
+        reconcileAll: () => Promise.resolve(),
+        start: () => undefined,
+      },
+      recovery: {
+        close: () => { calls.push('recovery-close'); },
+        recoverCandidate: () => Promise.resolve(),
+        recoverProject: () => Promise.resolve(),
+      },
+    });
+
+    await assert.rejects(runtime.close(10), /cloud-lifecycle-runtime\.close-failed/u);
+    assert.deepEqual(calls, [
+      'expiry-close',
+      'recovery-close',
+      'transfer-owners',
     ]);
   });
 });

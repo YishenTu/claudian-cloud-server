@@ -233,7 +233,6 @@ async function recoverThenWrite(): Promise<void> {
   let competingWrite: 'admitted-after-settlement' | 'rejected';
   try {
     await coordinator.begin({
-      expiresAt: '2026-10-26T00:00:00.000Z',
       principalId: CLOUD_TO_LAN_MANAGER_PRINCIPAL,
       request: {
         expectedAuthorityGeneration: 4,

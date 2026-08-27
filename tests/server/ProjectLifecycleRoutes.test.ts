@@ -173,6 +173,20 @@ describe('ProjectLifecycleRoutes', () => {
     assert.deepEqual(failure.error.safeContext, {});
   });
 
+  it('sanitizes a malformed owner response as a server failure', async () => {
+    const response = await request({
+      execute: () => Promise.resolve({ direction: 'not-a-direction' }) as never,
+    }, 'getProjectAuthorityTransfer', {
+      projectId: PROJECT_ID,
+      transferId: TRANSFER_ID,
+    });
+
+    assert.equal(response.status, 500);
+    const failure = decodeCollabCloudErrorEnvelope(await response.json());
+    assert.equal(failure.error.code, 'operation-failed');
+    assert.deepEqual(failure.error.safeContext, {});
+  });
+
   it('rejects a body whose Project does not match the route', async () => {
     const response = await request({
       execute: () => Promise.resolve(status) as never,

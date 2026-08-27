@@ -661,6 +661,7 @@ interface Fixture {
   readonly coordination: MemoryCoordination;
   readonly coordinator: LanToCloudTransferCoordinator;
   readonly expire: () => void;
+  readonly expirySelections: () => number;
   readonly repository: MemoryRepository;
   readonly restart: () => LanToCloudTransferCoordinator;
   readonly signer: MemoryReceiptSigner;
@@ -670,7 +671,6 @@ interface Fixture {
 
 function beginInput(test: Fixture) {
   return {
-    expiresAt: EXPIRES_AT,
     principalId: HOST_PRINCIPAL_ID,
     request: {
       checkpointManifestSha256: test.checkpoint.manifest.manifestSha256,
@@ -696,6 +696,7 @@ function fixture(includeOfflineMember = true): Fixture {
   const staging = new MemoryStaging();
   const signer = new MemoryReceiptSigner();
   let checkpointAvailable = true;
+  let expirySelectionCount = 0;
   let now = Date.parse(CREATED_AT);
   let claimSequence = 0;
   const sourceProof: VerifiedLanToCloudSourceProof = Object.freeze({
@@ -733,6 +734,10 @@ function fixture(includeOfflineMember = true): Fixture {
       clock: () => new Date(now += 1_000),
       coordination,
       custodyReceiptIdFactory: () => 'custody-receipt',
+      expiresAtFactory: () => {
+        expirySelectionCount += 1;
+        return EXPIRES_AT;
+      },
       receiptIdFactory: () => 'redemption-receipt',
       receiptSigner: signer,
       relinquishmentTrust: trust,
@@ -753,6 +758,7 @@ function fixture(includeOfflineMember = true): Fixture {
     coordination,
     coordinator,
     expire,
+    expirySelections: () => expirySelectionCount,
     loseCheckpoint,
     repository,
     restart,
@@ -865,6 +871,16 @@ describe('LanToCloudTransferCoordinator', () => {
       name: 'LanToCloudTransferCoordinatorError',
       retryable: false,
     });
+  });
+
+  it('selects expiry only on first create and replays begin after the clock advances', async () => {
+    const test = fixture();
+    const first = await test.coordinator.begin(beginInput(test));
+    const replay = await test.coordinator.begin(beginInput(test));
+
+    assert.deepEqual(replay, first);
+    assert.equal(first.expiresAt, EXPIRES_AT);
+    assert.equal(test.expirySelections(), 1);
   });
 
   it('rotates ambiguous delivery, activates one writer, and binds offline identity exactly', async () => {
@@ -1123,7 +1139,6 @@ describe('LanToCloudTransferCoordinator', () => {
   it('authorizes source operations only for the proof-bound principal', async () => {
     const test = fixture();
     await test.coordinator.begin({
-      expiresAt: EXPIRES_AT,
       principalId: HOST_PRINCIPAL_ID,
       request: {
         checkpointManifestSha256: test.checkpoint.manifest.manifestSha256,
@@ -1146,7 +1161,6 @@ describe('LanToCloudTransferCoordinator', () => {
   it('replays begin with the transfer-pinned receipt key after active-key rotation', async () => {
     const test = fixture();
     await test.coordinator.begin({
-      expiresAt: EXPIRES_AT,
       principalId: HOST_PRINCIPAL_ID,
       request: {
         checkpointManifestSha256: test.checkpoint.manifest.manifestSha256,
@@ -1161,7 +1175,6 @@ describe('LanToCloudTransferCoordinator', () => {
     });
     test.signer.rotate();
     const replayed = await test.restart().begin({
-      expiresAt: EXPIRES_AT,
       principalId: HOST_PRINCIPAL_ID,
       request: {
         checkpointManifestSha256: test.checkpoint.manifest.manifestSha256,
@@ -1199,7 +1212,6 @@ describe('LanToCloudTransferCoordinator', () => {
   it('cancels safely before a complete checkpoint exists', async () => {
     const test = fixture();
     await test.coordinator.begin({
-      expiresAt: EXPIRES_AT,
       principalId: HOST_PRINCIPAL_ID,
       request: {
         checkpointManifestSha256: test.checkpoint.manifest.manifestSha256,
@@ -1234,7 +1246,6 @@ describe('LanToCloudTransferCoordinator', () => {
   it('cancels an incomplete checkpoint-received attempt without publication', async () => {
     const test = fixture();
     await test.coordinator.begin({
-      expiresAt: EXPIRES_AT,
       principalId: HOST_PRINCIPAL_ID,
       request: {
         checkpointManifestSha256: test.checkpoint.manifest.manifestSha256,
@@ -1480,7 +1491,6 @@ describe('LanToCloudTransferCoordinator', () => {
     const test = fixture();
     test.coordination.targetOccupied = true;
     await assertCode(test.coordinator.begin({
-      expiresAt: EXPIRES_AT,
       principalId: HOST_PRINCIPAL_ID,
       request: {
         checkpointManifestSha256: test.checkpoint.manifest.manifestSha256,
@@ -1501,7 +1511,6 @@ describe('LanToCloudTransferCoordinator', () => {
     const test = fixture();
     test.coordination.portability.tombstoned = true;
     await assertCode(test.coordinator.begin({
-      expiresAt: EXPIRES_AT,
       principalId: HOST_PRINCIPAL_ID,
       request: {
         checkpointManifestSha256: test.checkpoint.manifest.manifestSha256,

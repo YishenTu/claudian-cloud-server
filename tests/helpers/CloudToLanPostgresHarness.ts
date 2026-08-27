@@ -545,6 +545,7 @@ export function cloudToLanCoordinator(input: Readonly<{
     custodyReceiptIdFactory: () => `custody-${sha256(input.projectId).slice(0, 16)}`,
     deletionOperationIdFactory: () => `delete-${sha256(input.projectId).slice(0, 16)}`,
     environmentIdentity: 'environment-fault-test',
+    expiresAtFactory: () => CLOUD_TO_LAN_EXPIRES_AT,
     relinquishmentIntentIdFactory: () => (
       `relinquish-${sha256(input.projectId).slice(0, 16)}`
     ),
@@ -570,7 +571,6 @@ export async function beginCloudToLan(
   projectId: string,
 ): Promise<CollabAuthorityTransferStatus> {
   return coordinator.begin({
-    expiresAt: CLOUD_TO_LAN_EXPIRES_AT,
     principalId: CLOUD_TO_LAN_MANAGER_PRINCIPAL,
     request: {
       expectedAuthorityGeneration: 4,

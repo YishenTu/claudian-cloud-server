@@ -191,6 +191,7 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
         custodyReceiptIdFactory: () => 'custody-receipt-real',
         deletionOperationIdFactory: () => 'delete-transfer-real',
         environmentIdentity: 'environment-real',
+        expiresAtFactory: () => EXPIRES_AT,
         relinquishmentIntentIdFactory: () => 'relinquishment-intent-real',
         relinquishmentSigner: { sign: () => Promise.resolve(SIGNATURE) },
         repository: {
@@ -226,7 +227,6 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
       });
       try {
         const begun = await coordinator.begin({
-          expiresAt: EXPIRES_AT,
           principalId: MANAGER_PRINCIPAL,
           request: {
             expectedAuthorityGeneration: 4,

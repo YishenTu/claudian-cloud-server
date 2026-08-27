@@ -320,18 +320,34 @@ describe('application composition', { concurrency: false }, () => {
       throw new Error('application-test-listener-unavailable');
     }
     const lines: string[] = [];
+    let lifecycleStarted = false;
     const application = createApplication({
       config: config({
         httpPort: address.port,
         postgresUrl: database.runtimeUrl,
         repositoryRoot,
       }),
+      lifecycle: {
+        artifacts: {
+          download: () => Promise.reject(new Error('unused')),
+          upload: () => Promise.reject(new Error('unused')),
+        },
+        close: () => Promise.resolve(),
+        control: { execute: () => Promise.reject(new Error('unused')) },
+        reconcileAll: () => Promise.resolve(),
+        recovery: {
+          recoverCandidate: () => Promise.resolve(),
+          recoverProject: () => Promise.resolve(),
+        },
+        start: () => { lifecycleStarted = true; },
+      },
       logger: logger(lines),
     });
     try {
       await assert.rejects(application.start(), /application\.error\.startup-failed/);
       await application.close();
       assert.equal(await cloudConnectionCount(database.adminUrl), 0);
+      assert.equal(lifecycleStarted, false);
       assert.match(JSON.stringify(events(lines)), /http-listen-failed/);
     } finally {
       await application.close();

@@ -11,7 +11,6 @@ import { RetireCoordinatorError } from '../../src/project-authority/lifecycle/re
 
 const PROJECT_ID = 'project-lifecycle-control';
 const TRANSFER_ID = 'transfer-lifecycle-control';
-const EXPIRES_AT = '2026-09-27T00:00:00.000Z';
 
 function coordinator(methods: Readonly<Record<string, (...args: never[]) => unknown>>): never {
   return methods as never;
@@ -27,7 +26,6 @@ function adapter(calls: string[]) {
       getClaim: () => calls.push('cloud.getClaim'),
       reportTargetStaged: () => calls.push('cloud.reportTargetStaged'),
     }),
-    expiresAtFactory: () => EXPIRES_AT,
     lanToCloud: coordinator({
       acknowledgeClaimBatch: () => calls.push('lan.acknowledgeClaimBatch'),
       begin: () => calls.push('lan.begin'),
@@ -131,11 +129,10 @@ describe('CloudLifecycleControlAdapter', () => {
     ]);
   });
 
-  it('passes the trusted principal and configured expiry to begin', async () => {
+  it('passes the trusted principal to the Project-authority begin owner', async () => {
     let observed: unknown;
     const control = new CloudLifecycleControlAdapter({
       cloudToLan: coordinator({}),
-      expiresAtFactory: () => EXPIRES_AT,
       lanToCloud: coordinator({
         begin: (input: never) => {
           observed = input;
@@ -148,7 +145,6 @@ describe('CloudLifecycleControlAdapter', () => {
     const request = { projectId: PROJECT_ID, transferId: TRANSFER_ID };
     await control.execute('beginLanToCloudTransfer', context(request));
     assert.deepEqual(observed, {
-      expiresAt: EXPIRES_AT,
       principalId: 'member-manager',
       request,
     });
@@ -157,7 +153,6 @@ describe('CloudLifecycleControlAdapter', () => {
   it('maps owner failures to safe package errors', async () => {
     const control = new CloudLifecycleControlAdapter({
       cloudToLan: coordinator({}),
-      expiresAtFactory: () => EXPIRES_AT,
       lanToCloud: coordinator({}),
       retire: coordinator({}),
       transfer: coordinator({
@@ -183,7 +178,6 @@ describe('CloudLifecycleControlAdapter', () => {
     let invoked = false;
     const control = new CloudLifecycleControlAdapter({
       cloudToLan: coordinator({}),
-      expiresAtFactory: () => EXPIRES_AT,
       lanToCloud: coordinator({}),
       retire: coordinator({}),
       transfer: coordinator({
@@ -207,7 +201,6 @@ describe('CloudLifecycleControlAdapter', () => {
   it('maps retirement expiry to the retirement terminal error', async () => {
     const control = new CloudLifecycleControlAdapter({
       cloudToLan: coordinator({}),
-      expiresAtFactory: () => EXPIRES_AT,
       lanToCloud: coordinator({}),
       retire: coordinator({
         acknowledge: () => Promise.reject(new RetireCoordinatorError('expired')),

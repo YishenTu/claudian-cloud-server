@@ -68,7 +68,6 @@ type AuthorityTransferControl = Pick<
 
 export interface CloudLifecycleControlAdapterOptions {
   readonly cloudToLan: CloudToLanControl;
-  readonly expiresAtFactory: () => string;
   readonly lanToCloud: LanToCloudControl;
   readonly retire: RetireControl;
   readonly transfer: AuthorityTransferControl;
@@ -132,24 +131,14 @@ function requestFailure(
   }
 }
 
-function assertExpiresAt(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.valueOf()) || parsed.toISOString() !== value) {
-    throw new TypeError('cloud-lifecycle-control.expires-at-invalid');
-  }
-  return value;
-}
-
 export class CloudLifecycleControlAdapter implements CloudLifecycleControl {
   readonly #cloudToLan: CloudToLanControl;
-  readonly #expiresAtFactory: () => string;
   readonly #lanToCloud: LanToCloudControl;
   readonly #retire: RetireControl;
   readonly #transfer: AuthorityTransferControl;
 
   constructor(options: CloudLifecycleControlAdapterOptions) {
     this.#cloudToLan = options.cloudToLan;
-    this.#expiresAtFactory = options.expiresAtFactory;
     this.#lanToCloud = options.lanToCloud;
     this.#retire = options.retire;
     this.#transfer = options.transfer;
@@ -180,7 +169,6 @@ export class CloudLifecycleControlAdapter implements CloudLifecycleControl {
     switch (operation) {
       case 'beginLanToCloudTransfer':
         return this.#lanToCloud.begin({
-          expiresAt: assertExpiresAt(this.#expiresAtFactory()),
           principalId,
           request: context.request as BeginLanToCloudTransferRequest,
         });
@@ -206,7 +194,6 @@ export class CloudLifecycleControlAdapter implements CloudLifecycleControl {
         });
       case 'beginCloudToLanTransfer':
         return this.#cloudToLan.begin({
-          expiresAt: assertExpiresAt(this.#expiresAtFactory()),
           principalId,
           request: context.request as BeginCloudToLanTransferRequest,
         });

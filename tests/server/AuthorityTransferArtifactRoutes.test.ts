@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { Readable } from 'node:stream';
 import { afterEach, describe, it } from 'node:test';
 
@@ -25,15 +25,19 @@ afterEach(async () => {
   servers.clear();
 });
 
-async function start(authority: AuthorityTransferArtifactAuthority) {
+async function start(
+  authority: AuthorityTransferArtifactAuthority,
+  operationTimeoutMs = 5_000,
+  limits = {
+    'checkpoint.json': 32,
+    'coordination.ndjson': 64,
+    'repository.bundle': 128,
+  },
+) {
   const routes = new AuthorityTransferArtifactRoutes({
     authority,
-    limits: {
-      'checkpoint.json': 32,
-      'coordination.ndjson': 64,
-      'repository.bundle': 128,
-    },
-    operationTimeoutMs: 5_000,
+    limits,
+    operationTimeoutMs,
     principalAdapter: new DevelopmentPrincipalAdapter({
       profile: 'loopback-development',
     }),
@@ -125,6 +129,47 @@ describe('AuthorityTransferArtifactRoutes', () => {
     );
   });
 
+  it('rejects a chunked upload that crosses the streaming limit', async () => {
+    let observedFailure: unknown;
+    let streamedBytes = 0;
+    const baseUrl = await start({
+      download: () => Promise.reject(new Error('unused')),
+      upload: async input => {
+        try {
+          for await (const chunk of input.body) {
+            streamedBytes += Buffer.byteLength(chunk as Uint8Array);
+          }
+        } catch (error: unknown) {
+          observedFailure = error;
+          throw error;
+        }
+      },
+    });
+    const route = collabCloudAuthorityTransferArtifactRoute(
+      PROJECT_ID,
+      TRANSFER_ID,
+      'upload',
+      'checkpoint.json',
+    );
+    const response = await fetch(`${baseUrl}${route.target}`, {
+      body: Readable.from(['x'.repeat(16), 'x'.repeat(17)]),
+      duplex: 'half',
+      headers: {
+        'content-type': 'application/octet-stream',
+        'x-claudian-development-actor': 'member-manager',
+      },
+      method: route.method,
+    } as unknown as RequestInit & { readonly duplex: 'half' });
+
+    assert.equal(response.status, 413);
+    assert.ok(observedFailure instanceof Error);
+    assert.equal(streamedBytes <= 32, true);
+    assert.equal(
+      decodeCollabCloudErrorEnvelope(await response.json()).error.code,
+      'quota-exceeded',
+    );
+  });
+
   it('streams an exact-length download without buffering the artifact', async () => {
     const artifact = Buffer.from('bundle-content', 'utf8');
     const baseUrl = await start({
@@ -146,6 +191,142 @@ describe('AuthorityTransferArtifactRoutes', () => {
     assert.equal(response.status, 200);
     assert.equal(response.headers.get('content-length'), String(artifact.byteLength));
     assert.deepEqual(Buffer.from(await response.arrayBuffer()), artifact);
+  });
+
+  it('rejects a download whose declared size exceeds the artifact limit', async () => {
+    const baseUrl = await start({
+      download: () => Promise.resolve({
+        body: Readable.from(['x']),
+        byteCount: 129,
+      }),
+      upload: () => Promise.reject(new Error('unused')),
+    });
+    const route = collabCloudAuthorityTransferArtifactRoute(
+      PROJECT_ID,
+      TRANSFER_ID,
+      'download',
+      'repository.bundle',
+    );
+    const response = await fetch(`${baseUrl}${route.target}`, {
+      headers: { 'x-claudian-development-actor': 'member-manager' },
+    });
+
+    assert.equal(response.status, 500);
+    assert.equal(
+      decodeCollabCloudErrorEnvelope(await response.json()).error.code,
+      'operation-failed',
+    );
+  });
+
+  it('terminates a download whose stream is shorter than its declared size', async () => {
+    const baseUrl = await start({
+      download: () => Promise.resolve({
+        body: Readable.from(['short']),
+        byteCount: 10,
+      }),
+      upload: () => Promise.reject(new Error('unused')),
+    });
+    const route = collabCloudAuthorityTransferArtifactRoute(
+      PROJECT_ID,
+      TRANSFER_ID,
+      'download',
+      'repository.bundle',
+    );
+    const response = await fetch(`${baseUrl}${route.target}`, {
+      headers: { 'x-claudian-development-actor': 'member-manager' },
+    });
+
+    assert.equal(response.status, 200);
+    await assert.rejects(response.arrayBuffer());
+  });
+
+  it('owns the deadline while a download owner is uncooperative', async () => {
+    let signal: AbortSignal | undefined;
+    const baseUrl = await start({
+      download: input => {
+        signal = input.signal;
+        return new Promise(() => undefined);
+      },
+      upload: () => Promise.reject(new Error('unused')),
+    }, 20);
+    const route = collabCloudAuthorityTransferArtifactRoute(
+      PROJECT_ID,
+      TRANSFER_ID,
+      'download',
+      'repository.bundle',
+    );
+    const response = await fetch(`${baseUrl}${route.target}`, {
+      headers: { 'x-claudian-development-actor': 'member-manager' },
+    });
+
+    assert.equal(response.status, 408);
+    assert.equal(signal?.aborted, true);
+    assert.equal(
+      decodeCollabCloudErrorEnvelope(await response.json()).error.code,
+      'operation-timeout',
+    );
+  });
+
+  it('propagates download backpressure and aborts the owner on disconnect', async () => {
+    const chunkBytes = 16 * 1_024;
+    const totalChunks = 8_192;
+    const byteCount = chunkBytes * totalChunks;
+    let emittedChunks = 0;
+    let abort!: () => void;
+    const aborted = new Promise<void>(resolve => {
+      abort = resolve;
+    });
+    const body = new Readable({
+      read() {
+        if (emittedChunks === totalChunks) {
+          this.push(null);
+          return;
+        }
+        emittedChunks += 1;
+        this.push(Buffer.alloc(chunkBytes));
+      },
+    });
+    const bodyClosed = new Promise<void>(resolve => body.once('close', resolve));
+    const baseUrl = await start({
+      download: input => {
+        input.signal.addEventListener('abort', abort, { once: true });
+        return Promise.resolve({ body, byteCount });
+      },
+      upload: () => Promise.reject(new Error('unused')),
+    }, 5_000, {
+      'checkpoint.json': 32,
+      'coordination.ndjson': 64,
+      'repository.bundle': byteCount,
+    });
+    const route = collabCloudAuthorityTransferArtifactRoute(
+      PROJECT_ID,
+      TRANSFER_ID,
+      'download',
+      'repository.bundle',
+    );
+
+    await new Promise<void>((resolve, reject) => {
+      const request = httpRequest(`${baseUrl}${route.target}`, {
+        headers: { 'x-claudian-development-actor': 'member-manager' },
+      }, response => {
+        response.pause();
+        setTimeout(() => {
+          try {
+            assert.equal(emittedChunks < totalChunks, true);
+            response.destroy();
+            resolve();
+          } catch (error: unknown) {
+            reject(error instanceof Error
+              ? error
+              : new Error('artifact-backpressure-assertion-failed'));
+          }
+        }, 20);
+      });
+      request.once('error', reject);
+      request.end();
+    });
+    await Promise.all([aborted, bodyClosed]);
+    assert.equal(body.destroyed, true);
   });
 
   it('fails closed on a non-loopback/absent trusted principal assertion', async () => {

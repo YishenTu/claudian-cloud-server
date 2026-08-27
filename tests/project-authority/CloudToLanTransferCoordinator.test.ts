@@ -446,6 +446,7 @@ class Harness {
   captureFailures = 0;
   cleanupFailures = 0;
   discardFailures = 0;
+  expirySelections = 0;
   relinquishCalls = 0;
   relinquishFailures = 0;
   repositoryAvailable = true;
@@ -558,6 +559,10 @@ class Harness {
       custodyReceiptIdFactory: () => 'custody-receipt',
       deletionOperationIdFactory: () => 'delete-transfer',
       environmentIdentity: 'environment-test',
+      expiresAtFactory: () => {
+        this.expirySelections += 1;
+        return EXPIRES_AT;
+      },
       relinquishmentIntentIdFactory: () => 'relinquishment-intent',
       relinquishmentSigner: {
         sign: async () => {
@@ -595,7 +600,6 @@ async function begin(
   }> = {},
 ): Promise<CollabAuthorityTransferStatus> {
   return coordinator.begin({
-    expiresAt: EXPIRES_AT,
     principalId: input.principalId ?? MANAGER_PRINCIPAL,
     request: {
       expectedAuthorityGeneration: 4,
@@ -696,6 +700,17 @@ function activationRequest(
 }
 
 describe('CloudToLanTransferCoordinator', () => {
+  it('selects expiry only on first create and replays begin after the clock advances', async () => {
+    const harness = new Harness();
+    const coordinator = harness.coordinator();
+    const first = await begin(coordinator);
+    const replay = await begin(coordinator);
+
+    assert.deepEqual(replay, first);
+    assert.equal(first.expiresAt, EXPIRES_AT);
+    assert.equal(harness.expirySelections, 1);
+  });
+
   it('moves one authority forward, retains exact claims, and creates deletion handoff', async () => {
     const harness = new Harness();
     const coordinator = harness.coordinator();

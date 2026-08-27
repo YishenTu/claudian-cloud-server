@@ -6,6 +6,6 @@
 - Startup validates runtime safety constraints before accepting traffic. Shutdown stops new admission before closing dependencies used by admitted work.
 - Readiness remains closed until nonterminal recovery settles and every cataloged active repository passes exact Project-scoped Git integrity verification.
 - Authority-transfer and retirement capabilities enter the route list as one complete lifecycle runtime. Composition never advertises either capability for a partial control, artifact, recovery, expiry, or close path.
-- A lifecycle runtime reconciles recovery and due terminal responders before readiness, starts periodic expiry only after reconciliation, and closes expiry and recovery admission before its declared owner disposal order.
+- A lifecycle runtime reconciles recovery and due terminal responders before readiness, starts periodic expiry only after successful HTTP admission and the readiness transition, and closes expiry and recovery admission before its declared owner disposal order. Every close stage is bounded by the shared shutdown budget so one hung owner cannot prevent later owners from receiving close.
 - Environment restore policy lives under `src/environment-maintenance/`. Composition may construct its coordinator, invoke startup recovery and readiness, and close it, but it must not interpret restore phases or register restore with Project recovery.
 - Composition tests verify construction failure cleanup, startup ordering, readiness transitions, bounded shutdown, and repeated close behavior.

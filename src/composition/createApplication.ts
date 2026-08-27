@@ -477,8 +477,6 @@ class CloudApplication implements Application {
       await this.#bootstrapExpiryReconciler.reconcileAll();
       phase = 'repository';
       await this.#activeRepositoryIntegrity.verifyAll();
-      this.#bootstrapExpiryReconciler.start();
-      this.#lifecycle?.start();
       this.#assertStarting();
 
       phase = 'http';
@@ -487,6 +485,8 @@ class CloudApplication implements Application {
 
       this.#address = address;
       this.#state = 'ready';
+      this.#bootstrapExpiryReconciler.start();
+      this.#lifecycle?.start();
       this.#logger.info('server.listening', { port: address.port });
       return address;
     } catch (error: unknown) {
@@ -547,7 +547,9 @@ class CloudApplication implements Application {
 
     const httpClose = this.#httpServer.close(Math.max(1, deadline - Date.now()));
     this.#recoveryCoordinator.close();
-    const lifecycleClose = this.#lifecycle?.close() ?? Promise.resolve();
+    const lifecycleClose = this.#lifecycle?.close(
+      Math.max(1, deadline - Date.now()),
+    ) ?? Promise.resolve();
     const eventAdmissionClose = this.#projectEventAdmission.close();
     const eventClose = this.#projectEventRoutes.close();
     this.#projectEventWakeup.close();

@@ -11,7 +11,7 @@ export interface CloudLifecycleRuntime {
   readonly artifacts: AuthorityTransferArtifactAuthority;
   readonly control: CloudLifecycleControl;
   readonly recovery: ProjectLifecycleRecoveryPort;
-  close(): Promise<void>;
+  close(timeoutMs: number): Promise<void>;
   reconcileAll(): Promise<void>;
   start(): void;
 }
@@ -57,24 +57,43 @@ export class ComposedCloudLifecycleRuntime implements CloudLifecycleRuntime {
     this.#expiry.start();
   }
 
-  close(): Promise<void> {
-    this.#closePromise ??= this.#close();
+  close(timeoutMs: number): Promise<void> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+      return Promise.reject(new TypeError('cloud-lifecycle-runtime.timeout-invalid'));
+    }
+    this.#closePromise ??= this.#close(timeoutMs);
     return this.#closePromise;
   }
 
-  async #close(): Promise<void> {
+  async #close(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
     let failed = false;
     for (const owner of [
       this.#expiry,
       this.#recoveryOwner,
       ...this.#closeOrder,
     ]) {
-      try {
-        await owner.close();
-      } catch {
-        failed = true;
-      }
+      if (!await closeOwnerBefore(owner, deadline)) failed = true;
     }
     if (failed) throw new Error('cloud-lifecycle-runtime.close-failed');
+  }
+}
+
+async function closeOwnerBefore(
+  owner: CloudLifecycleCloseOwner,
+  deadline: number,
+): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const operation = Promise.resolve().then(() => owner.close());
+  try {
+    return await Promise.race([
+      operation.then(() => true, () => false),
+      new Promise<false>(resolve => {
+        timer = setTimeout(resolve, Math.max(0, deadline - Date.now()), false);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
