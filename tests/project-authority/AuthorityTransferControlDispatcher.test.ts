@@ -145,4 +145,32 @@ describe('AuthorityTransferControlDispatcher', () => {
       'cloud.cancel',
     ]);
   });
+
+  it('resolves cancellation direction with the exact strict status request', async () => {
+    let cancelled = false;
+    const dispatcher = new AuthorityTransferControlDispatcher({
+      cloudToLan: owner({
+        getStatus: () => Promise.reject(
+          new CloudToLanTransferCoordinatorError('recovery-required'),
+        ),
+      }),
+      lanToCloud: owner({
+        cancel: () => {
+          cancelled = true;
+          return Promise.resolve({ direction: 'lan-to-cloud' });
+        },
+        getStatus: (input: { readonly request: unknown }) => Promise.resolve().then(() => {
+          assert.deepEqual(input.request, getRequest);
+          return { direction: 'lan-to-cloud' };
+        }),
+      }),
+    });
+
+    await dispatcher.cancel({
+      principalId: 'principal-source-host',
+      request: cancelRequest as never,
+      signal: new AbortController().signal,
+    });
+    assert.equal(cancelled, true);
+  });
 });

@@ -100,7 +100,13 @@ export class AuthorityTransferControlDispatcher {
 
   async cancel(input: CancelAuthorityTransferInput): Promise<CollabAuthorityTransferStatus> {
     if (requestAborted(input.signal)) return fail('aborted');
-    const authorized = await this.#resolveAuthorized(input);
+    const authorized = await this.#resolveAuthorized({
+      principalId: input.principalId,
+      request: {
+        projectId: input.request.projectId,
+        transferId: input.request.transferId,
+      },
+    });
     if (requestAborted(input.signal)) return fail('aborted');
     const owner = authorized.direction === 'cloud-to-lan'
       ? this.#cloudToLan
