@@ -54,6 +54,9 @@ import type {
   ProjectLifecycleRecoveryReservation,
   RecoverProjectLifecycleInput,
 } from '../ProjectLifecycleRecoveryDispatcher.js';
+import {
+  defaultAuthorityTransferExpiresAt,
+} from '../AuthorityTransferExpiry.js';
 
 export type CloudToLanTransferCoordinatorErrorCode =
   | 'authorization-denied'
@@ -201,7 +204,6 @@ export interface CloudToLanTransferCoordinatorOptions {
 }
 
 export interface BeginCloudToLanTransferInput {
-  readonly expiresAt: CollabIsoTimestamp;
   readonly principalId: string;
   readonly request: BeginCloudToLanTransferRequest;
 }
@@ -290,12 +292,6 @@ function sha256(value: string): string {
 function exactDigest(left: string, right: string): boolean {
   if (!SHA256_PATTERN.test(left) || !SHA256_PATTERN.test(right)) return false;
   return timingSafeEqual(Buffer.from(left, 'hex'), Buffer.from(right, 'hex'));
-}
-
-function canonicalTimestamp(value: unknown): value is CollabIsoTimestamp {
-  if (typeof value !== 'string') return false;
-  const parsed = new Date(value);
-  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
 }
 
 function timestamp(clock: () => Date, after?: CollabIsoTimestamp): CollabIsoTimestamp {
@@ -556,8 +552,7 @@ implements ProjectLifecycleRecoveryOwner {
   begin(input: BeginCloudToLanTransferInput): Promise<CollabAuthorityTransferStatus> {
     const request = decodeRequest('beginCloudToLanTransfer', input.request);
     return this.#run(request.projectId, async lease => {
-      if (!PRINCIPAL_PATTERN.test(input.principalId)
-        || !canonicalTimestamp(input.expiresAt)) return fail('state-conflict');
+      if (!PRINCIPAL_PATTERN.test(input.principalId)) return fail('state-conflict');
       const requestFingerprint = sha256(JSON.stringify(request));
       const transferId = await lease.withProjectScope(async scope => {
         const actor = await this.#activeActor(scope, input.principalId);
@@ -582,12 +577,11 @@ implements ProjectLifecycleRecoveryOwner {
           if (
             recovery?.targetHostMemberId !== request.targetHostMemberId
             || recovery.targetUrl !== request.targetUrl
-            || recovery.expiresAt !== input.expiresAt
           ) return fail('state-conflict');
           return operationId;
         }
         const createdAt = timestamp(this.#clock);
-        if (Date.parse(input.expiresAt) <= Date.parse(createdAt)) return fail('expired');
+        const expiresAt = defaultAuthorityTransferExpiresAt(createdAt);
         const project = await scope.getProject();
         const target = await scope.findMembership(request.targetHostMemberId);
         const placement = await scope.getRepositoryPlacement();
@@ -608,11 +602,11 @@ implements ProjectLifecycleRecoveryOwner {
           phase: 'collecting-readiness',
           projectId: request.projectId,
           requestFingerprint,
-          scheduledAt: input.expiresAt,
+          scheduledAt: expiresAt,
         });
         await scope.portability.putAuthorityTransferRecovery({
           createdAt,
-          expiresAt: input.expiresAt,
+          expiresAt,
           sourceAuthority: Object.freeze({
             generation: request.expectedAuthorityGeneration,
             kind: 'cloud',

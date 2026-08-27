@@ -21,8 +21,11 @@ import {
 } from 'node:test';
 
 import { Client } from 'pg';
+import { decodeCollabCloudCapabilityDocument } from '@claudian-collab/protocol';
 
 import { createApplication } from '../../../src/composition/createApplication.js';
+import { ComposedCloudLifecycleRuntime } from '../../../src/composition/CloudLifecycleRuntime.js';
+import { TerminalResponderExpiryReconciler } from '../../../src/composition/TerminalResponderExpiryReconciler.js';
 import type { ServerConfig } from '../../../src/config/ServerConfig.js';
 import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
@@ -317,18 +320,34 @@ describe('application composition', { concurrency: false }, () => {
       throw new Error('application-test-listener-unavailable');
     }
     const lines: string[] = [];
+    let lifecycleStarted = false;
     const application = createApplication({
       config: config({
         httpPort: address.port,
         postgresUrl: database.runtimeUrl,
         repositoryRoot,
       }),
+      lifecycle: {
+        artifacts: {
+          download: () => Promise.reject(new Error('unused')),
+          upload: () => Promise.reject(new Error('unused')),
+        },
+        close: () => Promise.resolve(),
+        control: { execute: () => Promise.reject(new Error('unused')) },
+        reconcileAll: () => Promise.resolve(),
+        recovery: {
+          recoverCandidate: () => Promise.resolve(),
+          recoverProject: () => Promise.resolve(),
+        },
+        start: () => { lifecycleStarted = true; },
+      },
       logger: logger(lines),
     });
     try {
       await assert.rejects(application.start(), /application\.error\.startup-failed/);
       await application.close();
       assert.equal(await cloudConnectionCount(database.adminUrl), 0);
+      assert.equal(lifecycleStarted, false);
       assert.match(JSON.stringify(events(lines)), /http-listen-failed/);
     } finally {
       await application.close();
@@ -771,5 +790,113 @@ while :; do sleep 1; done`,
     } finally {
       await application.close();
     }
+  });
+
+  it('advertises lifecycle support only after its complete runtime is ready', async () => {
+    const lifecycle: string[] = [];
+    const application = createApplication({
+      config: config({
+        postgresUrl: database.runtimeUrl,
+        repositoryRoot,
+      }),
+      lifecycle: {
+        artifacts: {
+          download: () => Promise.reject(new Error('unused')),
+          upload: () => Promise.reject(new Error('unused')),
+        },
+        close: () => {
+          lifecycle.push('close');
+          return Promise.resolve();
+        },
+        control: {
+          execute: () => Promise.reject(new Error('unused')),
+        },
+        reconcileAll: () => {
+          lifecycle.push('reconcile');
+          return Promise.resolve();
+        },
+        recovery: {
+          recoverCandidate: () => Promise.resolve(),
+          recoverProject: () => Promise.resolve(),
+        },
+        start: () => lifecycle.push('start'),
+      },
+      logger: logger([]),
+    });
+    try {
+      const address = await application.start();
+      assert.deepEqual(lifecycle, ['reconcile', 'start']);
+      const response = await fetch(
+        `http://${address.host}:${String(address.port)}/collab/capabilities`,
+      );
+      assert.equal(response.status, 200);
+      const capabilities = decodeCollabCloudCapabilityDocument(
+        await response.json(),
+      ).capabilities;
+      assert.equal(capabilities.includes('authority-transfer'), true);
+      assert.equal(capabilities.includes('project-retirement'), true);
+    } finally {
+      await application.close();
+    }
+    assert.deepEqual(lifecycle, [
+      'reconcile',
+      'start',
+      'close',
+    ]);
+  });
+
+  it('does not close lifecycle owners beneath foreground startup reconciliation', async () => {
+    let entered!: () => void;
+    const reconciling = new Promise<void>(resolve => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    const closed: string[] = [];
+    const expiry = new TerminalResponderExpiryReconciler({
+      catalog: {
+        listTerminalResponders: async () => {
+          entered();
+          await blocked;
+          return { nextCursor: undefined, responders: [] };
+        },
+      },
+      expiry: { expire: () => Promise.resolve('replayed') },
+      intervalMs: 60_000,
+    });
+    const lifecycle = new ComposedCloudLifecycleRuntime({
+      artifacts: {
+        download: () => Promise.reject(new Error('unused')),
+        upload: () => Promise.reject(new Error('unused')),
+      },
+      closeOrder: [{ close: () => { closed.push('transfer-owners'); } }],
+      control: { execute: () => Promise.reject(new Error('unused')) },
+      expiry,
+      recovery: {
+        close: () => { closed.push('recovery'); },
+        recoverCandidate: () => Promise.resolve(),
+        recoverProject: () => Promise.resolve(),
+      },
+    });
+    const application = createApplication({
+      config: config({
+        postgresUrl: database.runtimeUrl,
+        repositoryRoot,
+      }),
+      lifecycle,
+      logger: logger([]),
+    });
+
+    const starting = application.start();
+    await reconciling;
+    const closing = application.close();
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(closed, []);
+    release();
+    await assert.rejects(starting, /application\.error\.startup-failed/u);
+    await closing;
+    assert.deepEqual(closed, ['recovery', 'transfer-owners']);
   });
 });

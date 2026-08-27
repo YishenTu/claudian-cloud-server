@@ -59,6 +59,9 @@ import type {
   ProjectLifecycleRecoveryOutcome,
   RecoverProjectLifecycleInput,
 } from '../ProjectLifecycleRecoveryDispatcher.js';
+import {
+  defaultAuthorityTransferExpiresAt,
+} from '../AuthorityTransferExpiry.js';
 
 export type LanToCloudTransferCoordinatorErrorCode =
   | 'authorization-denied'
@@ -170,7 +173,6 @@ export interface LanToCloudTransferCoordinatorOptions {
 }
 
 export interface BeginLanToCloudTransferInput {
-  readonly expiresAt: CollabIsoTimestamp;
   readonly principalId: string;
   readonly request: BeginLanToCloudTransferRequest;
 }
@@ -255,12 +257,6 @@ function sha256(value: string | Uint8Array): string {
 function exactDigest(left: string, right: string): boolean {
   if (!SHA256_PATTERN.test(left) || !SHA256_PATTERN.test(right)) return false;
   return timingSafeEqual(Buffer.from(left, 'hex'), Buffer.from(right, 'hex'));
-}
-
-function canonicalTimestamp(value: unknown): value is CollabIsoTimestamp {
-  if (typeof value !== 'string') return false;
-  const parsed = new Date(value);
-  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
 }
 
 function timestamp(clock: () => Date, after?: CollabIsoTimestamp): CollabIsoTimestamp {
@@ -532,7 +528,6 @@ implements ProjectLifecycleRecoveryOwner {
       if (!PRINCIPAL_PATTERN.test(input.principalId)) {
         return fail('authorization-denied');
       }
-      if (!canonicalTimestamp(input.expiresAt)) return fail('state-conflict');
       const verified = await this.#relinquishmentTrust.verifySourceProof({
         principalId: input.principalId,
         proof: request.sourceProof,
@@ -555,15 +550,13 @@ implements ProjectLifecycleRecoveryOwner {
         schemaVersion: 1 as const,
       });
       const requestFingerprint = sha256(JSON.stringify(request));
-      const prepareAttempt = await lease.withProjectScope(async scope => {
+      const preparation = await lease.withProjectScope(async scope => {
         const existing = await scope.portability.getLifecycleJournal(
           request.transferId,
         );
         if (existing === undefined) {
           const createdAt = timestamp(this.#clock);
-          if (Date.parse(input.expiresAt) <= Date.parse(createdAt)) {
-            return fail('expired');
-          }
+          const expiresAt = defaultAuthorityTransferExpiresAt(createdAt);
           const [project, tombstone] = await Promise.all([
             scope.getProject(),
             scope.portability.getProjectTombstone(),
@@ -582,11 +575,11 @@ implements ProjectLifecycleRecoveryOwner {
             phase: 'source-quiesced',
             projectId: request.projectId,
             requestFingerprint,
-            scheduledAt: input.expiresAt,
+            scheduledAt: expiresAt,
           });
           await scope.portability.putAuthorityTransferRecovery({
             createdAt,
-            expiresAt: input.expiresAt,
+            expiresAt,
             sourceAuthority: Object.freeze({
               generation: request.expectedSourceAuthorityGeneration,
               kind: 'lan',
@@ -606,7 +599,7 @@ implements ProjectLifecycleRecoveryOwner {
             transferId: request.transferId,
             updatedAt: timestamp(this.#clock, createdAt),
           });
-          return true;
+          return Object.freeze({ expiresAt, prepareAttempt: true });
         }
         if (
           existing.kind !== 'authority-transfer'
@@ -626,20 +619,26 @@ implements ProjectLifecycleRecoveryOwner {
           || storedEvidence.checkpointManifestSha256
             !== evidence.checkpointManifestSha256
           || storedEvidence.proof !== evidence.proof
-          || recovery?.expiresAt !== input.expiresAt
         ) return fail('state-conflict');
+        if (recovery === undefined) return fail('recovery-required');
         if (existing.state === 'completed' || existing.state === 'cancelled') {
-          return false;
+          return Object.freeze({
+            expiresAt: recovery.expiresAt,
+            prepareAttempt: false,
+          });
         }
         const observedAt = timestamp(this.#clock);
-        if (Date.parse(input.expiresAt) <= Date.parse(observedAt)) {
+        if (Date.parse(recovery.expiresAt) <= Date.parse(observedAt)) {
           return fail('expired');
         }
-        return existing.phase === 'source-quiesced';
+        return Object.freeze({
+          expiresAt: recovery.expiresAt,
+          prepareAttempt: existing.phase === 'source-quiesced',
+        });
       });
-      if (prepareAttempt) {
+      if (preparation.prepareAttempt) {
         await this.#staging.prepareAttempt({
-          expiresAt: input.expiresAt,
+          expiresAt: preparation.expiresAt,
           operationId: request.transferId,
           projectId: request.projectId,
         });

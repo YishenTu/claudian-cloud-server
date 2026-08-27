@@ -311,7 +311,7 @@ export function cloudToLanCoordinator(input: Readonly<{
   readonly projectId: string;
   readonly store: PostgresCoordination;
 }>): CloudToLanTransferCoordinator {
-  let tick = Date.parse(CLOUD_TO_LAN_CREATED_AT);
+  let tick = Date.parse(CLOUD_TO_LAN_CREATED_AT) - 1_000;
   const coordination = input.fault === undefined
     ? input.store
     : new FaultInjectingCoordination(input.store, input.fault);
@@ -570,7 +570,6 @@ export async function beginCloudToLan(
   projectId: string,
 ): Promise<CollabAuthorityTransferStatus> {
   return coordinator.begin({
-    expiresAt: CLOUD_TO_LAN_EXPIRES_AT,
     principalId: CLOUD_TO_LAN_MANAGER_PRINCIPAL,
     request: {
       expectedAuthorityGeneration: 4,

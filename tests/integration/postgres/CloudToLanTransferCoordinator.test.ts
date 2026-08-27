@@ -175,7 +175,7 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
       await seed(database);
       const store = coordination(database);
       const claims = new Map<string, string>();
-      let tick = Date.parse(T0);
+      let tick = Date.parse(T0) - 1_000;
       const coordinator = new CloudToLanTransferCoordinator({
         checkpoint: {
           capture: input => Promise.resolve(Object.freeze({
@@ -226,7 +226,6 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
       });
       try {
         const begun = await coordinator.begin({
-          expiresAt: EXPIRES_AT,
           principalId: MANAGER_PRINCIPAL,
           request: {
             expectedAuthorityGeneration: 4,

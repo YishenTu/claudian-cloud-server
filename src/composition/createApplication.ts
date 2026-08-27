@@ -2,6 +2,7 @@ import {
   COLLAB_CHECKPOINT_ARTIFACT_LIMITS,
   COLLAB_CLOUD_BINDING_LIMITS,
   COLLAB_LIMITS,
+  type CollabCloudCapability,
 } from '@claudian-collab/protocol';
 
 import type { ServerConfig } from '../config/ServerConfig.js';
@@ -39,9 +40,11 @@ import { CloudCapabilitiesRoute } from '../server/CloudCapabilitiesRoute.js';
 import { DevelopmentBootstrapRoutes } from '../server/DevelopmentBootstrapRoutes.js';
 import { ProjectSnapshotRoutes } from '../server/control/ProjectSnapshotRoutes.js';
 import { ProjectCollaborationRoutes } from '../server/control/ProjectCollaborationRoutes.js';
+import { ProjectLifecycleRoutes } from '../server/control/ProjectLifecycleRoutes.js';
 import { ProjectEventRoutes } from '../server/events/ProjectEventRoutes.js';
 import { GitUploadPackRoutes } from '../server/git/GitUploadPackRoutes.js';
 import { GitReceivePackRoutes } from '../server/git/GitReceivePackRoutes.js';
+import { AuthorityTransferArtifactRoutes } from '../server/transfer/AuthorityTransferArtifactRoutes.js';
 import {
   HttpServer,
   type HttpServerAddress,
@@ -50,6 +53,7 @@ import {
   AuthorityVolumePairError,
   AuthorityVolumePairVerifier,
 } from './AuthorityVolumePairVerifier.js';
+import type { CloudLifecycleRuntime } from './CloudLifecycleRuntime.js';
 
 export type ApplicationErrorCode =
   | 'closed'
@@ -73,6 +77,7 @@ export interface Application {
 
 export interface CreateApplicationOptions {
   readonly config: ServerConfig;
+  readonly lifecycle?: CloudLifecycleRuntime;
   readonly logger: SafeLogger;
 }
 
@@ -149,6 +154,7 @@ class CloudApplication implements Application {
   readonly #bootstrapExpiryReconciler: DevelopmentBootstrapExpiryReconciler;
   readonly #httpServer: HttpServer;
   readonly #logger: SafeLogger;
+  readonly #lifecycle: CloudLifecycleRuntime | undefined;
   readonly #projectEventRoutes: ProjectEventRoutes;
   readonly #projectEventAdmission: ProjectEventAdmission;
   readonly #projectEventWakeup: ProjectEventWakeup;
@@ -168,6 +174,7 @@ class CloudApplication implements Application {
 
   constructor(options: CreateApplicationOptions) {
     this.#config = options.config;
+    this.#lifecycle = options.lifecycle;
     this.#logger = options.logger;
     this.#resourceAdmission = new ResourceAdmission(options.config.gitAdmission);
     this.#projectEventWakeup = new ProjectEventWakeup();
@@ -271,6 +278,9 @@ class CloudApplication implements Application {
       activation: this.#activationCoordinator,
       catalog: this.#coordination,
       isolation: this.#coordination,
+      ...(options.lifecycle === undefined
+        ? {}
+        : { lifecycle: options.lifecycle.recovery }),
     });
     this.#projectRequestAuthority = new ProjectRequestAuthority({
       coordination: this.#coordination,
@@ -301,8 +311,7 @@ class CloudApplication implements Application {
       settlement: this.#activationCoordinator,
       uploadGate: developmentBootstrapUploadGate,
     });
-    const capabilitiesRoute = new CloudCapabilitiesRoute({
-      enabledCapabilities: new Set([
+    const enabledCapabilities = new Set<CollabCloudCapability>([
         'development-bootstrap',
         'accept',
         'git-receive-pack-personal-ref',
@@ -311,7 +320,13 @@ class CloudApplication implements Application {
         'project-snapshot',
         'requests',
         'tickets',
-      ]),
+      ] as const);
+    if (options.lifecycle !== undefined) {
+      enabledCapabilities.add('authority-transfer');
+      enabledCapabilities.add('project-retirement');
+    }
+    const capabilitiesRoute = new CloudCapabilitiesRoute({
+      enabledCapabilities,
       limits: {
         maxCheckpointCoordinationBytes:
           COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxCoordinationBytes,
@@ -355,6 +370,27 @@ class CloudApplication implements Application {
       requestAuthority: this.#projectRequestAuthority,
       ticketAuthority: this.#projectTicketAuthority,
     });
+    const projectLifecycleRoutes = options.lifecycle === undefined
+      ? undefined
+      : new ProjectLifecycleRoutes({
+        control: options.lifecycle.control,
+        maximumJsonBytes: COLLAB_LIMITS.maxJsonPayloadUtf8Bytes,
+        operationTimeoutMs: options.config.repository.operationTimeoutMs,
+        principalAdapter,
+      });
+    const authorityTransferArtifactRoutes = options.lifecycle === undefined
+      ? undefined
+      : new AuthorityTransferArtifactRoutes({
+        authority: options.lifecycle.artifacts,
+        limits: {
+          'checkpoint.json': COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxManifestBytes,
+          'coordination.ndjson': COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxCoordinationBytes,
+          'repository.bundle':
+            COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxRepositoryBundleBytes,
+        },
+        operationTimeoutMs: options.config.developmentBootstrap.uploadDeadlineMs,
+        principalAdapter,
+      });
     this.#projectEventRoutes = new ProjectEventRoutes({
       admission: this.#projectEventAdmission,
       authority: this.#projectReadAuthority,
@@ -384,6 +420,10 @@ class CloudApplication implements Application {
         bootstrapRoutes,
         projectSnapshotRoutes,
         projectCollaborationRoutes,
+        ...(projectLifecycleRoutes === undefined ? [] : [projectLifecycleRoutes]),
+        ...(authorityTransferArtifactRoutes === undefined
+          ? []
+          : [authorityTransferArtifactRoutes]),
         gitReceivePackRoutes,
         gitUploadPackRoutes,
       ],
@@ -433,10 +473,10 @@ class CloudApplication implements Application {
 
       phase = 'recovery';
       await this.#recoveryCoordinator.recoverAll();
+      await this.#lifecycle?.reconcileAll();
       await this.#bootstrapExpiryReconciler.reconcileAll();
       phase = 'repository';
       await this.#activeRepositoryIntegrity.verifyAll();
-      this.#bootstrapExpiryReconciler.start();
       this.#assertStarting();
 
       phase = 'http';
@@ -445,6 +485,8 @@ class CloudApplication implements Application {
 
       this.#address = address;
       this.#state = 'ready';
+      this.#bootstrapExpiryReconciler.start();
+      this.#lifecycle?.start();
       this.#logger.info('server.listening', { port: address.port });
       return address;
     } catch (error: unknown) {
@@ -505,6 +547,9 @@ class CloudApplication implements Application {
 
     const httpClose = this.#httpServer.close(Math.max(1, deadline - Date.now()));
     this.#recoveryCoordinator.close();
+    const lifecycleClose = this.#lifecycle?.close(
+      Math.max(1, deadline - Date.now()),
+    ) ?? Promise.resolve();
     const eventAdmissionClose = this.#projectEventAdmission.close();
     const eventClose = this.#projectEventRoutes.close();
     this.#projectEventWakeup.close();
@@ -521,6 +566,7 @@ class CloudApplication implements Application {
     results.push(await settleBefore(personalRefClose, deadline));
     results.push(await settleBefore(ticketClose, deadline));
     results.push(await settleBefore(httpClose, deadline));
+    results.push(await settleBefore(lifecycleClose, deadline));
     results.push(await settleBefore(this.#bootstrapExpiryReconciler.close(), deadline));
     results.push(await settleBefore(this.#activationCoordinator.close(), deadline));
     results.push(await settleBefore(this.#bundleImporter.close(), deadline));

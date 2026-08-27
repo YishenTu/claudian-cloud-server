@@ -418,7 +418,6 @@ async function beginValidateAndRotate(
 ): Promise<Readonly<{ batchRevision: number; batchSha256: string; checkpointSha256: string }>> {
   try {
     await coordinator.begin({
-    expiresAt: EXPIRES_AT,
     principalId: transfer.principalId,
     request: {
       checkpointManifestSha256: transfer.checkpoint.manifest.manifestSha256,
@@ -549,7 +548,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
       });
       const coordination = postgres(database);
       const fault = new JournalAdvanceFault();
-      let now = Date.parse(CREATED_AT);
+      let now = Date.parse(CREATED_AT) - 1_000;
       const claimSequences = new Map<string, number>();
       const activation = new LanToCloudProjectActivation();
       const createCoordinator = (

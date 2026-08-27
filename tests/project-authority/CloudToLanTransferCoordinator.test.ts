@@ -544,7 +544,7 @@ class Harness {
   }
 
   coordinator(startAt: string = CREATED_AT): CloudToLanTransferCoordinator {
-    let tick = Date.parse(startAt);
+    let tick = Date.parse(startAt) - 1_000;
     return new CloudToLanTransferCoordinator({
       checkpoint: this.checkpoint,
       clock: () => new Date(tick += 1_000),
@@ -595,7 +595,6 @@ async function begin(
   }> = {},
 ): Promise<CollabAuthorityTransferStatus> {
   return coordinator.begin({
-    expiresAt: EXPIRES_AT,
     principalId: input.principalId ?? MANAGER_PRINCIPAL,
     request: {
       expectedAuthorityGeneration: 4,
@@ -696,6 +695,16 @@ function activationRequest(
 }
 
 describe('CloudToLanTransferCoordinator', () => {
+  it('derives exact expiry on first create and replays it after the clock advances', async () => {
+    const harness = new Harness();
+    const coordinator = harness.coordinator();
+    const first = await begin(coordinator);
+    const replay = await begin(coordinator);
+
+    assert.deepEqual(replay, first);
+    assert.equal(first.expiresAt, EXPIRES_AT);
+  });
+
   it('moves one authority forward, retains exact claims, and creates deletion handoff', async () => {
     const harness = new Harness();
     const coordinator = harness.coordinator();
