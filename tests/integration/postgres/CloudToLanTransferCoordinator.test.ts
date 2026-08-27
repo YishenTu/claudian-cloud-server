@@ -175,7 +175,7 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
       await seed(database);
       const store = coordination(database);
       const claims = new Map<string, string>();
-      let tick = Date.parse(T0);
+      let tick = Date.parse(T0) - 1_000;
       const coordinator = new CloudToLanTransferCoordinator({
         checkpoint: {
           capture: input => Promise.resolve(Object.freeze({
@@ -191,7 +191,6 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
         custodyReceiptIdFactory: () => 'custody-receipt-real',
         deletionOperationIdFactory: () => 'delete-transfer-real',
         environmentIdentity: 'environment-real',
-        expiresAtFactory: () => EXPIRES_AT,
         relinquishmentIntentIdFactory: () => 'relinquishment-intent-real',
         relinquishmentSigner: { sign: () => Promise.resolve(SIGNATURE) },
         repository: {

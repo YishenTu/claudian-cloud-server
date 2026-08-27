@@ -173,6 +173,25 @@ describe('ProjectLifecycleRoutes', () => {
     assert.deepEqual(failure.error.safeContext, {});
   });
 
+  it('returns retirement precondition drift as retryable non-terminal conflict', async () => {
+    const response = await request({
+      execute: () => Promise.reject(new CollabError({
+        code: 'authority-not-synchronized',
+        recoveryActions: ['retry'],
+      })),
+    }, 'retireProject', {
+      expectedAuthorityGeneration: 2,
+      expectedMainOid: '1'.repeat(40),
+      idempotencyKey: 'retire-stale-precondition',
+      projectId: PROJECT_ID,
+    });
+
+    assert.equal(response.status, 409);
+    const failure = decodeCollabCloudErrorEnvelope(await response.json());
+    assert.equal(failure.error.code, 'authority-not-synchronized');
+    assert.deepEqual(failure.error.recoveryActions, ['retry']);
+  });
+
   it('sanitizes a malformed owner response as a server failure', async () => {
     const response = await request({
       execute: () => Promise.resolve({ direction: 'not-a-direction' }) as never,

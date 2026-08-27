@@ -149,22 +149,40 @@ function boundedMeter(
 async function settleOperationBeforeAbort<T>(
   operation: Promise<T>,
   signal: AbortSignal,
+  disposeLateResult: (result: T) => void,
 ): Promise<T> {
   const timeoutFailure = (): ArtifactRouteFailure => new ArtifactRouteFailure(
     408,
     new CollabError({ code: 'operation-timeout', recoveryActions: ['retry'] }),
   );
-  if (signal.aborted) throw timeoutFailure();
+  const disposeWhenSettled = (): void => {
+    void operation.then(result => {
+      try {
+        disposeLateResult(result);
+      } catch {
+        // Disposal is best-effort and must not expose owner details.
+      }
+    }, () => undefined);
+  };
+  if (signal.aborted) {
+    disposeWhenSettled();
+    throw timeoutFailure();
+  }
   let abortListener: (() => void) | undefined;
   try {
     return await Promise.race([
       operation,
       new Promise<never>((_resolve, reject) => {
-        abortListener = () => reject(timeoutFailure());
+        abortListener = () => {
+          reject(timeoutFailure());
+        };
         signal.addEventListener('abort', abortListener, { once: true });
         if (signal.aborted) abortListener();
       }),
     ]);
+  } catch (error: unknown) {
+    disposeWhenSettled();
+    throw error;
   } finally {
     if (abortListener !== undefined) signal.removeEventListener('abort', abortListener);
   }
@@ -266,6 +284,7 @@ export class AuthorityTransferArtifactRoutes {
               500,
               new CollabError({ code: 'operation-failed' }),
             );
+      if (!request.complete) response.shouldKeepAlive = false;
       if (!response.headersSent) this.#sendFailure(response, failure);
       else if (!response.destroyed) response.destroy();
     } finally {
@@ -336,14 +355,19 @@ export class AuthorityTransferArtifactRoutes {
       projectId: match.projectId,
       signal,
       transferId: match.transferId,
-    }), signal);
+    }), signal, late => late.body.destroy());
     const maximumBytes = this.#limits[match.artifact];
+    if (
+      !(result.body instanceof Readable)
+    ) throw new CollabError({ code: 'operation-failed' });
     if (
       !Number.isSafeInteger(result.byteCount)
       || result.byteCount < 1
       || result.byteCount > maximumBytes
-      || !(result.body instanceof Readable)
-    ) throw new CollabError({ code: 'operation-failed' });
+    ) {
+      result.body.destroy();
+      throw new CollabError({ code: 'operation-failed' });
+    }
     response.writeHead(200, {
       'cache-control': 'no-store',
       'content-length': String(result.byteCount),

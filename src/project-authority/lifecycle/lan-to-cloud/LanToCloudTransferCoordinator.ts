@@ -61,8 +61,6 @@ import type {
 } from '../ProjectLifecycleRecoveryDispatcher.js';
 import {
   defaultAuthorityTransferExpiresAt,
-  selectAuthorityTransferExpiresAt,
-  type AuthorityTransferExpiresAtFactory,
 } from '../AuthorityTransferExpiry.js';
 
 export type LanToCloudTransferCoordinatorErrorCode =
@@ -163,7 +161,6 @@ export interface LanToCloudTransferCoordinatorOptions {
   readonly clock?: () => Date;
   readonly coordination: LanToCloudTransferCoordination;
   readonly custodyReceiptIdFactory?: () => string;
-  readonly expiresAtFactory?: AuthorityTransferExpiresAtFactory;
   readonly receiptIdFactory?: () => string;
   readonly receiptSigner: LanToCloudReceiptSigner;
   readonly relinquishmentTrust: LanToCloudSourceTrustPort;
@@ -479,7 +476,6 @@ implements ProjectLifecycleRecoveryOwner {
   readonly #clock: () => Date;
   readonly #coordination: LanToCloudTransferCoordination;
   readonly #custodyReceiptIdFactory: () => string;
-  readonly #expiresAtFactory: AuthorityTransferExpiresAtFactory;
   readonly #pendingClaimBatches = new Map<string, PendingClaimBatch>();
   readonly #receiptIdFactory: () => string;
   readonly #receiptKeyId: string;
@@ -511,8 +507,6 @@ implements ProjectLifecycleRecoveryOwner {
     this.#coordination = options.coordination;
     this.#custodyReceiptIdFactory = options.custodyReceiptIdFactory
       ?? (() => defaultOpaqueId('custody'));
-    this.#expiresAtFactory = options.expiresAtFactory
-      ?? defaultAuthorityTransferExpiresAt;
     this.#receiptIdFactory = options.receiptIdFactory
       ?? (() => defaultOpaqueId('redemption'));
     this.#receiptKeyId = activeReceiptKey.receiptKeyId;
@@ -562,11 +556,7 @@ implements ProjectLifecycleRecoveryOwner {
         );
         if (existing === undefined) {
           const createdAt = timestamp(this.#clock);
-          const expiresAt = selectAuthorityTransferExpiresAt(
-            this.#expiresAtFactory,
-            createdAt,
-          );
-          if (expiresAt === undefined) return fail('dependency-failed');
+          const expiresAt = defaultAuthorityTransferExpiresAt(createdAt);
           const [project, tombstone] = await Promise.all([
             scope.getProject(),
             scope.portability.getProjectTombstone(),

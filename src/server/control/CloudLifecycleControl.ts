@@ -114,12 +114,13 @@ function requestFailure(
         recoveryActions: ['retry'],
       });
     case 'state-conflict':
-      return new CollabError({
-        code: operation === 'retireProject'
-          || operation === 'acknowledgeProjectRetirement'
-          ? 'project-retired'
-          : 'authority-transfer-stale',
-      });
+      return operation === 'retireProject'
+        || operation === 'acknowledgeProjectRetirement'
+        ? new CollabError({
+            code: 'authority-not-synchronized',
+            recoveryActions: ['retry'],
+          })
+        : new CollabError({ code: 'authority-transfer-stale' });
     case 'closed':
     case 'dependency-failed':
     case 'invalid-checkpoint':

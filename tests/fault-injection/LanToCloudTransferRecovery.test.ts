@@ -548,7 +548,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
       });
       const coordination = postgres(database);
       const fault = new JournalAdvanceFault();
-      let now = Date.parse(CREATED_AT);
+      let now = Date.parse(CREATED_AT) - 1_000;
       const claimSequences = new Map<string, number>();
       const activation = new LanToCloudProjectActivation();
       const createCoordinator = (
@@ -579,7 +579,6 @@ describe('LAN-to-Cloud cross-store recovery', () => {
           ? new FaultInjectingCoordination(coordination, fault)
           : coordination,
         custodyReceiptIdFactory: () => `custody-${transfer.transferId}`,
-        expiresAtFactory: () => EXPIRES_AT,
         receiptIdFactory: () => `redemption-${transfer.transferId}`,
         receiptSigner: {
           activeKey: { publicKey: PUBLIC_KEY, receiptKeyId: 'receipt-key' },

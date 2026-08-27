@@ -661,7 +661,6 @@ interface Fixture {
   readonly coordination: MemoryCoordination;
   readonly coordinator: LanToCloudTransferCoordinator;
   readonly expire: () => void;
-  readonly expirySelections: () => number;
   readonly repository: MemoryRepository;
   readonly restart: () => LanToCloudTransferCoordinator;
   readonly signer: MemoryReceiptSigner;
@@ -696,8 +695,7 @@ function fixture(includeOfflineMember = true): Fixture {
   const staging = new MemoryStaging();
   const signer = new MemoryReceiptSigner();
   let checkpointAvailable = true;
-  let expirySelectionCount = 0;
-  let now = Date.parse(CREATED_AT);
+  let now = Date.parse(CREATED_AT) - 1_000;
   let claimSequence = 0;
   const sourceProof: VerifiedLanToCloudSourceProof = Object.freeze({
     checkpointManifestSha256: validated.manifest.manifestSha256,
@@ -734,10 +732,6 @@ function fixture(includeOfflineMember = true): Fixture {
       clock: () => new Date(now += 1_000),
       coordination,
       custodyReceiptIdFactory: () => 'custody-receipt',
-      expiresAtFactory: () => {
-        expirySelectionCount += 1;
-        return EXPIRES_AT;
-      },
       receiptIdFactory: () => 'redemption-receipt',
       receiptSigner: signer,
       relinquishmentTrust: trust,
@@ -758,7 +752,6 @@ function fixture(includeOfflineMember = true): Fixture {
     coordination,
     coordinator,
     expire,
-    expirySelections: () => expirySelectionCount,
     loseCheckpoint,
     repository,
     restart,
@@ -873,14 +866,13 @@ describe('LanToCloudTransferCoordinator', () => {
     });
   });
 
-  it('selects expiry only on first create and replays begin after the clock advances', async () => {
+  it('derives exact expiry on first create and replays it after the clock advances', async () => {
     const test = fixture();
     const first = await test.coordinator.begin(beginInput(test));
     const replay = await test.coordinator.begin(beginInput(test));
 
     assert.deepEqual(replay, first);
     assert.equal(first.expiresAt, EXPIRES_AT);
-    assert.equal(test.expirySelections(), 1);
   });
 
   it('rotates ambiguous delivery, activates one writer, and binds offline identity exactly', async () => {

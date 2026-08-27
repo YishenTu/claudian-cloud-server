@@ -56,8 +56,6 @@ import type {
 } from '../ProjectLifecycleRecoveryDispatcher.js';
 import {
   defaultAuthorityTransferExpiresAt,
-  selectAuthorityTransferExpiresAt,
-  type AuthorityTransferExpiresAtFactory,
 } from '../AuthorityTransferExpiry.js';
 
 export type CloudToLanTransferCoordinatorErrorCode =
@@ -198,7 +196,6 @@ export interface CloudToLanTransferCoordinatorOptions {
   readonly custodyReceiptIdFactory?: () => string;
   readonly deletionOperationIdFactory?: (transferId: string) => string;
   readonly environmentIdentity: string;
-  readonly expiresAtFactory?: AuthorityTransferExpiresAtFactory;
   readonly relinquishmentIntentIdFactory?: (transferId: string) => string;
   readonly relinquishmentSigner: CloudToLanRelinquishmentSigner;
   readonly repository: ExactRepositoryPresencePort;
@@ -522,7 +519,6 @@ implements ProjectLifecycleRecoveryOwner {
   readonly #custodyReceiptIdFactory: () => string;
   readonly #deletionOperationIdFactory: (transferId: string) => string;
   readonly #environmentIdentity: string;
-  readonly #expiresAtFactory: AuthorityTransferExpiresAtFactory;
   readonly #relinquishmentIntentIdFactory: (transferId: string) => string;
   readonly #relinquishmentSigner: CloudToLanRelinquishmentSigner;
   readonly #repository: ExactRepositoryPresencePort;
@@ -545,8 +541,6 @@ implements ProjectLifecycleRecoveryOwner {
     this.#deletionOperationIdFactory = options.deletionOperationIdFactory
       ?? defaultDeletionId;
     this.#environmentIdentity = options.environmentIdentity;
-    this.#expiresAtFactory = options.expiresAtFactory
-      ?? defaultAuthorityTransferExpiresAt;
     this.#relinquishmentIntentIdFactory = options.relinquishmentIntentIdFactory
       ?? defaultRelinquishmentIntentId;
     this.#relinquishmentSigner = options.relinquishmentSigner;
@@ -587,11 +581,7 @@ implements ProjectLifecycleRecoveryOwner {
           return operationId;
         }
         const createdAt = timestamp(this.#clock);
-        const expiresAt = selectAuthorityTransferExpiresAt(
-          this.#expiresAtFactory,
-          createdAt,
-        );
-        if (expiresAt === undefined) return fail('dependency-failed');
+        const expiresAt = defaultAuthorityTransferExpiresAt(createdAt);
         const project = await scope.getProject();
         const target = await scope.findMembership(request.targetHostMemberId);
         const placement = await scope.getRepositoryPlacement();

@@ -129,6 +129,56 @@ describe('AuthorityTransferArtifactRoutes', () => {
     );
   });
 
+  it('closes an incomplete rejected upload instead of retaining keep-alive', async () => {
+    const baseUrl = await start({
+      download: () => Promise.reject(new Error('unused')),
+      upload: () => Promise.reject(new Error('must not execute')),
+    }, 20);
+    const route = collabCloudAuthorityTransferArtifactRoute(
+      PROJECT_ID,
+      TRANSFER_ID,
+      'upload',
+      'checkpoint.json',
+    );
+
+    const closed = await new Promise<boolean>((resolve, reject) => {
+      const request = httpRequest(`${baseUrl}${route.target}`, {
+        headers: {
+          connection: 'keep-alive',
+          'content-length': '33',
+          'content-type': 'application/octet-stream',
+          'x-claudian-development-actor': 'member-manager',
+        },
+        method: route.method,
+      });
+      request.once('error', reject);
+      request.once('response', response => {
+        assert.equal(response.statusCode, 413);
+        response.resume();
+        response.once('end', () => {
+          const socket = request.socket;
+          assert.ok(socket);
+          if (socket.destroyed) {
+            resolve(true);
+            return;
+          }
+          const timeout = setTimeout(() => {
+            socket.destroy();
+            resolve(false);
+          }, 100);
+          timeout.unref();
+          socket.once('close', () => {
+            clearTimeout(timeout);
+            resolve(true);
+          });
+        });
+      });
+      request.flushHeaders();
+    });
+
+    assert.equal(closed, true);
+  });
+
   it('rejects a chunked upload that crosses the streaming limit', async () => {
     let observedFailure: unknown;
     let streamedBytes = 0;
@@ -265,6 +315,54 @@ describe('AuthorityTransferArtifactRoutes', () => {
       decodeCollabCloudErrorEnvelope(await response.json()).error.code,
       'operation-timeout',
     );
+  });
+
+  it('destroys a stream returned after the download deadline', async () => {
+    let resolveDownload!: (value: {
+      readonly body: Readable;
+      readonly byteCount: number;
+    }) => void;
+    const body = Readable.from(['late']);
+    const baseUrl = await start({
+      download: () => new Promise(resolve => {
+        resolveDownload = resolve;
+      }),
+      upload: () => Promise.reject(new Error('unused')),
+    }, 20);
+    const route = collabCloudAuthorityTransferArtifactRoute(
+      PROJECT_ID,
+      TRANSFER_ID,
+      'download',
+      'repository.bundle',
+    );
+
+    const response = await fetch(`${baseUrl}${route.target}`, {
+      headers: { 'x-claudian-development-actor': 'member-manager' },
+    });
+    assert.equal(response.status, 408);
+    resolveDownload({ body, byteCount: 4 });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(body.destroyed, true);
+  });
+
+  it('destroys an acquired stream whose metadata is invalid', async () => {
+    const body = Readable.from(['invalid']);
+    const baseUrl = await start({
+      download: () => Promise.resolve({ body, byteCount: 129 }),
+      upload: () => Promise.reject(new Error('unused')),
+    });
+    const route = collabCloudAuthorityTransferArtifactRoute(
+      PROJECT_ID,
+      TRANSFER_ID,
+      'download',
+      'repository.bundle',
+    );
+
+    const response = await fetch(`${baseUrl}${route.target}`, {
+      headers: { 'x-claudian-development-actor': 'member-manager' },
+    });
+    assert.equal(response.status, 500);
+    assert.equal(body.destroyed, true);
   });
 
   it('propagates download backpressure and aborts the owner on disconnect', async () => {

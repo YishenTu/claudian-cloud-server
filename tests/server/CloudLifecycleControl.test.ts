@@ -219,4 +219,36 @@ describe('CloudLifecycleControlAdapter', () => {
       ),
     );
   });
+
+  it('maps stale retirement generation or OID as non-terminal conflict', async () => {
+    const control = new CloudLifecycleControlAdapter({
+      cloudToLan: coordinator({}),
+      lanToCloud: coordinator({}),
+      retire: coordinator({
+        retire: () => Promise.reject(new RetireCoordinatorError('state-conflict')),
+      }),
+      transfer: coordinator({}),
+    });
+
+    for (const request of [{
+      expectedAuthorityGeneration: 2,
+      expectedMainOid: '1'.repeat(40),
+      idempotencyKey: 'retire-stale-generation',
+      projectId: PROJECT_ID,
+    }, {
+      expectedAuthorityGeneration: 1,
+      expectedMainOid: '2'.repeat(40),
+      idempotencyKey: 'retire-stale-main-oid',
+      projectId: PROJECT_ID,
+    }]) {
+      await assert.rejects(
+        control.execute('retireProject', context(request)),
+        (error: unknown) => (
+          error instanceof CollabError
+          && error.code === 'authority-not-synchronized'
+          && error.recoveryActions.includes('retry')
+        ),
+      );
+    }
+  });
 });

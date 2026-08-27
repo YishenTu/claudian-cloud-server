@@ -311,7 +311,7 @@ export function cloudToLanCoordinator(input: Readonly<{
   readonly projectId: string;
   readonly store: PostgresCoordination;
 }>): CloudToLanTransferCoordinator {
-  let tick = Date.parse(CLOUD_TO_LAN_CREATED_AT);
+  let tick = Date.parse(CLOUD_TO_LAN_CREATED_AT) - 1_000;
   const coordination = input.fault === undefined
     ? input.store
     : new FaultInjectingCoordination(input.store, input.fault);
@@ -545,7 +545,6 @@ export function cloudToLanCoordinator(input: Readonly<{
     custodyReceiptIdFactory: () => `custody-${sha256(input.projectId).slice(0, 16)}`,
     deletionOperationIdFactory: () => `delete-${sha256(input.projectId).slice(0, 16)}`,
     environmentIdentity: 'environment-fault-test',
-    expiresAtFactory: () => CLOUD_TO_LAN_EXPIRES_AT,
     relinquishmentIntentIdFactory: () => (
       `relinquish-${sha256(input.projectId).slice(0, 16)}`
     ),
