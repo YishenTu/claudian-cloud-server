@@ -255,6 +255,7 @@ class MemoryCoordination implements ProjectActivationCoordination {
     const owner = this;
     return {
       accept: undefined as never,
+      checkpoint: undefined as never,
       collaboration: undefined as never,
       portability: undefined as never,
       advanceProjectAuthorityState: () => Promise.reject(

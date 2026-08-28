@@ -10,7 +10,7 @@ import {
   rename,
   rm,
 } from 'node:fs/promises';
-import { dirname, isAbsolute, join, normalize, parse } from 'node:path';
+import { basename, dirname, isAbsolute, join, normalize, parse } from 'node:path';
 import { getuid } from 'node:process';
 
 import {
@@ -25,6 +25,7 @@ import {
   isCollabProjectId,
   type CollabCheckpointGitRef,
   type CollabCheckpointObjectFormat,
+  type CollabMemberId,
   type CollabProjectId,
 } from '@claudian-collab/protocol';
 
@@ -43,6 +44,7 @@ import {
 } from './GitProcessSupervisor.js';
 import { RepositoryPathPolicy } from './RepositoryPathPolicy.js';
 import {
+  createRepositoryPlacementLease,
   RepositoryPlacementError,
   type RepositoryPlacementLease,
   type RepositoryPlacementValidator,
@@ -114,6 +116,12 @@ export interface CaptureRepositoryCheckpointInput {
   readonly signal?: AbortSignal;
 }
 
+export interface InventoryRepositoryCheckpointRefsInput {
+  readonly memberIds: readonly string[];
+  readonly placement: RepositoryPlacementLease;
+  readonly signal?: AbortSignal;
+}
+
 export interface CapturedRepositoryCheckpoint {
   readonly artifactKey: string;
   readonly byteCount: number;
@@ -131,6 +139,17 @@ export interface ReadRepositoryCheckpointInput {
     chunk: Buffer,
     signal: AbortSignal,
   ) => Promise<void> | void;
+  readonly signal?: AbortSignal;
+}
+
+export interface VerifyRepositoryCheckpointArtifactInput {
+  readonly body: AsyncIterable<Uint8Array>;
+  readonly expectedByteCount: number;
+  readonly expectedSha256: string;
+  readonly objectFormat: CollabCheckpointObjectFormat;
+  readonly operationId: string;
+  readonly projectId: CollabProjectId;
+  readonly refs: readonly CollabCheckpointGitRef[];
   readonly signal?: AbortSignal;
 }
 
@@ -177,14 +196,34 @@ export interface InactiveRepositoryPublication {
 }
 
 export interface RepositoryCheckpointCapturePort {
+  reserveCaptureOperation(
+    projectId: CollabProjectId,
+    signal?: AbortSignal,
+  ): Promise<ExactRepositoryOperationReservation>;
   capture(
     input: CaptureRepositoryCheckpointInput,
+    reservation?: ExactRepositoryOperationReservation,
   ): Promise<CapturedRepositoryCheckpoint>;
   discardCapture(
     capture: CapturedRepositoryCheckpoint,
     signal?: AbortSignal,
   ): Promise<'removed' | 'replayed'>;
+  discardCaptureOperation(
+    input: Readonly<{
+      readonly operationId: string;
+      readonly projectId: CollabProjectId;
+    }>,
+    signal?: AbortSignal,
+  ): Promise<'removed' | 'replayed'>;
+  inventoryRefs(
+    input: InventoryRepositoryCheckpointRefsInput,
+    reservation?: ExactRepositoryOperationReservation,
+  ): Promise<readonly CollabCheckpointGitRef[]>;
   readCapture(input: ReadRepositoryCheckpointInput): Promise<void>;
+  verifyArtifact(
+    reservation: ExactRepositoryOperationReservation,
+    input: VerifyRepositoryCheckpointArtifactInput,
+  ): Promise<ValidatedRepositoryCheckpoint>;
 }
 
 export interface InactiveRepositoryPublicationPort {
@@ -260,6 +299,8 @@ interface CapturePaths {
   readonly projectId: string;
   readonly project: string;
   readonly verification: string;
+  readonly verificationBundle: string;
+  readonly verificationBundlePart: string;
 }
 
 interface ExactRepositoryReservationState {
@@ -367,6 +408,20 @@ function canonicalRefs(
   return Object.freeze(result);
 }
 
+function canonicalMemberIds(memberIds: readonly string[]): readonly CollabMemberId[] {
+  let previous = '';
+  const result = memberIds.map(value => {
+    if (
+      !isCollabMemberId(value)
+      || value.localeCompare(previous, 'en-US') <= 0
+    ) fail('invalid-checkpoint');
+    previous = value;
+    return value;
+  });
+  if (result.length === 0) fail('invalid-checkpoint');
+  return Object.freeze(result);
+}
+
 function captureArtifactKey(projectId: string, operationId: string): string {
   return createHash('sha256')
     .update(`capture\0${projectId}\0${operationId}`, 'utf8')
@@ -397,6 +452,8 @@ function capturePaths(
     projectId,
     project,
     verification: join(operation, 'verification.git'),
+    verificationBundle: join(operation, 'published.bundle'),
+    verificationBundlePart: join(operation, '.published.bundle.part'),
   });
 }
 
@@ -441,15 +498,14 @@ function cleanupFact(
   });
 }
 
-function captureCleanupFact(
-  capture: CapturedRepositoryCheckpoint,
+function captureOperationCleanupFact(
+  projectId: string,
+  operationId: string,
 ): Readonly<{ cleanupKey: string; markerJson: string }> {
-  return cleanupFact('capture-cleanup', {
-    artifactKey: capture.artifactKey,
-    operationId: capture.operationId,
-    placementGeneration: capture.placementGeneration,
-    projectId: capture.projectId,
-    sha256: capture.sha256,
+  return cleanupFact('capture-operation-cleanup', {
+    artifactKey: captureArtifactKey(projectId, operationId),
+    operationId,
+    projectId,
   });
 }
 
@@ -873,7 +929,7 @@ async function assertPrivateDirectory(path: string): Promise<void> {
       || uid === undefined
       || entry.uid !== BigInt(uid)
     ) {
-      fail('storage-unavailable');
+      return fail('storage-unavailable');
     }
     await access(path, 7);
   } catch (error: unknown) {
@@ -993,7 +1049,7 @@ async function ensureDirectory(path: string): Promise<boolean> {
       && 'code' in error
       && error.code === 'EEXIST'
     )) {
-      fail('storage-unavailable');
+      return fail('storage-unavailable');
     }
   }
   await assertPrivateDirectory(path);
@@ -1332,7 +1388,10 @@ ExactRepositoryRemovalPort {
     }
   }
 
-  capture(input: CaptureRepositoryCheckpointInput): Promise<CapturedRepositoryCheckpoint> {
+  capture(
+    input: CaptureRepositoryCheckpointInput,
+    reservation?: ExactRepositoryOperationReservation,
+  ): Promise<CapturedRepositoryCheckpoint> {
     if (!isCollabOpaqueId(input.operationId)) {
       return Promise.reject(new RepositoryCheckpointError('invalid-checkpoint'));
     }
@@ -1351,16 +1410,85 @@ ExactRepositoryRemovalPort {
     if (this.#activeCaptures.has(operationKey)) {
       return Promise.reject(new RepositoryCheckpointError('busy'));
     }
-    const result = this.#runOperation(
-      input.signal,
-      signal => this.#capture({ ...input, refs }, signal),
-    );
+    const result = reservation === undefined
+      ? this.#runOperation(
+          input.signal,
+          signal => this.#capture({ ...input, refs }, signal, true),
+        )
+      : this.#runExactRepositoryOperation(
+          reservation,
+          input.placement.projectId,
+          input.signal,
+          signal => this.#capture({ ...input, refs }, signal, false),
+        );
     this.#activeCaptures.add(operationKey);
     void result.then(
       () => this.#activeCaptures.delete(operationKey),
       () => this.#activeCaptures.delete(operationKey),
     );
     return result;
+  }
+
+  inventoryRefs(
+    input: InventoryRepositoryCheckpointRefsInput,
+    reservation?: ExactRepositoryOperationReservation,
+  ): Promise<readonly CollabCheckpointGitRef[]> {
+    let memberIds: readonly CollabMemberId[];
+    let placement: RepositoryPlacementLease;
+    try {
+      memberIds = canonicalMemberIds(input.memberIds);
+      placement = createRepositoryPlacementLease(input.placement);
+    } catch (error: unknown) {
+      return Promise.reject(error instanceof Error
+        ? error
+        : new RepositoryCheckpointError('invalid-checkpoint'));
+    }
+    return reservation === undefined
+      ? this.#runOperation(
+          input.signal,
+          signal => this.#inventoryRefs(placement, memberIds, signal, true),
+        )
+      : this.#runExactRepositoryOperation(
+          reservation,
+          placement.projectId,
+          input.signal,
+          signal => this.#inventoryRefs(placement, memberIds, signal, false),
+        );
+  }
+
+  reserveCaptureOperation(
+    projectId: CollabProjectId,
+    signal?: AbortSignal,
+  ): Promise<ExactRepositoryOperationReservation> {
+    return this.reserveExactRepositoryOperation(projectId, signal);
+  }
+
+  verifyArtifact(
+    reservation: ExactRepositoryOperationReservation,
+    input: VerifyRepositoryCheckpointArtifactInput,
+  ): Promise<ValidatedRepositoryCheckpoint> {
+    let refs: readonly CollabCheckpointGitRef[];
+    try {
+      refs = canonicalRefs(input.refs);
+      if (
+        !isCollabOpaqueId(input.operationId)
+        || !isCollabProjectId(input.projectId)
+        || !Number.isSafeInteger(input.expectedByteCount)
+        || input.expectedByteCount <= 0
+        || input.expectedByteCount > this.#maximumBundleBytes
+        || !SHA256_PATTERN.test(input.expectedSha256)
+      ) fail('invalid-checkpoint');
+    } catch (error: unknown) {
+      return Promise.reject(error instanceof Error
+        ? error
+        : new RepositoryCheckpointError('invalid-checkpoint'));
+    }
+    return this.#runExactRepositoryOperation(
+      reservation,
+      input.projectId,
+      input.signal,
+      signal => this.#verifyArtifact({ ...input, refs }, signal),
+    );
   }
 
   readCapture(input: ReadRepositoryCheckpointInput): Promise<void> {
@@ -1432,6 +1560,70 @@ ExactRepositoryRemovalPort {
     );
   }
 
+  discardCaptureOperation(
+    input: Readonly<{
+      readonly operationId: string;
+      readonly projectId: CollabProjectId;
+    }>,
+    signal?: AbortSignal,
+  ): Promise<'removed' | 'replayed'> {
+    if (
+      !isCollabOpaqueId(input.operationId)
+      || !isCollabProjectId(input.projectId)
+    ) {
+      return Promise.reject(new RepositoryCheckpointError('invalid-checkpoint'));
+    }
+    const identity = Object.freeze({
+      operationId: input.operationId,
+      projectId: input.projectId,
+    });
+    return this.#runOperation(
+      signal,
+      operationSignal => this.#discardCaptureOperation(identity, operationSignal),
+    );
+  }
+
+  async #discardCaptureOperation(
+    input: Readonly<{
+      readonly operationId: string;
+      readonly projectId: CollabProjectId;
+    }>,
+    signal: AbortSignal,
+  ): Promise<'removed' | 'replayed'> {
+    assertNotAborted(signal);
+    const paths = capturePaths(
+      this.#operationRoot,
+      input.projectId,
+      input.operationId,
+    );
+    await assertPrivateDirectory(this.#operationRoot);
+    if (!await directoryExists(paths.project)) {
+      await this.#syncDirectory(this.#operationRoot);
+      return 'replayed';
+    }
+    if (!await directoryExists(paths.profile)) {
+      await this.#syncDirectory(paths.project);
+      return 'replayed';
+    }
+    const cleanup = captureOperationCleanupFact(
+      input.projectId,
+      input.operationId,
+    );
+    return this.#removeDurableTree({
+      assertTargetOwned: async () => {
+        await assertPrivateDirectory(paths.project);
+        await assertPrivateDirectory(paths.profile);
+        await assertPrivateDirectory(paths.operation);
+        await this.#assertCaptureOwner(paths);
+      },
+      cleanupKey: cleanup.cleanupKey,
+      markerJson: cleanup.markerJson,
+      parentPath: paths.profile,
+      signal,
+      targetPath: paths.operation,
+    });
+  }
+
   async #discardCapture(
     capture: CapturedRepositoryCheckpoint,
     signal: AbortSignal,
@@ -1452,7 +1644,10 @@ ExactRepositoryRemovalPort {
       await this.#syncDirectory(paths.project);
       return 'replayed';
     }
-    const cleanup = captureCleanupFact(capture);
+    const cleanup = captureOperationCleanupFact(
+      capture.projectId,
+      capture.operationId,
+    );
     return this.#removeDurableTree({
       assertTargetOwned: () => this.#assertStoredCapture(paths, capture, signal),
       cleanupKey: cleanup.cleanupKey,
@@ -1497,7 +1692,7 @@ ExactRepositoryRemovalPort {
       });
     } catch (error: unknown) {
       if (error instanceof ResourceAdmissionError) throw mapAdmission(error);
-      fail('storage-unavailable');
+      return fail('storage-unavailable');
     }
     try {
       await this.#verifyPublicationRoots();
@@ -1676,7 +1871,7 @@ ExactRepositoryRemovalPort {
     } catch (error: unknown) {
       if (error instanceof RepositoryCheckpointError) throw error;
       if (error instanceof GitProcessError) throw mapGit(error);
-      fail('storage-unavailable');
+      return fail('storage-unavailable');
     }
   }
 
@@ -1926,19 +2121,20 @@ ExactRepositoryRemovalPort {
   async #capture(
     input: CaptureRepositoryCheckpointInput,
     signal: AbortSignal,
+    acquirePermit: boolean,
   ): Promise<CapturedRepositoryCheckpoint> {
-    let permit;
+    let permit: GitChildPermit | undefined;
     let finalizedCapture: CapturedRepositoryCheckpoint | undefined;
     let finalizedPaths: CapturePaths | undefined;
     try {
-      permit = await this.#resourceAdmission.acquireGitChild({
+      if (acquirePermit) permit = await this.#resourceAdmission.acquireGitChild({
         classification: 'read',
         projectId: input.placement.projectId,
         signal,
       });
     } catch (error: unknown) {
       if (error instanceof ResourceAdmissionError) throw mapAdmission(error);
-      fail('storage-unavailable');
+      return fail('storage-unavailable');
     }
     try {
       const resolved = await this.#pathPolicy.resolveExisting(input.placement)
@@ -2029,9 +2225,165 @@ ExactRepositoryRemovalPort {
       }
       if (error instanceof RepositoryCheckpointError) throw error;
       if (error instanceof GitProcessError) throw mapGit(error);
-      fail('storage-unavailable');
+      return fail('storage-unavailable');
     } finally {
-      permit.release();
+      permit?.release();
+    }
+  }
+
+  async #inventoryRefs(
+    placement: RepositoryPlacementLease,
+    memberIds: readonly CollabMemberId[],
+    signal: AbortSignal,
+    acquirePermit: boolean,
+  ): Promise<readonly CollabCheckpointGitRef[]> {
+    let permit: GitChildPermit | undefined;
+    try {
+      if (acquirePermit) permit = await this.#resourceAdmission.acquireGitChild({
+        classification: 'read',
+        projectId: placement.projectId,
+        signal,
+      });
+    } catch (error: unknown) {
+      if (error instanceof ResourceAdmissionError) throw mapAdmission(error);
+      return fail('storage-unavailable');
+    }
+    try {
+      const resolved = await this.#pathPolicy.resolveExisting(placement)
+        .catch((error: unknown) => {
+          if (error instanceof RepositoryPlacementError) throw mapPlacement(error);
+          return fail('storage-unavailable');
+        });
+      await this.#supervisor.verifyVersion(signal);
+      await this.#supervisor.verifyBareRepository(resolved.repositoryPath, signal);
+      const refs = parseForEachRefOutput(await this.#supervisor.runCommand({
+        arguments: [
+          'for-each-ref',
+          '--format=%(refname)%00%(objectname)',
+          'refs/heads',
+        ],
+        captureOutput: true,
+        cwd: resolved.repositoryPath,
+        failureCode: 'repository-corrupt',
+        signal,
+      }));
+      const names = [COLLAB_MAIN_REF, ...memberIds.map(collabMemberRef)];
+      const inventory = names.map(name => {
+        const oid = refs.get(name);
+        if (oid === undefined) return fail('repository-invalid');
+        return Object.freeze({ name, oid });
+      });
+      const canonical = canonicalRefs(inventory);
+      await this.#pathPolicy.revalidate(placement).catch((error: unknown) => {
+        if (error instanceof RepositoryPlacementError) throw mapPlacement(error);
+        return fail('storage-unavailable');
+      });
+      return canonical;
+    } catch (error: unknown) {
+      if (error instanceof RepositoryCheckpointError) throw error;
+      if (error instanceof GitProcessError) throw mapGit(error);
+      return fail('storage-unavailable');
+    } finally {
+      permit?.release();
+    }
+  }
+
+  async #verifyArtifact(
+    input: VerifyRepositoryCheckpointArtifactInput,
+    signal: AbortSignal,
+  ): Promise<ValidatedRepositoryCheckpoint> {
+    const paths = capturePaths(
+      this.#operationRoot,
+      input.projectId,
+      input.operationId,
+    );
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      await assertPrivateDirectory(this.#operationRoot);
+      await ensureDirectory(paths.project);
+      await this.#syncDirectory(this.#operationRoot);
+      await ensureDirectory(paths.profile);
+      await this.#syncDirectory(paths.project);
+      const operationCreated = await ensureDirectory(paths.operation);
+      await this.#syncDirectory(paths.profile);
+      await this.#ensureCaptureOwner(paths, signal, operationCreated);
+      await removeOwnedFile(paths.verificationBundlePart);
+      await removeOwnedFile(paths.verificationBundle);
+      handle = await open(paths.verificationBundlePart, 'wx', FILE_MODE);
+      const digest = createHash('sha256');
+      let byteCount = 0;
+      for await (const value of input.body) {
+        assertNotAborted(signal);
+        const chunk = Buffer.from(value);
+        byteCount += chunk.length;
+        if (byteCount > input.expectedByteCount) fail('invalid-checkpoint');
+        digest.update(chunk);
+        await handle.writeFile(chunk);
+      }
+      if (
+        byteCount !== input.expectedByteCount
+        || digest.digest('hex') !== input.expectedSha256
+      ) fail('invalid-checkpoint');
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      await chmod(paths.verificationBundlePart, FILE_MODE);
+      await rename(paths.verificationBundlePart, paths.verificationBundle);
+      await this.#syncDirectory(paths.operation);
+      await this.#verifyBundleFile(
+        paths,
+        paths.verificationBundle,
+        input.objectFormat,
+        input.refs,
+        signal,
+      );
+      const markerJson = `${JSON.stringify({
+        artifactKey: repositoryCheckpointArtifactKey(
+          input.projectId,
+          input.operationId,
+        ),
+        bundleByteCount: input.expectedByteCount,
+        bundleSha256: input.expectedSha256,
+        objectFormat: input.objectFormat,
+        operationId: input.operationId,
+        projectId: input.projectId,
+        refs: input.refs,
+        schemaVersion: 1,
+      })}\n`;
+      return Object.freeze({
+        artifactKey: repositoryCheckpointArtifactKey(
+          input.projectId,
+          input.operationId,
+        ),
+        bundleByteCount: input.expectedByteCount,
+        bundleInputDisposition: 'consumed' as const,
+        bundleSha256: input.expectedSha256,
+        markerSha256: createHash('sha256').update(markerJson).digest('hex'),
+        objectFormat: input.objectFormat,
+        operationId: input.operationId,
+        projectId: input.projectId,
+        refs: input.refs,
+      });
+    } catch (error: unknown) {
+      await handle?.close().catch(() => undefined);
+      if (signal.aborted) {
+        return fail(signal.reason === 'closed' ? 'closed' : 'cancelled');
+      }
+      if (error instanceof RepositoryCheckpointError) throw error;
+      if (error instanceof GitBundleImportError) {
+        return fail(error.code === 'repository-limit'
+          ? 'repository-limit'
+          : 'repository-invalid');
+      }
+      if (error instanceof GitProcessError) throw mapGit(error);
+      return fail('storage-unavailable');
+    } finally {
+      await handle?.close().catch(() => undefined);
+      await removeOwnedFile(paths.verificationBundlePart).catch(() => undefined);
+      await removeOwnedFile(paths.verificationBundle).catch(() => undefined);
+      await rm(paths.verification, { force: true, recursive: true })
+        .catch(() => undefined);
+      await this.#syncDirectory(paths.operation).catch(() => undefined);
     }
   }
 
@@ -2214,6 +2566,23 @@ ExactRepositoryRemovalPort {
     capture: CapturedRepositoryCheckpoint,
     signal: AbortSignal,
   ): Promise<void> {
+    return this.#verifyBundleFile(
+      paths,
+      paths.bundle,
+      capture.objectFormat,
+      capture.refs,
+      signal,
+    );
+  }
+
+  async #verifyBundleFile(
+    paths: CapturePaths,
+    bundlePath: string,
+    objectFormat: CollabCheckpointObjectFormat,
+    expectedRefs: readonly CollabCheckpointGitRef[],
+    signal: AbortSignal,
+  ): Promise<void> {
+    const relativeBundle = `../${basename(bundlePath)}`;
     try {
       await rm(paths.verification, { force: true, recursive: true });
       await mkdir(paths.verification, { mode: DIRECTORY_MODE });
@@ -2222,7 +2591,7 @@ ExactRepositoryRemovalPort {
           'init',
           '--quiet',
           '--bare',
-          `--object-format=${capture.objectFormat}`,
+          `--object-format=${objectFormat}`,
           '.',
         ],
         captureOutput: false,
@@ -2231,25 +2600,53 @@ ExactRepositoryRemovalPort {
         signal,
       });
       await this.#supervisor.runCommand({
-        arguments: ['bundle', 'verify', '../repository.bundle'],
+        arguments: ['bundle', 'verify', relativeBundle],
         captureOutput: false,
         cwd: paths.verification,
         failureCode: 'repository-corrupt',
         signal,
       });
       const refs = parseRefOutput(await this.#supervisor.runCommand({
-        arguments: ['bundle', 'list-heads', '../repository.bundle'],
+        arguments: ['bundle', 'list-heads', relativeBundle],
         captureOutput: true,
         cwd: paths.verification,
         failureCode: 'repository-corrupt',
         signal,
       }));
-      if (!refsEqual(refs, capture.refs)) fail('repository-invalid');
+      if (!refsEqual(refs, expectedRefs)) fail('repository-invalid');
+      await this.#supervisor.runCommand({
+        arguments: [
+          'fetch',
+          '--quiet',
+          relativeBundle,
+          ...expectedRefs.map(ref => `${ref.name}:${ref.name}`),
+        ],
+        captureOutput: false,
+        cwd: paths.verification,
+        failureCode: 'repository-corrupt',
+        signal,
+      });
+      await verifyGitRepositoryContent({
+        closed: () => this.#closed,
+        deadline: Date.now() + this.#operationTimeoutMs,
+        maximumBlobBytes: this.#maximumBlobBytes,
+        maximumExpandedTreeEntries: this.#maximumExpandedTreeEntries,
+        maximumRepositoryBytes: this.#maximumRepositoryBytes,
+        maximumTreeEntries: this.#maximumTreeEntries,
+        objectFormat,
+        refs: expectedRefs,
+        repositoryPath: paths.verification,
+        signal,
+        supervisor: this.#supervisor,
+      });
       await rm(paths.verification, { force: true, recursive: true });
     } catch (error: unknown) {
       await rm(paths.verification, { force: true, recursive: true })
         .catch(() => undefined);
       if (error instanceof RepositoryCheckpointError) throw error;
+      if (error instanceof GitBundleImportError) {
+        throw mapRepositoryValidation(error);
+      }
       if (error instanceof GitProcessError) throw mapGit(error);
       fail('storage-unavailable');
     }

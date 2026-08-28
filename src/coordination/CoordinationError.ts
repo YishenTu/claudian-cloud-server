@@ -8,6 +8,7 @@ export type CoordinationErrorCode =
   | 'invalid-project'
   | 'invalid-record'
   | 'lease-busy'
+  | 'resource-limit'
   | 'schema-incompatible'
   | 'state-conflict';
 

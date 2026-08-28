@@ -319,6 +319,74 @@ exec '${GIT}' "$@"
       assert.deepEqual(listed, refs.map(ref => `${ref.oid} ${ref.name}`));
       assert.equal((await readFile(bundle)).length, captured.byteCount);
 
+      const verificationReservation = await authority.reserveCaptureOperation(
+        placement.projectId,
+      );
+      try {
+        const verified = await authority.verifyArtifact(
+          verificationReservation,
+          {
+            body: createReadStream(bundle),
+            expectedByteCount: captured.byteCount,
+            expectedSha256: captured.sha256,
+            objectFormat: captured.objectFormat,
+            operationId: captured.operationId,
+            projectId: captured.projectId,
+            refs,
+          },
+        );
+        assert.equal(verified.bundleSha256, captured.sha256);
+
+        const invalidWork = join(root, 'invalid-work');
+        const invalidBundle = join(root, 'invalid.bundle');
+        await git(root, ['init', '--initial-branch=main', invalidWork]);
+        await git(invalidWork, ['config', 'user.email', 'test@example.invalid']);
+        await git(invalidWork, ['config', 'user.name', 'Test User']);
+        await symlink('target', join(invalidWork, 'unsafe-link'));
+        await git(invalidWork, ['add', 'unsafe-link']);
+        await git(invalidWork, ['commit', '-m', 'invalid portable tree']);
+        const invalidOid = await git(invalidWork, ['rev-parse', 'HEAD']);
+        await git(invalidWork, ['branch', 'members/member-a']);
+        await git(invalidWork, ['branch', 'members/member-b']);
+        await git(invalidWork, [
+          'bundle',
+          'create',
+          invalidBundle,
+          'refs/heads/main',
+          'refs/heads/members/member-a',
+          'refs/heads/members/member-b',
+        ]);
+        const invalidBytes = await readFile(invalidBundle);
+        await assert.rejects(authority.verifyArtifact(
+          verificationReservation,
+          {
+            body: createReadStream(invalidBundle),
+            expectedByteCount: invalidBytes.length,
+            expectedSha256: createHash('sha256').update(invalidBytes).digest('hex'),
+            objectFormat: 'sha1',
+            operationId: captured.operationId,
+            projectId: captured.projectId,
+            refs: Object.freeze([
+              Object.freeze({ name: 'refs/heads/main', oid: invalidOid }),
+              Object.freeze({
+                name: 'refs/heads/members/member-a',
+                oid: invalidOid,
+              }),
+              Object.freeze({
+                name: 'refs/heads/members/member-b',
+                oid: invalidOid,
+              }),
+            ]),
+          },
+        ), error => {
+          assert.ok(error instanceof RepositoryCheckpointError);
+          assert.equal(error.code, 'repository-invalid');
+          return true;
+        });
+      } finally {
+        await verificationReservation.close();
+      }
+
       const concurrentCapture = authority.capture({
         operationId: 'operation-concurrent',
         placement,
@@ -406,6 +474,47 @@ exec '${GIT}' "$@"
       assert.equal(maximumIdCapture.operationId, maximumOperationId);
       assert.equal(await authority.discardCapture(maximumIdCapture), 'removed');
 
+      const identityCleanupCapture = await authority.capture({
+        operationId: 'operation-identity-cleanup',
+        placement,
+        refs,
+      });
+      assert.equal(await authority.discardCaptureOperation({
+        operationId: identityCleanupCapture.operationId,
+        projectId: identityCleanupCapture.projectId,
+      }), 'removed');
+      const recoveryVerificationReservation =
+        await authority.reserveCaptureOperation(placement.projectId);
+      try {
+        const recovered = await authority.verifyArtifact(
+          recoveryVerificationReservation,
+          {
+            body: createReadStream(bundle),
+            expectedByteCount: captured.byteCount,
+            expectedSha256: captured.sha256,
+            objectFormat: captured.objectFormat,
+            operationId: identityCleanupCapture.operationId,
+            projectId: identityCleanupCapture.projectId,
+            refs,
+          },
+        );
+        assert.equal(recovered.bundleSha256, captured.sha256);
+      } finally {
+        await recoveryVerificationReservation.close();
+      }
+      assert.equal(await authority.discardCaptureOperation({
+        operationId: identityCleanupCapture.operationId,
+        projectId: identityCleanupCapture.projectId,
+      }), 'removed');
+      assert.equal(await authority.discardCaptureOperation({
+        operationId: identityCleanupCapture.operationId,
+        projectId: identityCleanupCapture.projectId,
+      }), 'replayed');
+      assert.equal(
+        await authority.discardCapture(identityCleanupCapture),
+        'replayed',
+      );
+
       const cleanupCapture = await authority.capture({
         operationId: 'operation-partial-capture-cleanup',
         placement,
@@ -424,7 +533,10 @@ exec '${GIT}' "$@"
       )), { code: 'ENOENT' });
       assert.notEqual(detachedCaptureCleanup, undefined);
       await access(detachedCaptureCleanup ?? '');
-      assert.equal(await authority.discardCapture(cleanupCapture), 'removed');
+      assert.equal(await authority.discardCaptureOperation({
+        operationId: cleanupCapture.operationId,
+        projectId: cleanupCapture.projectId,
+      }), 'removed');
       await assert.rejects(access(detachedCaptureCleanup ?? ''), { code: 'ENOENT' });
 
       const exactReservation = await authority.reserveExactRepositoryOperation(

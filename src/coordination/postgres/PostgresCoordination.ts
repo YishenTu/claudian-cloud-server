@@ -83,6 +83,7 @@ import { PostgresDevelopmentBootstrapPersistence } from './PostgresDevelopmentBo
 import { PostgresAcceptPersistence } from './PostgresAcceptPersistence.js';
 import { PostgresCollaborationPersistence } from './PostgresCollaborationPersistence.js';
 import { PostgresPortabilityLifecyclePersistence } from './PostgresPortabilityLifecyclePersistence.js';
+import { PostgresProjectCheckpointPersistence } from './PostgresProjectCheckpointPersistence.js';
 import { POSTGRES_SCHEMAS } from './PostgresSchema.js';
 
 export interface PostgresCoordinationOptions {
@@ -580,6 +581,7 @@ class PostgresProjectScope
   readonly accept: PostgresAcceptPersistence;
   readonly collaboration: PostgresCollaborationPersistence;
   readonly portability: PostgresPortabilityLifecyclePersistence;
+  readonly checkpoint: PostgresProjectCheckpointPersistence;
   readonly #client: PoolClient;
   readonly #markBroken: MarkBroken;
   readonly #projectId: CollabProjectId;
@@ -609,6 +611,10 @@ class PostgresProjectScope
       query,
     });
     this.portability = new PostgresPortabilityLifecyclePersistence(
+      projectId,
+      query,
+    );
+    this.checkpoint = new PostgresProjectCheckpointPersistence(
       projectId,
       query,
     );
@@ -1188,12 +1194,20 @@ async function runProjectTransaction<T>(
     readonly markBroken: MarkBroken;
     readonly onProjectEventCommitted: ((projectId: CollabProjectId) => void)
       | undefined;
+    readonly readOnlySnapshot?: boolean;
     readonly signal: AbortSignal | undefined;
   },
 ): Promise<T> {
   let transactionStarted = false;
   try {
-    await safeQuery(client, 'BEGIN', [], options.markBroken);
+    await safeQuery(
+      client,
+      options.readOnlySnapshot === true
+        ? 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY'
+        : 'BEGIN',
+      [],
+      options.markBroken,
+    );
     transactionStarted = true;
     if (options.lockKey !== undefined) {
       await acquireAdvisoryLock(
@@ -1378,7 +1392,10 @@ class PostgresPinnedProjectLease implements PinnedProjectLease {
 
   async withProjectScope<T>(
     operation: (scope: ProjectScope) => Promise<T>,
-    options: Readonly<{ readonly signal?: AbortSignal }> = {},
+    options: Readonly<{
+      readonly signal?: AbortSignal;
+      readonly snapshot?: 'repeatable-read';
+    }> = {},
   ): Promise<T> {
     if (this.#closed) throw new CoordinationError('closed');
     if (this.#checkedOutClient.isBroken()) throw dependencyFailure();
@@ -1399,6 +1416,7 @@ class PostgresPinnedProjectLease implements PinnedProjectLease {
         lockKey: undefined,
         markBroken: this.#checkedOutClient.markBroken,
         onProjectEventCommitted: this.#onProjectEventCommitted,
+        readOnlySnapshot: options.snapshot === 'repeatable-read',
         signal: options.signal,
       },
     );
