@@ -18,15 +18,24 @@ function baseEnvironment(): NodeJS.ProcessEnv {
   );
 }
 
-async function runMigration(postgresUrl: string): Promise<ProcessResult> {
-  const child = spawn(process.execPath, ['--import', 'tsx', 'src/migrate.ts'], {
+async function runMigration(
+  postgresUrl: string | undefined,
+  ...arguments_: readonly string[]
+): Promise<ProcessResult> {
+  const child = spawn(
+    process.execPath,
+    ['--import', 'tsx', 'src/migrate.ts', ...arguments_],
+    {
     cwd: process.cwd(),
     env: {
       ...baseEnvironment(),
-      CLAUDIAN_CLOUD_POSTGRES_URL: postgresUrl,
+      ...(postgresUrl === undefined
+        ? {}
+        : { CLAUDIAN_CLOUD_POSTGRES_URL: postgresUrl }),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
-  });
+    },
+  );
   const stdout: string[] = [];
   const stderr: string[] = [];
   child.stdout.setEncoding('utf8');
@@ -50,6 +59,55 @@ describe('migration process', () => {
         stderr: '',
         stdout: '',
       });
+    });
+  });
+
+  it('preflights without writes and reports only the current schema version', async () => {
+    await withPostgresTestDatabase(async database => {
+      const empty = await runMigration(database.migrationUrl, 'preflight');
+      assert.deepEqual(empty, {
+        exitCode: 0,
+        stderr: '',
+        stdout: '0\n',
+      });
+
+      const client = new (await import('pg')).Client({
+        connectionString: database.migrationUrl,
+      });
+      try {
+        await client.connect();
+        const relation = await client.query<{ readonly relation: string | null }>(
+          "SELECT to_regnamespace('claudian_cloud')::text AS relation",
+        );
+        assert.deepEqual(relation.rows, [{ relation: null }]);
+      } finally {
+        await client.end();
+      }
+
+      assert.equal((await runMigration(database.migrationUrl)).exitCode, 0);
+      assert.deepEqual(await runMigration(database.migrationUrl, 'preflight'), {
+        exitCode: 0,
+        stderr: '',
+        stdout: '9\n',
+      });
+    });
+  });
+
+  it('exposes static target and exact compatibility probes without credentials', async () => {
+    assert.deepEqual(await runMigration(undefined, 'target'), {
+      exitCode: 0,
+      stderr: '',
+      stdout: '9\n',
+    });
+    assert.deepEqual(await runMigration(undefined, 'supports', '9'), {
+      exitCode: 0,
+      stderr: '',
+      stdout: '',
+    });
+    assert.deepEqual(await runMigration(undefined, 'supports', '8'), {
+      exitCode: 2,
+      stderr: '',
+      stdout: '',
     });
   });
 

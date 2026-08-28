@@ -85,6 +85,7 @@ import { PostgresCollaborationPersistence } from './PostgresCollaborationPersist
 import { PostgresPortabilityLifecyclePersistence } from './PostgresPortabilityLifecyclePersistence.js';
 import { PostgresProjectCheckpointPersistence } from './PostgresProjectCheckpointPersistence.js';
 import { POSTGRES_SCHEMAS } from './PostgresSchema.js';
+import { supportsPostgresSchemaVersion } from '../../config/PostgresSchemaCompatibility.js';
 
 export interface PostgresCoordinationOptions {
   readonly onProjectEventCommitted?: (projectId: CollabProjectId) => void;
@@ -1968,10 +1969,17 @@ export class PostgresCoordination
         [],
         checkedOut.markBroken,
       );
-      if (rows.length !== POSTGRES_SCHEMAS.length) {
+      const currentVersion = rows.at(-1)?.version;
+      if (!supportsPostgresSchemaVersion(currentVersion)) {
         throw new CoordinationError('schema-incompatible');
       }
-      for (const [index, schema] of POSTGRES_SCHEMAS.entries()) {
+      const expectedSchemas = POSTGRES_SCHEMAS.filter(
+        schema => schema.version <= currentVersion,
+      );
+      if (rows.length !== expectedSchemas.length) {
+        throw new CoordinationError('schema-incompatible');
+      }
+      for (const [index, schema] of expectedSchemas.entries()) {
         const row = rows[index];
         if (
           row?.version !== schema.version

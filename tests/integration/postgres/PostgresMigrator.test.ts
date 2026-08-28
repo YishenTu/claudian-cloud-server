@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import { Client } from 'pg';
 
 import {
+  assertTransactionalMigrationSql,
   PostgresMigrationError,
   PostgresMigrator,
 } from '../../../src/coordination/postgres/PostgresMigrator.js';
@@ -21,6 +22,79 @@ const PORTABILITY_LIFECYCLE_CHECKSUM = 'a7c4773253250fc0c02e0e6f02026b22ef7f1767
 const LAN_TO_CLOUD_TRANSFER_CHECKSUM = 'd49bf1335d3410cdd95ff2b928f21264eb6212e7db9baea6561d118038d06a95';
 const CLOUD_TO_LAN_TRANSFER_CHECKSUM = '12e60f0ef26d2906687635cc4bdc59f33cb3bbfbc2095d2e7196b57417eb0e12';
 const TERMINAL_PROJECT_LIFECYCLE_CHECKSUM = 'f5a9541802d114f0959b2e62c9a884cba938c99926fe9547063d95a457a6d284';
+
+const MIGRATION_HISTORY = Object.freeze([
+  { checksum: FOUNDATION_CHECKSUM, name: 'foundation', version: 1 },
+  {
+    checksum: DEVELOPMENT_BOOTSTRAP_CHECKSUM,
+    name: 'development-bootstrap',
+    version: 2,
+  },
+  {
+    checksum: PROJECT_READ_EVENTS_CHECKSUM,
+    name: 'project-read-events',
+    version: 3,
+  },
+  { checksum: COLLABORATION_CHECKSUM, name: 'collaboration', version: 4 },
+  { checksum: ACCEPT_RECOVERY_CHECKSUM, name: 'accept-recovery', version: 5 },
+  {
+    checksum: PORTABILITY_LIFECYCLE_CHECKSUM,
+    name: 'portability-lifecycle',
+    version: 6,
+  },
+  {
+    checksum: LAN_TO_CLOUD_TRANSFER_CHECKSUM,
+    name: 'lan-to-cloud-transfer',
+    version: 7,
+  },
+  {
+    checksum: CLOUD_TO_LAN_TRANSFER_CHECKSUM,
+    name: 'cloud-to-lan-transfer',
+    version: 8,
+  },
+  {
+    checksum: TERMINAL_PROJECT_LIFECYCLE_CHECKSUM,
+    name: 'terminal-project-lifecycle',
+    version: 9,
+  },
+]);
+
+function verifyNontransactionalSqlRejection(): void {
+  const rejected = [
+    'COMMIT; CREATE TABLE leaked (value integer);',
+    'ROLLBACK; CREATE TABLE leaked (value integer);',
+    'START TRANSACTION; SELECT 1;',
+    'VACUUM claudian_cloud.projects;',
+    'CREATE UNIQUE INDEX CONCURRENTLY leaked ON projects (project_id);',
+    'ALTER SYSTEM SET application_name = \'leaked\';',
+    'REINDEX DATABASE cloud;',
+    'REINDEX SCHEMA claudian_cloud;',
+    'REINDEX SYSTEM cloud;',
+    'CLUSTER;',
+  ];
+  for (const sql of rejected) {
+    assert.throws(
+      () => assertTransactionalMigrationSql(sql, 10),
+      error => {
+        assert.ok(error instanceof PostgresMigrationError);
+        assert.equal(error.code, 'migration-nontransactional');
+        assert.equal(error.version, 10);
+        assert.doesNotMatch(JSON.stringify(error), /COMMIT|ROLLBACK|leaked/i);
+        return true;
+      },
+    );
+  }
+
+  assert.doesNotThrow(() => assertTransactionalMigrationSql(
+    `-- COMMIT must stay inert\n
+     CREATE FUNCTION example() RETURNS void LANGUAGE plpgsql AS $body$\n
+     BEGIN\n
+       RAISE NOTICE 'ROLLBACK';\n
+     END;\n
+     $body$;`,
+    10,
+  ));
+}
 
 async function execute(connectionString: string, sql: string): Promise<void> {
   const client = new Client({ connectionString });
@@ -75,12 +149,12 @@ async function verifyMigrationFailureState(database: PostgresTestDatabase): Prom
          FROM claudian_cloud.schema_migrations
         WHERE version = 1`,
     );
-    assert.deepEqual(result.rows, [{ applied_at: null, state: 'applying' }]);
+    assert.deepEqual(result.rows, []);
   } finally {
     await dirtyClient.end();
   }
 
-  await expectMigrationError(migrator, 'schema-dirty', 1);
+  await expectMigrationError(migrator, 'migration-failed', 1);
   await execute(database.migrationUrl, 'DROP SCHEMA claudian_cloud CASCADE');
 }
 
@@ -891,11 +965,75 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
 }
 
 describe('PostgresMigrator', () => {
+  it('rejects transaction control and nontransactional statements', () => {
+    verifyNontransactionalSqlRejection();
+  });
+
   it('fails closed and establishes the PostgreSQL 18 authority schema', async () => {
     await withPostgresTestDatabase(async database => {
       await verifyMigrationFailureState(database);
       await verifyMigrationHistory(database);
       await verifySchemaContract(database);
+    });
+  });
+
+  it('preserves the prior complete catalog when every next migration fails', async () => {
+    await withPostgresTestDatabase(async database => {
+      const client = new Client({ connectionString: database.migrationUrl });
+      try {
+        await client.connect();
+        for (const target of MIGRATION_HISTORY) {
+          await client.query('DROP SCHEMA IF EXISTS claudian_cloud CASCADE');
+          await client.query(
+            `CREATE SCHEMA claudian_cloud AUTHORIZATION claudian_cloud_migration;
+             CREATE TABLE claudian_cloud.schema_migrations (
+               version integer PRIMARY KEY,
+               name text NOT NULL,
+               checksum text NOT NULL,
+               state text NOT NULL,
+               applied_at timestamptz
+             )`,
+          );
+          for (const applied of MIGRATION_HISTORY.slice(0, target.version - 1)) {
+            await client.query(
+              `INSERT INTO claudian_cloud.schema_migrations (
+                 version, name, checksum, state, applied_at
+               ) VALUES ($1, $2, $3, 'applied', clock_timestamp())`,
+              [applied.version, applied.name, applied.checksum],
+            );
+          }
+          if (target.version === 1) {
+            await client.query(
+              'CREATE TABLE claudian_cloud.projects (conflict integer)',
+            );
+          }
+
+          await expectMigrationError(
+            new PostgresMigrator({ connectionString: database.migrationUrl }),
+            'migration-failed',
+            target.version,
+          );
+          const rows = await client.query<{
+            readonly checksum: string;
+            readonly name: string;
+            readonly state: string;
+            readonly version: number;
+          }>(
+            `SELECT version, name, checksum, state
+               FROM claudian_cloud.schema_migrations
+              ORDER BY version`,
+          );
+          assert.deepEqual(
+            rows.rows,
+            MIGRATION_HISTORY.slice(0, target.version - 1).map(applied => ({
+              ...applied,
+              state: 'applied',
+            })),
+          );
+        }
+      } finally {
+        await client.end();
+      }
     });
   });
 
