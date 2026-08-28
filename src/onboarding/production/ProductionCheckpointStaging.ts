@@ -4,6 +4,7 @@ import {
   lstat,
   mkdir,
   open,
+  opendir,
   readdir,
   rename,
   rm,
@@ -131,6 +132,35 @@ export interface ProductionCheckpointStagingPort {
   ): Promise<StagedProductionCheckpointArtifact>;
 }
 
+export interface ProductionCheckpointDeliveryCursor {
+  readonly expiresAt: CollabIsoTimestamp;
+  readonly operationId: string;
+  readonly projectId: CollabProjectId;
+}
+
+export interface ProductionCheckpointDeliveryPage {
+  readonly deliveries: readonly PreparedProductionCheckpointAttempt[];
+  readonly nextCursor: ProductionCheckpointDeliveryCursor | undefined;
+}
+
+export interface ProductionCheckpointDeliveryCatalogPort {
+  listDueAttemptDeliveries(
+    options: Readonly<{
+      readonly after?: ProductionCheckpointDeliveryCursor;
+      readonly expiredBefore: CollabIsoTimestamp;
+      readonly limit?: number;
+    }>,
+    signal?: AbortSignal,
+  ): Promise<ProductionCheckpointDeliveryPage>;
+  registerAttemptDelivery(
+    input: Readonly<{
+      readonly attempt: PreparedProductionCheckpointAttempt;
+      readonly expiresAt: CollabIsoTimestamp;
+    }>,
+    signal?: AbortSignal,
+  ): Promise<'registered' | 'replayed'>;
+}
+
 export interface ProductionCheckpointStagingOptions {
   readonly admission: CheckpointStreamAdmission;
   readonly clock?: () => Date;
@@ -142,6 +172,8 @@ export interface ProductionCheckpointStagingOptions {
 
 interface AttemptPaths {
   readonly attempt: string;
+  readonly deliveryMarker: string;
+  readonly deliveryMarkerPart: string;
   readonly ownerMarker: string;
   readonly ownerMarkerPart: string;
   readonly productionRoot: string;
@@ -162,6 +194,8 @@ interface ActiveAttemptOperation {
 const ATTEMPT_MARKER = '.claudian-cloud-production-attempt.json';
 const ATTEMPT_SCHEMA_VERSION = 1;
 const ARTIFACT_MARKER_SCHEMA_VERSION = 1;
+const DELIVERY_MARKER = '.claudian-cloud-production-delivery.json';
+const DELIVERY_SCHEMA_VERSION = 1;
 const ARTIFACT_READ_BUFFER_BYTES = 64 * 1024;
 const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -273,6 +307,12 @@ function freezeAttempt(
   });
 }
 
+export function productionCheckpointAttemptIdentity(
+  input: PrepareProductionCheckpointAttemptInput,
+): PreparedProductionCheckpointAttempt {
+  return freezeAttempt(snapshotPrepareInput(input));
+}
+
 function snapshotPrepareInput(
   input: PrepareProductionCheckpointAttemptInput,
 ): PrepareProductionCheckpointAttemptInput {
@@ -326,6 +366,86 @@ function attemptMarkerJson(
   })}\n`;
 }
 
+function deliveryMarkerJson(
+  attempt: PreparedProductionCheckpointAttempt,
+  expiresAt: CollabIsoTimestamp,
+): string {
+  return `${JSON.stringify({
+    attemptKey: attempt.attemptKey,
+    expiresAt,
+    operationId: attempt.operationId,
+    projectId: attempt.projectId,
+    schemaVersion: DELIVERY_SCHEMA_VERSION,
+    storageExpiresAt: attempt.expiresAt,
+  })}\n`;
+}
+
+function parseDeliveryMarker(json: string): Readonly<{
+  readonly delivery: PreparedProductionCheckpointAttempt;
+  readonly stored: PreparedProductionCheckpointAttempt;
+}> {
+  try {
+    const value: unknown = JSON.parse(json);
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      fail('artifact-conflict');
+    }
+    const record = value as Record<string, unknown>;
+    if (
+      Object.keys(record).sort().join(',')
+        !== 'attemptKey,expiresAt,operationId,projectId,schemaVersion,storageExpiresAt'
+      || record.schemaVersion !== DELIVERY_SCHEMA_VERSION
+      || typeof record.attemptKey !== 'string'
+      || typeof record.expiresAt !== 'string'
+      || typeof record.operationId !== 'string'
+      || typeof record.projectId !== 'string'
+      || typeof record.storageExpiresAt !== 'string'
+      || !canonicalTimestamp(record.expiresAt)
+      || !canonicalTimestamp(record.storageExpiresAt)
+    ) fail('artifact-conflict');
+    const delivery = productionCheckpointAttemptIdentity({
+      expiresAt: record.expiresAt,
+      operationId: record.operationId,
+      projectId: record.projectId,
+    });
+    const stored = productionCheckpointAttemptIdentity({
+      expiresAt: record.storageExpiresAt,
+      operationId: record.operationId,
+      projectId: record.projectId,
+    });
+    if (
+      delivery.attemptKey !== record.attemptKey
+      || stored.attemptKey !== record.attemptKey
+      || delivery.expiresAt >= stored.expiresAt
+      || deliveryMarkerJson(stored, delivery.expiresAt) !== json
+    ) fail('artifact-conflict');
+    return Object.freeze({ delivery, stored });
+  } catch (error: unknown) {
+    if (error instanceof ProductionCheckpointStagingError) throw error;
+    return fail('artifact-conflict');
+  }
+}
+
+function deliveryCursorAfter(
+  delivery: PreparedProductionCheckpointAttempt,
+  after: ProductionCheckpointDeliveryCursor | undefined,
+): boolean {
+  if (after === undefined) return true;
+  return compareDeliveryIdentity(delivery, after) > 0;
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function compareDeliveryIdentity(
+  left: ProductionCheckpointDeliveryCursor,
+  right: ProductionCheckpointDeliveryCursor,
+): number {
+  return compareText(left.expiresAt, right.expiresAt)
+    || compareText(left.projectId, right.projectId)
+    || compareText(left.operationId, right.operationId);
+}
+
 function artifactMarkerJson(
   artifact: StagedProductionCheckpointArtifact,
 ): string {
@@ -364,6 +484,8 @@ function paths(
   const attempt = join(productionRoot, attemptKey(projectId, operationId));
   return Object.freeze({
     attempt,
+    deliveryMarker: join(attempt, DELIVERY_MARKER),
+    deliveryMarkerPart: join(attempt, `.${DELIVERY_MARKER}.part`),
     ownerMarker: join(attempt, ATTEMPT_MARKER),
     ownerMarkerPart: join(attempt, `.${ATTEMPT_MARKER}.part`),
     productionRoot,
@@ -627,7 +749,7 @@ function assertNotAborted(signal: AbortSignal): void {
 }
 
 export class ProductionCheckpointStaging
-implements ProductionCheckpointStagingPort {
+implements ProductionCheckpointDeliveryCatalogPort, ProductionCheckpointStagingPort {
   readonly #activeAttempts = new Map<string, ActiveAttemptOperation>();
   readonly #admission: CheckpointStreamAdmission;
   readonly #clock: () => Date;
@@ -667,6 +789,224 @@ implements ProductionCheckpointStagingPort {
       this.#closePromise = this.#drainClose();
     }
     return this.#closePromise;
+  }
+
+  releaseAttemptReservation(
+    attempt: PreparedProductionCheckpointAttempt,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    let snapshot: PreparedProductionCheckpointAttempt;
+    try {
+      snapshot = snapshotAttempt(attempt);
+    } catch (error: unknown) {
+      return Promise.reject(
+        error instanceof ProductionCheckpointStagingError
+          ? error
+          : new ProductionCheckpointStagingError('invalid-attempt'),
+      );
+    }
+    return this.#runOperation(signal, operationSignal => (
+      this.#withAttemptControl(
+        snapshot.attemptKey,
+        operationSignal,
+        async () => {
+          if (
+            this.#activeAttempts.has(snapshot.attemptKey)
+            || this.#retainedAttempts.has(snapshot.attemptKey)
+            || this.#settlingAttempts.has(snapshot.attemptKey)
+          ) fail('busy');
+          this.#releaseAttemptReservation(snapshot.attemptKey);
+          await Promise.resolve();
+        },
+      )
+    ));
+  }
+
+  registerAttemptDelivery(
+    input: Readonly<{
+      readonly attempt: PreparedProductionCheckpointAttempt;
+      readonly expiresAt: CollabIsoTimestamp;
+    }>,
+    signal?: AbortSignal,
+  ): Promise<'registered' | 'replayed'> {
+    let attempt: PreparedProductionCheckpointAttempt;
+    let expiresAt: CollabIsoTimestamp;
+    try {
+      attempt = snapshotAttempt(input.attempt);
+      expiresAt = input.expiresAt;
+      if (
+        !canonicalTimestamp(expiresAt)
+        || expiresAt >= attempt.expiresAt
+      ) fail('invalid-attempt');
+    } catch (error: unknown) {
+      return Promise.reject(
+        error instanceof ProductionCheckpointStagingError
+          ? error
+          : new ProductionCheckpointStagingError('invalid-attempt'),
+      );
+    }
+    return this.#runOperation(signal, operationSignal => (
+      this.#withAttemptControl(
+        attempt.attemptKey,
+        operationSignal,
+        async () => {
+          const attemptPaths = await this.#assertOwnedAttempt(
+            attempt,
+            operationSignal,
+          );
+          const expected = deliveryMarkerJson(attempt, expiresAt);
+          const existing = await readBoundedText(attemptPaths.deliveryMarker);
+          if (existing !== undefined) {
+            if (existing !== expected) fail('artifact-conflict');
+            await removeOwnedFile(attemptPaths.deliveryMarkerPart);
+            await this.#synchronizeDirectory(attemptPaths.attempt);
+            return 'replayed' as const;
+          }
+          const partial = await readBoundedText(attemptPaths.deliveryMarkerPart);
+          if (partial !== undefined) {
+            if (partial !== expected) fail('artifact-conflict');
+            assertNotAborted(operationSignal);
+            await rename(
+              attemptPaths.deliveryMarkerPart,
+              attemptPaths.deliveryMarker,
+            ).catch(() => fail('storage-unavailable'));
+            await this.#synchronizeDirectory(attemptPaths.attempt);
+            return 'replayed' as const;
+          }
+          await writeMarker(
+            attemptPaths.deliveryMarker,
+            attemptPaths.deliveryMarkerPart,
+            expected,
+            attemptPaths.attempt,
+            this.#synchronizeDirectory.bind(this),
+          );
+          return 'registered' as const;
+        },
+      )
+    ));
+  }
+
+  listDueAttemptDeliveries(
+    options: Readonly<{
+      readonly after?: ProductionCheckpointDeliveryCursor;
+      readonly expiredBefore: CollabIsoTimestamp;
+      readonly limit?: number;
+    }>,
+    signal?: AbortSignal,
+  ): Promise<ProductionCheckpointDeliveryPage> {
+    let expiredBefore: CollabIsoTimestamp;
+    let after: ProductionCheckpointDeliveryCursor | undefined;
+    let limit: number;
+    try {
+      expiredBefore = options.expiredBefore;
+      const inputAfter = options.after;
+      after = inputAfter === undefined ? undefined : Object.freeze({
+        expiresAt: inputAfter.expiresAt,
+        operationId: inputAfter.operationId,
+        projectId: inputAfter.projectId,
+      });
+      limit = options.limit ?? 100;
+      if (
+        !canonicalTimestamp(expiredBefore)
+        || !Number.isSafeInteger(limit)
+        || limit < 1
+        || limit > 100
+        || (
+          after !== undefined
+          && (
+            !canonicalTimestamp(after.expiresAt)
+            || !isCollabOpaqueId(after.operationId)
+            || !isCollabProjectId(after.projectId)
+          )
+        )
+      ) fail('invalid-attempt');
+    } catch (error: unknown) {
+      return Promise.reject(
+        error instanceof ProductionCheckpointStagingError
+          ? error
+          : new ProductionCheckpointStagingError('invalid-attempt'),
+      );
+    }
+    return this.#runOperation(signal, async operationSignal => {
+      assertNotAborted(operationSignal);
+      await assertPrivateDirectory(this.#stagingRoot);
+      const productionRoot = join(this.#stagingRoot, PRODUCTION_DIRECTORY);
+      if (!await privateDirectoryExists(productionRoot)) {
+        return Object.freeze({
+          deliveries: Object.freeze([]),
+          nextCursor: undefined,
+        });
+      }
+      const deliveries: PreparedProductionCheckpointAttempt[] = [];
+      let directory: Awaited<ReturnType<typeof opendir>> | undefined;
+      try {
+        directory = await opendir(productionRoot);
+        for await (const directoryEntry of directory) {
+          const entry = directoryEntry.name;
+          assertNotAborted(operationSignal);
+          if (!SHA256_PATTERN.test(entry)) fail('artifact-conflict');
+          const attemptRoot = join(productionRoot, entry);
+          await assertPrivateDirectory(attemptRoot);
+          const attemptPaths = Object.freeze({
+            attempt: attemptRoot,
+            deliveryMarker: join(attemptRoot, DELIVERY_MARKER),
+            deliveryMarkerPart: join(attemptRoot, `.${DELIVERY_MARKER}.part`),
+            ownerMarker: join(attemptRoot, ATTEMPT_MARKER),
+            ownerMarkerPart: join(attemptRoot, `.${ATTEMPT_MARKER}.part`),
+            productionRoot,
+          });
+          let marker = await readBoundedText(attemptPaths.deliveryMarker);
+          if (marker === undefined) {
+            const partial = await readBoundedText(
+              attemptPaths.deliveryMarkerPart,
+            );
+            if (partial === undefined) continue;
+            const parsed = parseDeliveryMarker(partial);
+            if (
+              parsed.stored.attemptKey !== entry
+              || await readBoundedText(attemptPaths.ownerMarker)
+                !== attemptMarkerJson(parsed.stored)
+            ) fail('artifact-conflict');
+            assertNotAborted(operationSignal);
+            await rename(
+              attemptPaths.deliveryMarkerPart,
+              attemptPaths.deliveryMarker,
+            ).catch(() => fail('storage-unavailable'));
+            await this.#synchronizeDirectory(attemptRoot);
+            marker = partial;
+          }
+          const parsed = parseDeliveryMarker(marker);
+          if (
+            parsed.stored.attemptKey !== entry
+            || await readBoundedText(attemptPaths.ownerMarker)
+              !== attemptMarkerJson(parsed.stored)
+          ) fail('artifact-conflict');
+          if (
+            parsed.delivery.expiresAt <= expiredBefore
+            && deliveryCursorAfter(parsed.delivery, after)
+          ) {
+            deliveries.push(parsed.delivery);
+            deliveries.sort(compareDeliveryIdentity);
+            if (deliveries.length > limit + 1) deliveries.pop();
+          }
+        }
+      } catch (error: unknown) {
+        if (error instanceof ProductionCheckpointStagingError) throw error;
+        return fail('storage-unavailable');
+      }
+      const page = deliveries.slice(0, limit);
+      const last = page.at(-1);
+      return Object.freeze({
+        deliveries: Object.freeze(page),
+        nextCursor: deliveries.length > limit && last !== undefined
+          ? Object.freeze({
+            expiresAt: last.expiresAt,
+            operationId: last.operationId,
+            projectId: last.projectId,
+          })
+          : undefined,
+      });
+    });
   }
 
   async #drainClose(): Promise<void> {
@@ -1262,6 +1602,8 @@ implements ProductionCheckpointStagingPort {
     const allowed = new Set<string>([
       ATTEMPT_MARKER,
       `.${ATTEMPT_MARKER}.part`,
+      DELIVERY_MARKER,
+      `.${DELIVERY_MARKER}.part`,
     ]);
     for (const name of COLLAB_PROJECT_CHECKPOINT_ARTIFACTS) {
       const target = artifactPaths(attemptPaths.attempt, name);
@@ -1287,6 +1629,13 @@ implements ProductionCheckpointStagingPort {
         assertNotAborted(signal);
         await removeOwnedFile(path);
       }
+    }
+    for (const path of [
+      attemptPaths.deliveryMarkerPart,
+      attemptPaths.deliveryMarker,
+    ]) {
+      assertNotAborted(signal);
+      await removeOwnedFile(path);
     }
     await removeOwnedFile(attemptPaths.ownerMarkerPart);
     await this.#synchronizeDirectory(attemptPaths.attempt);

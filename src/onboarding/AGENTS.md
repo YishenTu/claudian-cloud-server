@@ -12,5 +12,6 @@
 - Do not reuse the development assertion, LAN Host admission, invitation trust,
   or LAN Host-transfer bindings for production Cloud onboarding.
 - `production/` may own isolated LAN-to-Cloud artifact receipt, staging, expiry, and exact cleanup only. It does not authorize transfer, create claims, publish a repository, activate a Project, accept source relinquishment, or recover the Project lifecycle.
+- A lifecycle-owned publication may reuse the production staging filesystem mechanics only through an exact profile-bound identity and explicit reservation detachment. Detachment releases temporary staging admission without deleting content or weakening identity checks. Backup and export publication remain recovery-readable under a retained storage identity; only the exact forward-only export lifecycle may add the separate durable delivery marker whose external TTL, restart enumeration, and cleanup identity bound server staging. Project Authority keeps a marked artifact ineligible for cleanup until the exact journal is terminal or a Project tombstone proves authority removal, and still owns retention and recovery policy.
 - A new onboarding profile must add its durable phase and cleanup contract to
   `ARCHITECTURE.md` before adding routes or persistent state.

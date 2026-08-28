@@ -21,6 +21,7 @@ import type {
   ProjectPersistenceReader,
 } from './ProjectPersistence.js';
 import type { PortabilityLifecyclePersistence } from './PortabilityLifecyclePersistence.js';
+import type { ProjectCheckpointPersistence } from './ProjectCheckpointPersistence.js';
 import type { RepositoryPlacementLease } from '../repositories/RepositoryPlacement.js';
 
 export interface AcquireProjectLeaseOptions {
@@ -61,6 +62,7 @@ export interface ProjectScope
   ProjectPersistence {
   readonly accept: AcceptPersistence;
   readonly collaboration: CollaborationProjectPersistence;
+  readonly checkpoint: ProjectCheckpointPersistence;
   readonly portability: PortabilityLifecyclePersistence;
   findMembership(memberId: CollabMemberId): Promise<ProjectMembershipRecord | undefined>;
   getRepositoryPlacement(): Promise<RepositoryPlacementLease | undefined>;
@@ -75,7 +77,10 @@ export interface PinnedProjectLease {
   ): Promise<DevelopmentBootstrapUploadLease>;
   withProjectScope<T>(
     operation: (scope: ProjectScope) => Promise<T>,
-    options?: Readonly<{ readonly signal?: AbortSignal }>,
+    options?: Readonly<{
+      readonly signal?: AbortSignal;
+      readonly snapshot?: 'repeatable-read';
+    }>,
   ): Promise<T>;
 }
 

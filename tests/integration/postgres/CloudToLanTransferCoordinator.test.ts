@@ -3,9 +3,12 @@ import { createHash } from 'node:crypto';
 import { describe, it } from 'node:test';
 
 import {
+  decodeCollabProjectBackupCheckpointCoordinationNdjson,
   decodeCollabTransferredMembershipClaimBatch,
+  encodeCollabProjectBackupCheckpointCoordinationNdjson,
   encodeCollabProtectedClaimAssociatedData,
   encodeCollabTransferredMembershipClaimBatchDigestInput,
+  type CollabProjectBackupRecord,
   type CollabTransferredMembershipRedemptionReceipt,
 } from '@claudian-collab/protocol';
 import { Client } from 'pg';
@@ -120,8 +123,8 @@ function claimBatch(transferId: string) {
     batchSha256: '0'.repeat(64),
     checkpointSha256: CHECKPOINT_SHA,
     claims: [
-      { claim: Buffer.alloc(32, 1).toString('base64url'), memberId: MANAGER_ID },
-      { claim: Buffer.alloc(32, 2).toString('base64url'), memberId: OFFLINE_ID },
+      { claim: Buffer.alloc(32, 11).toString('base64url'), memberId: MANAGER_ID },
+      { claim: Buffer.alloc(32, 12).toString('base64url'), memberId: OFFLINE_ID },
     ].sort((left, right) => left.memberId.localeCompare(right.memberId, 'en-US')),
     expiresAt: EXPIRES_AT,
     projectId: PROJECT_ID,
@@ -260,6 +263,75 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
           },
         });
         assert.equal(receipt.batchSha256, batch.batchSha256);
+        const backupRecords = await store.withProjectScope(
+          PROJECT_ID,
+          scope => scope.checkpoint.readProjectCheckpointRecords({
+            excludedOperationId: 'backup-inspection',
+            maximumCoordinationBytes: 1024 * 1024,
+            metadata: {
+              authorityId: 'authority-real',
+              authorityVolumeIdentity: 'volume-real',
+              coordinationSchemaVersion: 9,
+              maximumServerBuild: 'cloud-build-real',
+              minimumServerBuild: 'cloud-build-real',
+              repositoryFormatVersion: 1,
+              restoreEpoch: 1,
+            },
+            profile: 'backup',
+            snapshotAt: T0,
+          }),
+        );
+        const encodedBackup =
+          encodeCollabProjectBackupCheckpointCoordinationNdjson(
+            backupRecords as readonly CollabProjectBackupRecord[],
+          );
+        assert.deepEqual(
+          decodeCollabProjectBackupCheckpointCoordinationNdjson(encodedBackup),
+          backupRecords,
+        );
+        const backupKinds = new Set(backupRecords.map(record => record.kind));
+        for (const kind of [
+          'authority-transfer-recovery',
+          'lifecycle-journal',
+          'protected-claim-envelope',
+          'transfer-claim-batch-receipt',
+          'transfer-receipt-key',
+        ] as const) assert.equal(backupKinds.has(kind), true, kind);
+        assert.deepEqual(backupRecords.filter(record => (
+          batch.claims.some(claim => JSON.stringify(record).includes(claim.claim))
+        )).map(record => record.kind), []);
+
+        const exportRecords = await store.withProjectScope(
+          PROJECT_ID,
+          scope => scope.checkpoint.readProjectCheckpointRecords({
+            excludedOperationId: 'export-inspection',
+            maximumCoordinationBytes: 1024 * 1024,
+            metadata: {
+              authorityId: 'authority-real',
+              authorityVolumeIdentity: 'volume-real',
+              coordinationSchemaVersion: 9,
+              maximumServerBuild: 'cloud-build-real',
+              minimumServerBuild: 'cloud-build-real',
+              repositoryFormatVersion: 1,
+              restoreEpoch: 1,
+            },
+            profile: 'export',
+            snapshotAt: T0,
+          }),
+        );
+        for (const kind of [
+          'authority-transfer-recovery',
+          'lifecycle-journal',
+          'protected-claim-envelope',
+          'transfer-claim-batch-receipt',
+          'transfer-receipt-key',
+        ] as const) {
+          assert.equal(
+            exportRecords.some(record => record.kind === kind),
+            false,
+            kind,
+          );
+        }
         assert.equal((await coordinator.getStatus({
           principalId: MANAGER_PRINCIPAL,
           request: { projectId: PROJECT_ID, transferId: begun.transferId },

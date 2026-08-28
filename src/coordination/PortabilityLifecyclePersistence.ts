@@ -424,6 +424,7 @@ export interface ProjectDeletionIntentRecord extends ProjectDeletionIntentInput 
   readonly updatedAt: CollabIsoTimestamp;
 }
 
+/** Local Project checkpoint publication state, not restore verification. */
 export type ProjectBackupState = 'captured' | 'published' | 'verified';
 
 export interface ProjectBackupCatalogInput {
@@ -438,8 +439,10 @@ export interface ProjectBackupCatalogInput {
 }
 
 export interface ProjectBackupCatalogRecord extends ProjectBackupCatalogInput {
+  /** Immutable local publication time; this does not prove a restore. */
   readonly publishedAt: CollabIsoTimestamp | undefined;
   readonly state: ProjectBackupState;
+  /** Local manifest/artifact verification time; this does not prove a restore. */
   readonly verifiedAt: CollabIsoTimestamp | undefined;
 }
 

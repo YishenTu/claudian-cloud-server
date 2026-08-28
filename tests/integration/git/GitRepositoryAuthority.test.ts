@@ -818,7 +818,7 @@ printf upload-pack > '${marker}'`,
       executableBody: marker => (
         `printf '%s' "$$" > '${marker}'\ntrap '' TERM\nwhile :; do :; done`
       ),
-      operationTimeoutMs: 30,
+      operationTimeoutMs: 1_000,
     });
     try {
       await expectGitError(
@@ -901,7 +901,7 @@ while :; do sleep 1; done
 sh -c 'trap "" TERM; sleep 5' &
 printf '%s %s' "$$" "$!" > '${marker}'
 wait`,
-      operationTimeoutMs: 30,
+      operationTimeoutMs: 1_000,
     });
     let pids: readonly number[] = [];
     try {
