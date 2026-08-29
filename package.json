@@ -24,7 +24,7 @@
     "pretypecheck": "npm run check:runtime",
     "start": "node dist/main.js",
     "test": "npm run test:contract && npm run test:application && npm run test:postgres && npm run test:git && npm run test:deployment",
-    "test:application": "node --import tsx --test \"tests/config/**/*.test.ts\" \"tests/coordination/**/*.test.ts\" \"tests/integration/http/ApplicationLifecycle.test.ts\" \"tests/integration/http/DevelopmentBootstrapRoutes.test.ts\" \"tests/integration/http/ProjectEventRoutes.test.ts\" \"tests/integration/process/**/*.test.ts\" \"tests/observability/**/*.test.ts\" \"tests/onboarding/**/*.test.ts\" \"tests/project-authority/**/*.test.ts\" \"tests/request-context/**/*.test.ts\" \"tests/resource-admission/**/*.test.ts\" \"tests/server/**/*.test.ts\"",
+    "test:application": "node --import tsx --test \"tests/config/**/*.test.ts\" \"tests/coordination/**/*.test.ts\" \"tests/environment-maintenance/**/*.test.ts\" \"tests/integration/http/ApplicationLifecycle.test.ts\" \"tests/integration/http/DevelopmentBootstrapRoutes.test.ts\" \"tests/integration/http/ProjectEventRoutes.test.ts\" \"tests/integration/process/**/*.test.ts\" \"tests/observability/**/*.test.ts\" \"tests/onboarding/**/*.test.ts\" \"tests/project-authority/**/*.test.ts\" \"tests/request-context/**/*.test.ts\" \"tests/resource-admission/**/*.test.ts\" \"tests/server/**/*.test.ts\"",
     "test:contract": "node --import tsx --test \"tests/contract/**/*.test.ts\"",
     "test:deployment": "node --import tsx --test \"tests/deployment/**/*.test.ts\"",
     "test:git": "node --import tsx --test --test-concurrency=1 \"tests/integration/git/**/*.test.ts\"",
@@ -49,6 +49,7 @@
   },
   "dependencies": {
     "@claudian-collab/protocol": "3.2.1",
+    "fs-ext-extra-prebuilt": "2.2.13",
     "pg": "8.23.0",
     "ws": "8.21.3"
   }
