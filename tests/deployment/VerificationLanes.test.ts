@@ -24,7 +24,7 @@ describe('foundation verification lanes', () => {
     assert.equal(packageManifest.scripts['verify:git'], 'npm run test:git');
     assert.match(
       packageManifest.scripts['verify:fast'] ?? '',
-      /test:contract.*test:application.*test:deployment.*build/,
+      /test:contract.*test:application.*test:capacity.*test:deployment.*build/,
     );
     assert.match(
       packageManifest.scripts['verify:deployment'] ?? '',
