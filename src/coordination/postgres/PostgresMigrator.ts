@@ -78,6 +78,7 @@ interface MigrationRow {
 const MIGRATION_ROLE = 'claudian_cloud_migration';
 const MIGRATION_LOCK_NAMESPACE = 1_665_883_532;
 const MIGRATION_LOCK_KEY = 1;
+const MIGRATION_DEPENDENCY_TIMEOUT_MS = 300_000;
 
 function migrationStatementTokens(sql: string): readonly (readonly string[])[] {
   const statements: string[][] = [];
@@ -451,20 +452,47 @@ export class PostgresMigrator {
     this.#connectionString = options.connectionString;
   }
 
-  async #run(apply: boolean): Promise<PostgresMigrationPlan> {
-    const client = new Client({ connectionString: this.#connectionString });
+  async #run(
+    apply: boolean,
+    signal?: AbortSignal,
+  ): Promise<PostgresMigrationPlan> {
+    const client = new Client({
+      application_name: 'claudian-cloud-migration',
+      connectionString: this.#connectionString,
+      connectionTimeoutMillis: MIGRATION_DEPENDENCY_TIMEOUT_MS,
+      idle_in_transaction_session_timeout: MIGRATION_DEPENDENCY_TIMEOUT_MS,
+      lock_timeout: MIGRATION_DEPENDENCY_TIMEOUT_MS,
+      query_timeout: MIGRATION_DEPENDENCY_TIMEOUT_MS,
+      statement_timeout: MIGRATION_DEPENDENCY_TIMEOUT_MS,
+    });
     let connected = false;
     let locked = false;
+    let closePromise: Promise<void> | undefined;
+    const close = (): Promise<void> => {
+      closePromise ??= client.end().catch(() => undefined);
+      return closePromise;
+    };
+    const assertActive = (): void => {
+      if (signal?.aborted === true) {
+        throw new PostgresMigrationError('migration-failed');
+      }
+    };
+    const onAbort = (): void => { void close(); };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted === true) onAbort();
     try {
       const migrations = await loadMigrations();
+      assertActive();
       await client.connect();
       connected = true;
+      assertActive();
       await verifyMigrationRole(client);
       await client.query(
         'SELECT pg_advisory_lock($1::integer, $2::integer)',
         [MIGRATION_LOCK_NAMESPACE, MIGRATION_LOCK_KEY],
       );
       locked = true;
+      assertActive();
       if (apply) await ensureMigrationMetadata(client);
       const existing = await readMigrationRows(client, !apply);
       const nextVersion = verifyAppliedMigrations(existing, migrations);
@@ -472,6 +500,7 @@ export class PostgresMigrator {
       if (apply) {
         for (const migration of migrations) {
           if (migration.version >= nextVersion) {
+            assertActive();
             await applyMigration(client, migration);
           }
         }
@@ -486,6 +515,7 @@ export class PostgresMigrator {
       if (error instanceof PostgresMigrationError) throw error;
       throw new PostgresMigrationError('migration-failed');
     } finally {
+      signal?.removeEventListener('abort', onAbort);
       if (locked) {
         try {
           await client.query(
@@ -497,17 +527,13 @@ export class PostgresMigrator {
         }
       }
       if (connected) {
-        try {
-          await client.end();
-        } catch {
-          // No raw connection failure may cross the migration boundary.
-        }
+        await close();
       }
     }
   }
 
-  async apply(): Promise<void> {
-    await this.#run(true);
+  async apply(signal?: AbortSignal): Promise<void> {
+    await this.#run(true, signal);
   }
 
   preflight(): Promise<PostgresMigrationPlan> {
