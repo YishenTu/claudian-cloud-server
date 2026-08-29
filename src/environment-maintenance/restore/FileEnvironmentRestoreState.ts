@@ -181,6 +181,38 @@ export class FileEnvironmentRestoreState implements EnvironmentRestoreStatePort 
     }, signal);
   }
 
+  async inspectSettled(
+    signal?: AbortSignal,
+  ): Promise<EnvironmentRestoreStateInspection> {
+    assertOperationSignal(signal);
+    await this.#assertPrivateRoot();
+    const [journalPart, markerPart, removal, removalPart] = await Promise.all([
+      this.#readPrivateText(
+        this.#journalPart,
+        ENVIRONMENT_RESTORE_JOURNAL_MAX_UTF8_BYTES,
+      ),
+      this.#readPrivateText(this.#markerPart, 64),
+      this.#readPrivateText(
+        this.#removal,
+        ENVIRONMENT_RESTORE_JOURNAL_MAX_UTF8_BYTES,
+      ),
+      this.#readPrivateText(
+        this.#removalPart,
+        ENVIRONMENT_RESTORE_JOURNAL_MAX_UTF8_BYTES,
+      ),
+    ]);
+    if (
+      journalPart !== undefined
+      || markerPart !== undefined
+      || removal !== undefined
+      || removalPart !== undefined
+    ) fail();
+    const journal = await this.#readSettledJournal();
+    const pair = await this.#readSettledPair(journal);
+    assertOperationSignal(signal);
+    return Object.freeze({ journal, pair });
+  }
+
   async create(
     journal: EnvironmentRestoreJournal,
   ): Promise<EnvironmentRestoreJournal> {
@@ -592,6 +624,33 @@ export class FileEnvironmentRestoreState implements EnvironmentRestoreStatePort 
     await rename(this.#journalPart, this.#journal);
     await this.#syncRoot();
     return part;
+  }
+
+  async #readSettledJournal(): Promise<EnvironmentRestoreJournal | undefined> {
+    const currentText = await this.#readPrivateText(
+      this.#journal,
+      ENVIRONMENT_RESTORE_JOURNAL_MAX_UTF8_BYTES,
+    );
+    if (currentText === undefined) return undefined;
+    try {
+      return decodeEnvironmentRestoreJournal(JSON.parse(currentText));
+    } catch {
+      return fail();
+    }
+  }
+
+  async #readSettledPair(
+    journal: EnvironmentRestoreJournal | undefined,
+  ): Promise<EnvironmentRestorePairInspection> {
+    const marker = await this.#readPrivateText(this.#marker, 64);
+    if (marker === undefined) return 'absent';
+    if (!VOLUME_ID_PATTERN.test(marker)) return 'ambiguous';
+    const authorityVolumeId = marker.trim();
+    if (
+      journal !== undefined
+      && authorityVolumeId !== journal.authorityVolumeId
+    ) return 'ambiguous';
+    return Object.freeze({ authorityVolumeId });
   }
 
   async #readPair(
