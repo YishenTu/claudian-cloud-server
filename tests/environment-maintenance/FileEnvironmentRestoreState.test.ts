@@ -98,6 +98,37 @@ function repositoryPublications(): readonly EnvironmentRestoreRepositoryPublicat
 }
 
 describe('FileEnvironmentRestoreState', () => {
+  it('inspects settled metadata without creating or recovering private state', async () => {
+    const authorityRoot = await mkdtemp(join(tmpdir(), 'cloud-restore-state-'));
+    const lock = join(authorityRoot, '.environment-restore-state.lock');
+    const marker = join(authorityRoot, '.authority-volume-id');
+    const journalPath = join(authorityRoot, '.environment-restore-journal.json');
+    try {
+      await writeFile(
+        journalPath,
+        encodeEnvironmentRestoreJournal(journal('completed')),
+        { mode: 0o600 },
+      );
+      await writeFile(marker, `${TARGET_VOLUME_ID}\n`, { mode: 0o600 });
+
+      assert.deepEqual(
+        await new FileEnvironmentRestoreState({ authorityRoot })
+          .inspectSettled(),
+        {
+          journal: journal('completed'),
+          pair: { authorityVolumeId: TARGET_VOLUME_ID },
+        },
+      );
+      await assert.rejects(lstat(lock), { code: 'ENOENT' });
+      assert.equal(
+        await readFile(journalPath, 'utf8'),
+        encodeEnvironmentRestoreJournal(journal('completed')),
+      );
+    } finally {
+      await rm(authorityRoot, { force: true, recursive: true });
+    }
+  });
+
   it('rejects a filesystem root as the authority target', () => {
     assert.throws(
       () => new FileEnvironmentRestoreState({ authorityRoot: '/' }),

@@ -169,10 +169,11 @@ async function metadata(
   readonly restoreEpoch: number;
   readonly serverBuild: string;
 }>> {
+  const state = new FileEnvironmentRestoreState({
+    authorityRoot: authorityRoot(config),
+  });
   const facts = await new EnvironmentBackupMetadataSource({
-    state: new FileEnvironmentRestoreState({
-      authorityRoot: authorityRoot(config),
-    }),
+    state: { inspect: () => state.inspectSettled() },
   }).read();
   return Object.freeze({
     ...facts,

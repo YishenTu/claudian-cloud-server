@@ -9,6 +9,7 @@ import {
   readFile,
   rename,
   rm,
+  rmdir,
 } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, normalize, parse } from 'node:path';
 import { getuid } from 'node:process';
@@ -968,6 +969,27 @@ async function directoryExists(path: string): Promise<boolean> {
   }
 }
 
+async function removeEmptyPrivateDirectory(path: string): Promise<boolean> {
+  if (!await directoryExists(path)) return false;
+  await assertPrivateDirectory(path);
+  try {
+    await rmdir(path);
+    return true;
+  } catch (error: unknown) {
+    if (
+      typeof error === 'object'
+      && error !== null
+      && 'code' in error
+      && (
+        error.code === 'ENOENT'
+        || error.code === 'ENOTEMPTY'
+        || error.code === 'EEXIST'
+      )
+    ) return false;
+    fail('storage-unavailable');
+  }
+}
+
 async function inspectPublicationLocations(
   paths: PublicationPaths,
 ): Promise<{
@@ -1196,6 +1218,7 @@ InactiveRepositoryPublicationPort,
 ExactPersonalRefPort,
 ExactRepositoryRemovalPort {
   readonly #activeCaptures = new Set<string>();
+  readonly #captureAncestryTails = new Map<string, Promise<void>>();
   readonly #activeExactRepositoryReservations = new Set<
     ExactRepositoryReservationState
   >();
@@ -1602,14 +1625,14 @@ ExactRepositoryRemovalPort {
       return 'replayed';
     }
     if (!await directoryExists(paths.profile)) {
-      await this.#syncDirectory(paths.project);
+      await this.#removeEmptyCaptureAncestry(paths);
       return 'replayed';
     }
     const cleanup = captureOperationCleanupFact(
       input.projectId,
       input.operationId,
     );
-    return this.#removeDurableTree({
+    const result = await this.#removeDurableTree({
       assertTargetOwned: async () => {
         await assertPrivateDirectory(paths.project);
         await assertPrivateDirectory(paths.profile);
@@ -1622,6 +1645,8 @@ ExactRepositoryRemovalPort {
       signal,
       targetPath: paths.operation,
     });
+    await this.#removeEmptyCaptureAncestry(paths);
+    return result;
   }
 
   async #discardCapture(
@@ -1641,14 +1666,14 @@ ExactRepositoryRemovalPort {
       return 'replayed';
     }
     if (!await directoryExists(paths.profile)) {
-      await this.#syncDirectory(paths.project);
+      await this.#removeEmptyCaptureAncestry(paths);
       return 'replayed';
     }
     const cleanup = captureOperationCleanupFact(
       capture.projectId,
       capture.operationId,
     );
-    return this.#removeDurableTree({
+    const result = await this.#removeDurableTree({
       assertTargetOwned: () => this.#assertStoredCapture(paths, capture, signal),
       cleanupKey: cleanup.cleanupKey,
       markerJson: cleanup.markerJson,
@@ -1656,6 +1681,57 @@ ExactRepositoryRemovalPort {
       signal,
       targetPath: paths.operation,
     });
+    await this.#removeEmptyCaptureAncestry(paths);
+    return result;
+  }
+
+  async #removeEmptyCaptureAncestry(paths: CapturePaths): Promise<void> {
+    await this.#withCaptureAncestry(paths.projectId, async () => {
+      if (await removeEmptyPrivateDirectory(paths.profile)) {
+        await this.#syncDirectory(paths.project);
+      }
+      if (await removeEmptyPrivateDirectory(paths.project)) {
+        await this.#syncDirectory(this.#operationRoot);
+      }
+    });
+  }
+
+  async #ensureCaptureAncestry(
+    paths: CapturePaths,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    return this.#withCaptureAncestry(paths.projectId, async () => {
+      assertNotAborted(signal);
+      await ensureDirectory(paths.project);
+      await this.#syncDirectory(this.#operationRoot);
+      await ensureDirectory(paths.profile);
+      await this.#syncDirectory(paths.project);
+      const operationCreated = await ensureDirectory(paths.operation);
+      await this.#syncDirectory(paths.profile);
+      return operationCreated;
+    });
+  }
+
+  async #withCaptureAncestry<Result>(
+    projectId: string,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    const previous = this.#captureAncestryTails.get(projectId)
+      ?? Promise.resolve();
+    let release: (() => void) | undefined;
+    const tail = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    this.#captureAncestryTails.set(projectId, tail);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release?.();
+      if (this.#captureAncestryTails.get(projectId) === tail) {
+        this.#captureAncestryTails.delete(projectId);
+      }
+    }
   }
 
   publishInactive(
@@ -2179,12 +2255,7 @@ ExactRepositoryRemovalPort {
         input.placement.projectId,
         input.operationId,
       );
-      await ensureDirectory(paths.project);
-      await this.#syncDirectory(this.#operationRoot);
-      await ensureDirectory(paths.profile);
-      await this.#syncDirectory(paths.project);
-      const operationCreated = await ensureDirectory(paths.operation);
-      await this.#syncDirectory(paths.profile);
+      const operationCreated = await this.#ensureCaptureAncestry(paths, signal);
       await this.#ensureCaptureOwner(paths, signal, operationCreated);
       const replay = await this.#readReplay(paths, input, objectFormat, signal);
       if (replay !== undefined) {
@@ -2300,12 +2371,7 @@ ExactRepositoryRemovalPort {
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
       await assertPrivateDirectory(this.#operationRoot);
-      await ensureDirectory(paths.project);
-      await this.#syncDirectory(this.#operationRoot);
-      await ensureDirectory(paths.profile);
-      await this.#syncDirectory(paths.project);
-      const operationCreated = await ensureDirectory(paths.operation);
-      await this.#syncDirectory(paths.profile);
+      const operationCreated = await this.#ensureCaptureAncestry(paths, signal);
       await this.#ensureCaptureOwner(paths, signal, operationCreated);
       await removeOwnedFile(paths.verificationBundlePart);
       await removeOwnedFile(paths.verificationBundle);

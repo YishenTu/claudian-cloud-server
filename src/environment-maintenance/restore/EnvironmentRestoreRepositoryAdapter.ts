@@ -70,6 +70,41 @@ function replayedCheckpoint(
   });
 }
 
+function sameRefs(
+  left: EnvironmentRestoreRepositoryPublication['refs'],
+  right: EnvironmentRestoreRepositoryPublication['refs'],
+): boolean {
+  if (left.length !== right.length) return false;
+  for (const [index, ref] of left.entries()) {
+    const expected = right[index];
+    if (
+      expected === undefined
+      || ref.name !== expected.name
+      || ref.oid !== expected.oid
+    ) return false;
+  }
+  return true;
+}
+
+function samePublication(
+  left: EnvironmentRestoreRepositoryPublication,
+  right: EnvironmentRestoreRepositoryPublication,
+): boolean {
+  return left.artifactKey === right.artifactKey
+    && left.bundleByteCount === right.bundleByteCount
+    && left.bundleSha256 === right.bundleSha256
+    && left.objectFormat === right.objectFormat
+    && left.operationId === right.operationId
+    && left.placementGeneration === right.placementGeneration
+    && left.projectId === right.projectId
+    && left.publicationMarkerSha256 === right.publicationMarkerSha256
+    && left.repositoryStorageKey === right.repositoryStorageKey
+    && (left as { readonly status: unknown }).status === right.status
+    && left.storageNodeId === right.storageNodeId
+    && left.validationMarkerSha256 === right.validationMarkerSha256
+    && sameRefs(left.refs, right.refs);
+}
+
 /** Adapts canonical O1 backup artifacts to repository-owned staging/publish. */
 export class EnvironmentRestoreRepositoryAdapter
 implements EnvironmentRestoreRepositoryPort {
@@ -178,7 +213,7 @@ implements EnvironmentRestoreRepositoryPort {
           repositoryStorageKey: expected.repositoryStorageKey,
           signal: input.signal,
         }));
-        if (JSON.stringify(actual) !== JSON.stringify(expected)) return fail();
+        if (!samePublication(actual, expected)) return fail();
       }
     } catch (error: unknown) {
       if (error instanceof EnvironmentRestoreCoordinatorError) throw error;

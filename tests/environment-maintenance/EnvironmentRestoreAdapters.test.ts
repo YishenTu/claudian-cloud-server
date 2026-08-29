@@ -592,6 +592,7 @@ describe('production environment restore adapters', () => {
     const exactProject = project(exactManifest.manifestSha256);
     const imported: string[] = [];
     let publication: EnvironmentRestoreRepositoryPublication | undefined;
+    let publicationStatus: unknown = 'inactive';
     const repositories = new EnvironmentRestoreRepositoryAdapter({
       inspection: { assertEmpty: () => Promise.resolve() },
       publication: {
@@ -619,12 +620,12 @@ describe('production environment restore adapters', () => {
             operationId: input.checkpoint.operationId,
             placementGeneration: input.placementGeneration,
             projectId: input.checkpoint.projectId,
-            publicationMarkerSha256: 'd'.repeat(64),
             refs: input.checkpoint.refs,
             repositoryStorageKey: input.repositoryStorageKey,
-            status: 'inactive',
+            status: publicationStatus as 'inactive',
             storageNodeId: 'restore-node',
             validationMarkerSha256: input.checkpoint.markerSha256,
+            publicationMarkerSha256: 'd'.repeat(64),
           });
           return Promise.resolve(publication);
         },
@@ -664,6 +665,18 @@ describe('production environment restore adapters', () => {
     });
     assert.deepEqual(imported, [PROJECT_ID]);
     assert.deepEqual(publication, staged[0]);
+    publicationStatus = 'published';
+    await assert.rejects(
+      repositories.publish({
+        operationId: 'restore-operation-a',
+        repositories: staged,
+        signal: new AbortController().signal,
+      }),
+      (error: unknown) => (
+        error instanceof EnvironmentRestoreCoordinatorError
+        && error.code === 'dependency-failed'
+      ),
+    );
 
     const coordinationEvents: string[] = [];
     const coordination = new EnvironmentRestoreCoordinationAdapter({

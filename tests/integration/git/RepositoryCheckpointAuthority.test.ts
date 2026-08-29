@@ -7,7 +7,9 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  open,
   readFile,
+  readdir,
   rm,
   symlink,
   truncate,
@@ -1289,6 +1291,151 @@ exec '${GIT}' "$@"
     } finally {
       await syncFailureAuthority?.close();
       await captureAuthority?.close();
+      await authority.close();
+      await admission.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it('removes empty capture ancestry after exact operation cleanup', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'claudian-checkpoint-cleanup-'));
+    const repositoryRoot = join(root, 'repositories');
+    const operationRoot = join(root, 'checkpoint-operations');
+    const work = join(root, 'work');
+    const bundle = join(root, 'repository.bundle');
+    const projectId = 'project-cleanup';
+    const operationId = 'operation-cleanup';
+    let enterBlockedRootSync: (() => void) | undefined;
+    let enterCleanupRootSync: (() => void) | undefined;
+    let releaseBlockedRootSync: (() => void) | undefined;
+    let blockRootSync = false;
+    let rootSyncRaceActive = false;
+    const blockedRootSyncEntered = new Promise<void>(resolve => {
+      enterBlockedRootSync = resolve;
+    });
+    const blockedRootSyncRelease = new Promise<void>(resolve => {
+      releaseBlockedRootSync = resolve;
+    });
+    const cleanupRootSyncEntered = new Promise<void>(resolve => {
+      enterCleanupRootSync = resolve;
+    });
+    const admission = new ResourceAdmission({
+      maxChildren: 3,
+      maxChildrenPerProject: 2,
+      queueMax: 2,
+      queueMaxPerProject: 1,
+      queueTimeoutMs: 1_000,
+    });
+    const authority = new RepositoryCheckpointAuthority({
+      ...REPOSITORY_VALIDATION_LIMITS,
+      gitExecutable: GIT,
+      maximumBundleBytes: 2 * 1024 * 1024,
+      operationRoot,
+      operationTimeoutMs: 5_000,
+      outputMaxBytes: 64 * 1024,
+      placementValidator: new CurrentPlacement(),
+      repositoryRoot,
+      resourceAdmission: admission,
+      storageNodeId: 'node-a',
+      syncDirectory: async path => {
+        if (path === operationRoot) {
+          if (blockRootSync) {
+            blockRootSync = false;
+            enterBlockedRootSync?.();
+            await blockedRootSyncRelease;
+          } else if (rootSyncRaceActive) {
+            enterCleanupRootSync?.();
+          }
+        }
+        const handle = await open(path, 'r');
+        try {
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+      },
+    });
+    try {
+      await Promise.all([mkdir(repositoryRoot), mkdir(operationRoot)]);
+      await git(root, ['init', '--initial-branch=main', work]);
+      await git(work, ['config', 'user.email', 'test@example.invalid']);
+      await git(work, ['config', 'user.name', 'Test User']);
+      await writeFile(join(work, 'note.md'), '# cleanup\n');
+      await git(work, ['add', 'note.md']);
+      await git(work, ['commit', '-m', 'fixture']);
+      const oid = await git(work, ['rev-parse', 'HEAD']);
+      await git(work, ['branch', 'members/member-a']);
+      await git(work, [
+        'bundle',
+        'create',
+        bundle,
+        'refs/heads/main',
+        'refs/heads/members/member-a',
+      ]);
+      const bytes = await readFile(bundle);
+      const reservation = await authority.reserveCaptureOperation(projectId);
+      try {
+        await authority.verifyArtifact(reservation, {
+          body: createReadStream(bundle),
+          expectedByteCount: bytes.length,
+          expectedSha256: createHash('sha256').update(bytes).digest('hex'),
+          objectFormat: 'sha1',
+          operationId,
+          projectId,
+          refs: Object.freeze([
+            Object.freeze({ name: 'refs/heads/main', oid }),
+            Object.freeze({ name: 'refs/heads/members/member-a', oid }),
+          ]),
+        });
+      } finally {
+        await reservation.close();
+      }
+      const concurrentOperationId = 'operation-concurrent-cleanup';
+      const concurrentReservation = await authority.reserveCaptureOperation(projectId);
+      blockRootSync = true;
+      rootSyncRaceActive = true;
+      const concurrentVerification = authority.verifyArtifact(
+        concurrentReservation,
+        {
+          body: createReadStream(bundle),
+          expectedByteCount: bytes.length,
+          expectedSha256: createHash('sha256').update(bytes).digest('hex'),
+          objectFormat: 'sha1',
+          operationId: concurrentOperationId,
+          projectId,
+          refs: Object.freeze([
+            Object.freeze({ name: 'refs/heads/main', oid }),
+            Object.freeze({ name: 'refs/heads/members/member-a', oid }),
+          ]),
+        },
+      );
+      await blockedRootSyncEntered;
+      const cleanup = authority.discardCaptureOperation({
+        operationId,
+        projectId,
+      });
+      let cleanupRaceTimer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        cleanupRootSyncEntered,
+        new Promise<void>(resolve => {
+          cleanupRaceTimer = setTimeout(resolve, 100);
+        }),
+      ]);
+      if (cleanupRaceTimer !== undefined) clearTimeout(cleanupRaceTimer);
+      releaseBlockedRootSync?.();
+      const [cleanupResult, concurrentCheckpoint] = await Promise.all([
+        cleanup,
+        concurrentVerification,
+      ]);
+      assert.equal(cleanupResult, 'removed');
+      assert.equal(concurrentCheckpoint.operationId, concurrentOperationId);
+      await concurrentReservation.close();
+      assert.equal(await authority.discardCaptureOperation({
+        operationId: concurrentOperationId,
+        projectId,
+      }), 'removed');
+      assert.deepEqual(await readdir(operationRoot), []);
+    } finally {
       await authority.close();
       await admission.close();
       await rm(root, { force: true, recursive: true });
