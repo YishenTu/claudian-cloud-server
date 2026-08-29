@@ -179,10 +179,10 @@ describe('portability lifecycle persistence', () => {
             ORDER BY version`,
         );
         assert.deepEqual(history.rows.at(-1), {
-          checksum: 'f5a9541802d114f0959b2e62c9a884cba938c99926fe9547063d95a457a6d284',
-          name: 'terminal-project-lifecycle',
+          checksum: '696e518fbdf82efd12f6276650862e86f0eed5da66013de4ba924cd2a005fe3f',
+          name: 'terminal-continuity-catalog',
           state: 'applied',
-          version: 9,
+          version: 10,
         });
 
         const projectColumns = await migration.query<{
@@ -2468,6 +2468,10 @@ describe('portability lifecycle persistence', () => {
             (await scope.portability.getProjectTombstone())?.resultSha256,
             responseSha256,
           );
+        });
+        assert.deepEqual(await store.listTerminalProjectContinuity(), {
+          nextCursor: undefined,
+          projectIds: [projectId],
         });
       } finally {
         await store.close();

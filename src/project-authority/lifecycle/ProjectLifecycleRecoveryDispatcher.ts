@@ -26,6 +26,7 @@ export interface RecoverProjectLifecycleInput {
   readonly journal: ProjectLifecycleJournalRecord;
   readonly lease: PinnedProjectLease;
   readonly repositoryReservation?: ProjectLifecycleRecoveryReservation;
+  readonly signal?: AbortSignal;
 }
 
 export interface ProjectLifecycleRecoveryReservation {

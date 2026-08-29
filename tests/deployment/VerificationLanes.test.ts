@@ -28,7 +28,7 @@ describe('foundation verification lanes', () => {
     );
     assert.match(
       packageManifest.scripts['verify:deployment'] ?? '',
-      /docker build.*verify-runtime-image/,
+      /docker build.*--build-arg CLAUDIAN_SERVER_BUILD=[0-9a-f]{40}.*verify-runtime-image/,
     );
   });
 

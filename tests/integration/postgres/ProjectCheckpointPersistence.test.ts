@@ -267,6 +267,43 @@ describe('Project checkpoint persistence', () => {
     });
   });
 
+  it('captures every lifecycle record when no current operation is excluded', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await seed(database);
+      const store = coordination(database);
+      try {
+        await store.withProjectScope(PROJECT_ID, async scope => {
+          assert.equal(await scope.portability.putLifecycleJournal({
+            actorMemberId: undefined,
+            createdAt: CREATED_AT,
+            direction: undefined,
+            expectedAuthorityGeneration: 4,
+            idempotencyKey: 'verify-key-references-idempotency',
+            kind: 'backup',
+            operationId: 'verify-key-references',
+            phase: 'prepared',
+            projectId: PROJECT_ID,
+            requestFingerprint: 'a'.repeat(64),
+            scheduledAt: CREATED_AT,
+          }), 'created');
+          const records = await scope.checkpoint.readProjectCheckpointRecords({
+            maximumCoordinationBytes: 1024 * 1024,
+            metadata,
+            profile: 'backup',
+            snapshotAt: CREATED_AT,
+          });
+          assert.equal(records.some(record => (
+            record.kind === 'lifecycle-journal'
+            && record.value.operationId === 'verify-key-references'
+          )), true);
+        });
+      } finally {
+        await store.close();
+      }
+    });
+  });
+
   it('captures terminal responder principals only for backup', async () => {
     await withPostgresTestDatabase(async database => {
       await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();

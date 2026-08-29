@@ -14,7 +14,8 @@ describe('decodeMigrationConfig', () => {
 
   it('decodes only an immutable PostgreSQL migration credential', () => {
     const config = decodeMigrationConfig({
-      CLAUDIAN_CLOUD_POSTGRES_URL: 'postgresql://cloud-migration:secret@127.0.0.1/cloud',
+      CLAUDIAN_CLOUD_POSTGRES_MIGRATION_URL:
+        'postgresql://cloud-migration:secret@127.0.0.1/cloud',
     });
 
     assert.deepEqual(config, {
@@ -30,7 +31,8 @@ describe('decodeMigrationConfig', () => {
     ] as const) {
       assert.throws(
         () => decodeMigrationConfig({
-          CLAUDIAN_CLOUD_POSTGRES_URL: 'postgresql://migration:secret@127.0.0.1/cloud',
+          CLAUDIAN_CLOUD_POSTGRES_MIGRATION_URL:
+            'postgresql://migration:secret@127.0.0.1/cloud',
           [field]: value,
         }),
         (error: unknown) => {
@@ -50,7 +52,7 @@ describe('decodeMigrationConfig', () => {
     ]) {
       assert.throws(
         () => decodeMigrationConfig({
-          CLAUDIAN_CLOUD_POSTGRES_URL: postgresUrl,
+          CLAUDIAN_CLOUD_POSTGRES_MIGRATION_URL: postgresUrl,
         }),
         (error: unknown) => {
           assert.equal(error instanceof ConfigError, true);

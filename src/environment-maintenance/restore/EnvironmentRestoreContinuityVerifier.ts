@@ -9,8 +9,12 @@ import {
   type EnvironmentRestoreCatalog,
   type EnvironmentRestoreContinuityPort,
   type EnvironmentRestoreProject,
+  type EnvironmentRestoreTerminalProject,
 } from './EnvironmentRestoreCoordinator.js';
-import type { EnvironmentProjectBackupSource } from './PublishedEnvironmentBackupSource.js';
+import type {
+  EnvironmentProjectBackupSource,
+  EnvironmentTerminalProjectBackupSource,
+} from './PublishedEnvironmentBackupSource.js';
 
 export interface EnvironmentRestoreClaimCustodyPort {
   open(envelope: Readonly<
@@ -25,12 +29,17 @@ export interface EnvironmentRestoreContinuityStoragePort {
     project: EnvironmentRestoreProject,
     signal: AbortSignal,
   ): Promise<readonly CollabProjectBackupRecord[]>;
+  readRestoredTerminalContinuity?(
+    projectId: EnvironmentRestoreTerminalProject['projectId'],
+    signal: AbortSignal,
+  ): Promise<readonly CollabProjectBackupRecord[]>;
 }
 
 export interface EnvironmentRestoreContinuityVerifierOptions {
   readonly clock?: () => Date;
   readonly custody: EnvironmentRestoreClaimCustodyPort;
-  readonly source: EnvironmentProjectBackupSource;
+  readonly source: EnvironmentProjectBackupSource
+    & Partial<EnvironmentTerminalProjectBackupSource>;
   readonly storage: EnvironmentRestoreContinuityStoragePort;
 }
 
@@ -74,7 +83,8 @@ export class EnvironmentRestoreContinuityVerifier
 implements EnvironmentRestoreContinuityPort {
   readonly #clock: () => Date;
   readonly #custody: EnvironmentRestoreClaimCustodyPort;
-  readonly #source: EnvironmentProjectBackupSource;
+  readonly #source: EnvironmentProjectBackupSource
+    & Partial<EnvironmentTerminalProjectBackupSource>;
   readonly #storage: EnvironmentRestoreContinuityStoragePort;
 
   constructor(options: EnvironmentRestoreContinuityVerifierOptions) {
@@ -106,6 +116,19 @@ implements EnvironmentRestoreContinuityPort {
           input.signal,
         );
       }
+      for (const terminalProject of input.catalog.terminalProjects) {
+        const readTerminal = this.#source.readTerminalProjectBackup;
+        if (readTerminal === undefined) return fail();
+        const backup = await readTerminal.call(this.#source, {
+          signal: input.signal,
+          terminalProject,
+        });
+        await this.#verifyRecords(
+          backup.records,
+          input.catalog.createdAt,
+          input.signal,
+        );
+      }
     } catch (error: unknown) {
       if (
         error instanceof EnvironmentRestoreCoordinatorError
@@ -129,6 +152,25 @@ implements EnvironmentRestoreContinuityPort {
         const restored = continuityRecords(
           await this.#storage.readRestoredContinuity(
             project,
+            input.signal,
+          ),
+        );
+        if (JSON.stringify(restored) !== JSON.stringify(expected)) return fail();
+        await this.#verifyRecords(restored, input.catalog.createdAt, input.signal);
+      }
+      for (const terminalProject of input.catalog.terminalProjects) {
+        if (
+          this.#source.readTerminalProjectBackup === undefined
+          || this.#storage.readRestoredTerminalContinuity === undefined
+        ) return fail();
+        const backup = await this.#source.readTerminalProjectBackup({
+          signal: input.signal,
+          terminalProject,
+        });
+        const expected = continuityRecords(backup.records);
+        const restored = continuityRecords(
+          await this.#storage.readRestoredTerminalContinuity(
+            terminalProject.projectId,
             input.signal,
           ),
         );

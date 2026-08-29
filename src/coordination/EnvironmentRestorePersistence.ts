@@ -52,6 +52,13 @@ export interface EnvironmentRestorePersistence {
     readonly restoreEpoch: number;
     readonly signal: AbortSignal;
   }>): Promise<void>;
+  importTerminalProject?(input: Readonly<{
+    readonly operationId: string;
+    readonly projectId: CollabProjectId;
+    readonly records: readonly CollabProjectBackupRecord[];
+    readonly restoreEpoch: number;
+    readonly signal: AbortSignal;
+  }>): Promise<void>;
   publishAuthority(input: Readonly<{
     readonly catalog: EnvironmentRestorePersistenceCatalog;
     readonly operationId: string;
@@ -80,4 +87,15 @@ export interface EnvironmentRestorePersistence {
     project: EnvironmentRestorePersistenceProject,
     signal: AbortSignal,
   ): Promise<readonly CollabProjectBackupRecord[]>;
+  readRestoredTerminalContinuity?(
+    projectId: CollabProjectId,
+    signal: AbortSignal,
+  ): Promise<readonly CollabProjectBackupRecord[]>;
+  verifyRestoredTerminalProject?(input: Readonly<{
+    readonly operationId: string;
+    readonly projectId: CollabProjectId;
+    readonly records: readonly CollabProjectBackupRecord[];
+    readonly restoreEpoch: number;
+    readonly signal: AbortSignal;
+  }>): Promise<void>;
 }

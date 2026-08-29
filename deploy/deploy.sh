@@ -34,6 +34,10 @@ is_backup_schema() {
   [[ "$1" == 'pending' ]] || is_schema_version "$1"
 }
 
+is_backup_image() {
+  [[ "$1" == 'pending' ]] || is_image_identity "$1"
+}
+
 is_rollback_proof() {
   [[ "$1" == 'safe' || "$1" == 'probe' ]]
 }
@@ -134,6 +138,7 @@ failure_mode="${CLAUDIAN_DEPLOY_FAILURE_MODE:-fixed-forward}"
 compose_project="${CLAUDIAN_DEPLOY_COMPOSE_PROJECT:-claudian-cloud-server}"
 postgres_port="${CLAUDIAN_CLOUD_POSTGRES_PORT:-5432}"
 restore_compose_project="${CLAUDIAN_DEPLOY_RESTORE_COMPOSE_PROJECT:-}"
+restore_bootstrap_environment_file="${CLAUDIAN_DEPLOY_RESTORE_BOOTSTRAP_ENV_FILE:-}"
 restore_environment_file="${CLAUDIAN_DEPLOY_RESTORE_ENV_FILE:-}"
 restore_migration_environment_file="${CLAUDIAN_DEPLOY_RESTORE_MIGRATION_ENV_FILE:-}"
 restore_postgres_environment_file="${CLAUDIAN_DEPLOY_RESTORE_POSTGRES_ENV_FILE:-}"
@@ -154,20 +159,20 @@ dockerfile='deploy/Dockerfile'
 [[ "$postgres_port" =~ ^[1-9][0-9]{0,4}$ ]] || fail 'invalid-postgres-port'
 command -v dd >/dev/null 2>&1 || fail 'durable-state-tool-unavailable'
 command -v sync >/dev/null 2>&1 || fail 'durable-state-tool-unavailable'
-if [[ "$failure_mode" == 'restore' ]]; then
-  [[ -n "$restore_compose_project" \
+[[ -n "$restore_compose_project" \
       && "$restore_compose_project" != "$compose_project" \
       && "$restore_compose_project" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ \
+      && -r "$restore_bootstrap_environment_file" \
       && -r "$restore_environment_file" \
       && -r "$restore_migration_environment_file" \
       && -r "$restore_postgres_environment_file" \
       && "$restore_environment_file" != "$environment_file" \
+      && "$restore_bootstrap_environment_file" != "$environment_file" \
       && "$restore_migration_environment_file" != "$migration_environment_file" \
       && "$restore_postgres_environment_file" != "$postgres_environment_file" \
       && "$restore_postgres_port" =~ ^[1-9][0-9]{0,4}$ \
       && "$restore_postgres_port" != "$postgres_port" ]] || \
-    fail 'restore-target-required'
-fi
+  fail 'restore-target-required'
 
 git fetch --prune origin
 revision="$(git rev-parse --verify "${deployment_ref}^{commit}")" || \
@@ -177,6 +182,7 @@ git checkout --detach "$revision"
 operation_id=''
 attempt_phase=''
 backup_schema=''
+backup_image=''
 rollback_proof=''
 image_tag="${image_repository}:${revision}"
 compose=(docker compose --file "$compose_file")
@@ -184,17 +190,24 @@ build=(docker build)
 if [[ -n "$build_network" ]]; then
   build+=(--network "$build_network")
 fi
-build+=(--file "$dockerfile" --tag "$image_tag" .)
+build+=(
+  --build-arg "CLAUDIAN_SERVER_BUILD=$revision"
+  --file "$dockerfile"
+  --tag "$image_tag"
+  .
+)
 
 compose_for() {
   local selected_image="$1"
   shift
   CLAUDIAN_CLOUD_ENV_FILE="$environment_file" \
+  CLAUDIAN_CLOUD_BOOTSTRAP_MODE=authority \
   CLAUDIAN_CLOUD_MIGRATION_ENV_FILE="$migration_environment_file" \
   CLAUDIAN_CLOUD_POSTGRES_ENV_FILE="$postgres_environment_file" \
   CLAUDIAN_CLOUD_IMAGE="$selected_image" \
   CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID="$operation_id" \
   CLAUDIAN_CLOUD_POSTGRES_PORT="$postgres_port" \
+  CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED="${CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED:-true}" \
     "${compose[@]}" --project-name "$compose_project" "$@"
 }
 
@@ -202,16 +215,28 @@ restore_compose_for() {
   local selected_image="$1"
   shift
   CLAUDIAN_CLOUD_ENV_FILE="$restore_environment_file" \
+  CLAUDIAN_CLOUD_BOOTSTRAP_MODE=restore-target \
+  CLAUDIAN_CLOUD_BOOTSTRAP_ENV_FILE="$restore_bootstrap_environment_file" \
   CLAUDIAN_CLOUD_MIGRATION_ENV_FILE="$restore_migration_environment_file" \
   CLAUDIAN_CLOUD_POSTGRES_ENV_FILE="$restore_postgres_environment_file" \
   CLAUDIAN_CLOUD_IMAGE="$selected_image" \
   CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID="$operation_id" \
   CLAUDIAN_CLOUD_POSTGRES_PORT="$restore_postgres_port" \
+  CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED="${CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED:-true}" \
     "${compose[@]}" --project-name "$restore_compose_project" "$@"
 }
 
 start_image() {
-  compose_for "$1" up \
+  local selected_image="$1"
+  local recovery_required="$2"
+  if [[ "$recovery_required" == 'true' ]]; then
+    CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED=true \
+      compose_for "$selected_image" run --rm cloud-restore-recovery || return 1
+  elif [[ "$recovery_required" != 'false' ]]; then
+    return 1
+  fi
+  CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED="$recovery_required" \
+    compose_for "$selected_image" up \
     --detach \
     --no-build \
     --wait \
@@ -219,7 +244,16 @@ start_image() {
 }
 
 start_restored_image() {
-  restore_compose_for "$1" up \
+  local selected_image="$1"
+  local recovery_required="$2"
+  if [[ "$recovery_required" == 'true' ]]; then
+    CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED=true \
+      restore_compose_for "$selected_image" run --rm cloud-restore-recovery || return 1
+  elif [[ "$recovery_required" != 'false' ]]; then
+    return 1
+  fi
+  CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED="$recovery_required" \
+    restore_compose_for "$selected_image" up \
     --detach \
     --no-build \
     --wait \
@@ -263,7 +297,7 @@ run_maintenance() {
 }
 
 read_restored_schema() {
-  restore_compose_for "$candidate_image" run --rm \
+  restore_compose_for "$1" run --rm \
     cloud-migration node dist/migrate.js preflight
 }
 
@@ -271,6 +305,24 @@ run_restore_maintenance() {
   local selected_image="$1"
   shift
   restore_compose_for "$selected_image" run --rm "$@"
+}
+
+reset_restore_target() {
+  local selected_image="$1"
+  restore_compose_for "$selected_image" down \
+    --volumes --remove-orphans >/dev/null 2>&1 || return 1
+  restore_compose_for "$selected_image" up \
+    --detach \
+    --no-build \
+    --wait \
+    --wait-timeout "$wait_timeout" \
+    postgres || return 1
+  restore_compose_for "$selected_image" run --rm cloud-bootstrap
+}
+
+discard_restore_target() {
+  restore_compose_for "$1" down \
+    --volumes --remove-orphans >/dev/null 2>&1
 }
 
 sync_attempt_file() {
@@ -286,6 +338,7 @@ read_attempt_state() {
   local state_revision=''
   local state_operation=''
   local state_backup_schema=''
+  local state_backup_image=''
   local state_rollback_proof=''
   local state_extra=''
   [[ -f "$attempt_state_file" && ! -L "$attempt_state_file" ]] || return 1
@@ -295,6 +348,7 @@ read_attempt_state() {
     state_operation \
     state_backup_schema \
     state_rollback_proof \
+    state_backup_image \
     state_extra < "$attempt_state_file" 2>/dev/null || return 1
   [[ -z "$state_extra" ]] || return 1
   is_attempt_phase "$state_phase" || return 1
@@ -302,6 +356,16 @@ read_attempt_state() {
   is_operation_identity "$state_operation" || return 1
   is_backup_schema "$state_backup_schema" || return 1
   is_rollback_proof "$state_rollback_proof" || return 1
+  is_backup_image "$state_backup_image" || return 1
+  if [[ "$state_backup_schema" == 'pending' \
+      && "$state_backup_image" != 'pending' ]]; then
+    return 1
+  fi
+  if [[ "$state_backup_image" == 'pending' \
+      && "$state_phase" != 'backup-active' \
+      && "$state_phase" != 'forward-only' ]]; then
+    return 1
+  fi
   if [[ "$state_backup_schema" == 'pending' \
       && "$state_phase" != 'backup-active' ]]; then
     return 1
@@ -315,12 +379,13 @@ read_attempt_state() {
       && "$state_rollback_proof" != 'probe' ]]; then
     return 1
   fi
-  printf '%s %s %s %s %s\n' \
+  printf '%s %s %s %s %s %s\n' \
     "$state_phase" \
     "$state_revision" \
     "$state_operation" \
     "$state_backup_schema" \
-    "$state_rollback_proof"
+    "$state_rollback_proof" \
+    "$state_backup_image"
 }
 
 generate_operation_identity() {
@@ -348,7 +413,7 @@ create_or_resume_attempt() {
   umask 077
   temporary_state="$(mktemp "${attempt_state_file}.tmp.XXXXXX" 2>/dev/null)" || \
     fail 'deployment-attempt-state-unavailable'
-  if ! printf 'backup-active %s %s pending safe\n' \
+  if ! printf 'backup-active %s %s pending safe pending\n' \
     "$revision" \
     "$generated_operation" > "$temporary_state" 2>/dev/null; then
     rm -f -- "$temporary_state" 2>/dev/null
@@ -361,7 +426,7 @@ create_or_resume_attempt() {
   if ln "$temporary_state" "$attempt_state_file" 2>/dev/null; then
     rm -f -- "$temporary_state" 2>/dev/null
     sync_attempt_directory || fail 'deployment-attempt-state-unavailable'
-    printf 'backup-active %s %s pending safe\n' \
+    printf 'backup-active %s %s pending safe pending\n' \
       "$revision" \
       "$generated_operation"
     return
@@ -376,11 +441,13 @@ replace_attempt_state() {
   local next_operation="$3"
   local next_backup_schema="$4"
   local next_rollback_proof="$5"
+  local next_backup_image="$6"
   local observed_phase=''
   local observed_revision=''
   local observed_operation=''
   local observed_backup_schema=''
   local observed_rollback_proof=''
+  local observed_backup_image=''
   local temporary_state
   IFS=' ' read -r \
     observed_phase \
@@ -388,15 +455,27 @@ replace_attempt_state() {
     observed_operation \
     observed_backup_schema \
     observed_rollback_proof \
+    observed_backup_image \
     <<< "$(read_attempt_state)" || return 1
   [[ "$observed_phase" == "$expected_phase" \
       && "$observed_operation" == "$operation_id" \
       && "$observed_backup_schema" == "$backup_schema" \
-      && "$observed_rollback_proof" == "$rollback_proof" ]] || return 1
+      && "$observed_rollback_proof" == "$rollback_proof" \
+      && "$observed_backup_image" == "$backup_image" ]] || return 1
   is_attempt_phase "$next_phase" || return 1
   is_operation_identity "$next_operation" || return 1
   is_backup_schema "$next_backup_schema" || return 1
   is_rollback_proof "$next_rollback_proof" || return 1
+  is_backup_image "$next_backup_image" || return 1
+  if [[ "$next_backup_schema" == 'pending' \
+      && "$next_backup_image" != 'pending' ]]; then
+    return 1
+  fi
+  if [[ "$next_backup_image" == 'pending' \
+      && "$next_phase" != 'backup-active' \
+      && "$next_phase" != 'forward-only' ]]; then
+    return 1
+  fi
   if [[ "$next_backup_schema" == 'pending' \
       && "$next_phase" != 'backup-active' ]]; then
     return 1
@@ -412,12 +491,13 @@ replace_attempt_state() {
   fi
   temporary_state="$(mktemp "${attempt_state_file}.tmp.XXXXXX" 2>/dev/null)" || \
     return 1
-  if ! printf '%s %s %s %s %s\n' \
+  if ! printf '%s %s %s %s %s %s\n' \
     "$next_phase" \
     "$revision" \
     "$next_operation" \
     "$next_backup_schema" \
-    "$next_rollback_proof" > "$temporary_state" 2>/dev/null; then
+    "$next_rollback_proof" \
+    "$next_backup_image" > "$temporary_state" 2>/dev/null; then
     rm -f -- "$temporary_state" 2>/dev/null
     return 1
   fi
@@ -434,6 +514,7 @@ replace_attempt_state() {
   operation_id="$next_operation"
   backup_schema="$next_backup_schema"
   rollback_proof="$next_rollback_proof"
+  backup_image="$next_backup_image"
 }
 
 discard_attempt_state() {
@@ -442,17 +523,20 @@ discard_attempt_state() {
   local observed_operation=''
   local observed_backup_schema=''
   local observed_rollback_proof=''
+  local observed_backup_image=''
   IFS=' ' read -r \
     observed_phase \
     observed_revision \
     observed_operation \
     observed_backup_schema \
     observed_rollback_proof \
+    observed_backup_image \
     <<< "$(read_attempt_state)" || return 1
   [[ "$observed_phase" == "$attempt_phase" \
       && "$observed_operation" == "$operation_id" \
       && "$observed_backup_schema" == "$backup_schema" \
-      && "$observed_rollback_proof" == "$rollback_proof" ]] || return 1
+      && "$observed_rollback_proof" == "$rollback_proof" \
+      && "$observed_backup_image" == "$backup_image" ]] || return 1
   rm -- "$attempt_state_file" 2>/dev/null || return 1
   sync_attempt_directory || return 1
   attempt_phase=''
@@ -463,7 +547,7 @@ rollback_before_advancement() {
   [[ "$attempt_phase" == 'backup-active' ]] || fail "$reason"
   printf 'deployment.rolling-back\n' >&2
   discard_attempt_state || fail 'deployment-attempt-state-settlement-failed'
-  if ! start_image "$previous_image"; then
+  if ! start_image "$previous_image" false; then
     fail 'replacement-and-rollback-failed'
   fi
   printf 'deployment.rolled-back\n' >&2
@@ -476,7 +560,7 @@ rollback_to_compatible_previous() {
   image_supports_schema "$previous_image" "$observed_schema" || fail "$reason"
   printf 'deployment.rolling-back-compatible-image\n' >&2
   discard_attempt_state || fail 'deployment-attempt-state-settlement-failed'
-  if ! start_image "$previous_image"; then
+  if ! start_image "$previous_image" false; then
     fail 'replacement-and-rollback-failed'
   fi
   printf 'deployment.rolled-back-compatible-image\n' >&2
@@ -491,7 +575,7 @@ rollback_to_verified_previous() {
       && "$observed_schema" == "$backup_schema" ]] || fail "$reason"
   printf 'deployment.rolling-back-verified-image\n' >&2
   discard_attempt_state || fail 'deployment-attempt-state-settlement-failed'
-  if ! start_image "$previous_image"; then
+  if ! start_image "$previous_image" false; then
     fail 'replacement-and-rollback-failed'
   fi
   printf 'deployment.rolled-back-verified-image\n' >&2
@@ -506,12 +590,14 @@ if [[ -e "$attempt_state_file" || -L "$attempt_state_file" ]]; then
   existing_attempt_operation=''
   existing_backup_schema=''
   existing_rollback_proof=''
+  existing_backup_image=''
   IFS=' ' read -r \
     existing_attempt_phase \
     existing_attempt_revision \
     existing_attempt_operation \
     existing_backup_schema \
-    existing_rollback_proof <<< "$existing_attempt_state"
+    existing_rollback_proof \
+    existing_backup_image <<< "$existing_attempt_state"
   if [[ "$existing_attempt_phase" == 'restored-active' ]]; then
     fail 'restored-authority-active'
   fi
@@ -544,7 +630,8 @@ IFS=' ' read -r \
   attempt_revision \
   operation_id \
   backup_schema \
-  rollback_proof <<< "$attempt_state"
+  rollback_proof \
+  backup_image <<< "$attempt_state"
 if ! compose_for "$previous_image" stop cloud-server; then
   if [[ "$attempt_phase" == 'backup-active' ]]; then
     discard_attempt_state || fail 'deployment-attempt-state-settlement-failed'
@@ -552,7 +639,6 @@ if ! compose_for "$previous_image" stop cloud-server; then
   fail 'runtime-stop-failed'
 fi
 
-backup_image="$previous_image"
 if [[ "$attempt_phase" == 'forward-only' ]]; then
   recovery_schema="$(read_current_schema "$candidate_image")" || \
     fail 'forward-recovery-schema-unknown'
@@ -563,9 +649,9 @@ if [[ "$attempt_phase" == 'forward-only' ]]; then
     previous_supports_recovery=1
   fi
   if image_supports_schema "$candidate_image" "$recovery_schema"; then
-    backup_image="$candidate_image"
+    selected_backup_image="$candidate_image"
   elif [[ $previous_supports_recovery -eq 1 ]]; then
-    backup_image="$previous_image"
+    selected_backup_image="$previous_image"
   else
     fail 'forward-recovery-schema-unsupported'
   fi
@@ -575,21 +661,47 @@ if [[ "$attempt_phase" == 'forward-only' ]]; then
     'forward-only' \
     "$next_operation_id" \
     "$backup_schema" \
-    'probe' || \
+    'probe' \
+    'pending' || \
     fail 'deployment-attempt-state-settlement-failed'
-  if ! run_maintenance "$backup_image" cloud-backup; then
+  if ! run_maintenance "$selected_backup_image" cloud-backup; then
     if [[ $previous_supports_recovery -eq 1 ]]; then
       rollback_to_compatible_previous 'backup-failed' "$recovery_schema"
     fi
     fail 'forward-recovery-backup-failed'
   fi
-  if ! run_maintenance "$backup_image" cloud-verify-backup; then
+  if ! reset_restore_target "$selected_backup_image"; then
+    discard_restore_target "$selected_backup_image" >/dev/null 2>&1 || true
+    if [[ $previous_supports_recovery -eq 1 ]]; then
+      rollback_to_compatible_previous \
+        'backup-restore-target-provision-failed' \
+        "$recovery_schema"
+    fi
+    fail 'forward-recovery-backup-restore-target-provision-failed'
+  fi
+  if ! run_restore_maintenance "$selected_backup_image" cloud-verify-backup; then
+    discard_restore_target "$selected_backup_image" >/dev/null 2>&1 || true
     if [[ $previous_supports_recovery -eq 1 ]]; then
       rollback_to_compatible_previous \
         'backup-verification-failed' \
         "$recovery_schema"
     fi
     fail 'forward-recovery-backup-verification-failed'
+  fi
+  restored_schema="$(read_restored_schema "$selected_backup_image")" || {
+    discard_restore_target "$selected_backup_image" >/dev/null 2>&1 || true
+    fail 'forward-recovery-backup-schema-unavailable'
+  }
+  if [[ "$restored_schema" != "$recovery_schema" ]]; then
+    discard_restore_target "$selected_backup_image" >/dev/null 2>&1 || true
+    fail 'forward-recovery-backup-schema-mismatch'
+  fi
+  if ! run_restore_maintenance "$selected_backup_image" cloud-verify-authority; then
+    discard_restore_target "$selected_backup_image" >/dev/null 2>&1 || true
+    fail 'forward-recovery-backup-authority-verification-failed'
+  fi
+  if ! discard_restore_target "$selected_backup_image"; then
+    fail 'forward-recovery-backup-cleanup-failed'
   fi
   recovery_next_phase='schema-forward'
   if [[ $previous_supports_recovery -eq 1 ]]; then
@@ -604,7 +716,8 @@ if [[ "$attempt_phase" == 'forward-only' ]]; then
     "$recovery_next_phase" \
     "$operation_id" \
     "$recovery_schema" \
-    "$recovery_rollback_proof" || \
+    "$recovery_rollback_proof" \
+    "$selected_backup_image" || \
     fail 'deployment-attempt-state-settlement-failed'
 elif [[ "$attempt_phase" == 'backup-active' ]]; then
   observed_backup_schema="$(read_current_schema "$candidate_image")" || \
@@ -615,26 +728,49 @@ elif [[ "$attempt_phase" == 'backup-active' ]]; then
       && "$backup_schema" != "$observed_backup_schema" ]]; then
     fail 'backup-schema-changed'
   fi
-  if image_supports_schema "$candidate_image" "$observed_backup_schema"; then
-    backup_image="$candidate_image"
-  elif image_supports_schema "$previous_image" "$observed_backup_schema"; then
-    backup_image="$previous_image"
-  else
-    rollback_before_advancement 'backup-schema-unsupported'
+  if [[ "$backup_schema" == 'pending' ]]; then
+    if image_supports_schema "$candidate_image" "$observed_backup_schema"; then
+      selected_backup_image="$candidate_image"
+    elif image_supports_schema "$previous_image" "$observed_backup_schema"; then
+      selected_backup_image="$previous_image"
+    else
+      rollback_before_advancement 'backup-schema-unsupported'
+    fi
+    if ! run_maintenance "$selected_backup_image" cloud-backup; then
+      rollback_before_advancement 'backup-failed'
+    fi
+    if ! reset_restore_target "$selected_backup_image"; then
+      discard_restore_target "$selected_backup_image" >/dev/null 2>&1 || true
+      rollback_before_advancement 'backup-restore-target-provision-failed'
+    fi
+    if ! run_restore_maintenance "$selected_backup_image" cloud-verify-backup; then
+      discard_restore_target "$selected_backup_image" >/dev/null 2>&1 || true
+      rollback_before_advancement 'backup-verification-failed'
+    fi
+    restored_schema="$(read_restored_schema "$selected_backup_image")" || {
+      discard_restore_target "$selected_backup_image" >/dev/null 2>&1 || true
+      rollback_before_advancement 'backup-clean-restore-schema-unavailable'
+    }
+    if [[ "$restored_schema" != "$observed_backup_schema" ]]; then
+      discard_restore_target "$selected_backup_image" >/dev/null 2>&1 || true
+      rollback_before_advancement 'backup-clean-restore-schema-mismatch'
+    fi
+    if ! run_restore_maintenance "$selected_backup_image" cloud-verify-authority; then
+      discard_restore_target "$selected_backup_image" >/dev/null 2>&1 || true
+      rollback_before_advancement 'backup-clean-restore-verification-failed'
+    fi
+    if ! discard_restore_target "$selected_backup_image"; then
+      rollback_before_advancement 'backup-clean-restore-cleanup-failed'
+    fi
+    replace_attempt_state \
+      'backup-active' \
+      'backup-active' \
+      "$operation_id" \
+      "$observed_backup_schema" \
+      'safe' \
+      "$selected_backup_image" || \
+      fail 'deployment-attempt-state-settlement-failed'
   fi
-  if ! run_maintenance "$backup_image" cloud-backup; then
-    rollback_before_advancement 'backup-failed'
-  fi
-  if ! run_maintenance "$backup_image" cloud-verify-backup; then
-    rollback_before_advancement 'backup-verification-failed'
-  fi
-  replace_attempt_state \
-    'backup-active' \
-    'backup-active' \
-    "$operation_id" \
-    "$observed_backup_schema" \
-    'safe' || \
-    fail 'deployment-attempt-state-settlement-failed'
 elif [[ "$attempt_phase" != 'schema-forward' ]]; then
   fail 'deployment-attempt-state-invalid'
 fi
@@ -661,7 +797,8 @@ if [[ "$attempt_phase" == 'backup-active' ]]; then
     'schema-forward' \
     "$operation_id" \
     "$backup_schema" \
-    "$rollback_proof" || \
+    "$rollback_proof" \
+    "$backup_image" || \
     fail 'deployment-attempt-state-settlement-failed'
 fi
 [[ "$attempt_phase" == 'schema-forward' ]] || \
@@ -723,10 +860,11 @@ if [[ $candidate_status -eq 0 ]]; then
     'forward-only' \
     "$operation_id" \
     "$backup_schema" \
-    'probe' || \
+    'probe' \
+    "$backup_image" || \
     fail 'deployment-attempt-state-settlement-failed'
   set +e
-  start_image "$candidate_image"
+  start_image "$candidate_image" true
   candidate_status=$?
   set -e
 fi
@@ -759,10 +897,14 @@ if [[ $previous_supports_target -eq 1 ]]; then
 fi
 
 if [[ "$failure_mode" == 'restore' ]]; then
-  if ! run_restore_maintenance "$candidate_image" cloud-restore; then
+  if ! reset_restore_target "$backup_image"; then
+    fail 'restore-target-provision-failed'
+  fi
+  if ! run_restore_maintenance "$backup_image" cloud-restore; then
+    discard_restore_target "$backup_image" >/dev/null 2>&1 || true
     fail 'verified-backup-restore-failed'
   fi
-  restored_schema="$(read_restored_schema)" || \
+  restored_schema="$(read_restored_schema "$backup_image")" || \
     fail 'restored-schema-unavailable'
   if [[ "$restored_schema" != "$backup_schema" ]]; then
     fail 'restored-schema-mismatch'
@@ -770,7 +912,7 @@ if [[ "$failure_mode" == 'restore' ]]; then
   if ! image_supports_schema "$previous_image" "$restored_schema"; then
     fail 'restored-schema-unsupported-by-previous-image'
   fi
-  if ! run_restore_maintenance "$previous_image" cloud-verify-authority; then
+  if ! run_restore_maintenance "$backup_image" cloud-verify-authority; then
     fail 'restored-authority-verification-failed'
   fi
   replace_attempt_state \
@@ -778,9 +920,10 @@ if [[ "$failure_mode" == 'restore' ]]; then
     'restored-active' \
     "$operation_id" \
     "$backup_schema" \
-    'probe' || \
+    'probe' \
+    "$backup_image" || \
     fail 'deployment-attempt-state-settlement-failed'
-  if ! start_restored_image "$previous_image"; then
+  if ! start_restored_image "$previous_image" false; then
     fail 'restored-image-start-failed'
   fi
   printf 'deployment.restored-backup\n' >&2

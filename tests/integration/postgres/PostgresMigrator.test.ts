@@ -3,6 +3,8 @@ import { describe, it } from 'node:test';
 
 import { Client } from 'pg';
 
+import { MAINTENANCE_POSTGRES_SCHEMA_COMPATIBILITY } from '../../../src/config/PostgresSchemaCompatibility.js';
+import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
 import {
   assertTransactionalMigrationSql,
   PostgresMigrationError,
@@ -22,6 +24,7 @@ const PORTABILITY_LIFECYCLE_CHECKSUM = 'a7c4773253250fc0c02e0e6f02026b22ef7f1767
 const LAN_TO_CLOUD_TRANSFER_CHECKSUM = 'd49bf1335d3410cdd95ff2b928f21264eb6212e7db9baea6561d118038d06a95';
 const CLOUD_TO_LAN_TRANSFER_CHECKSUM = '12e60f0ef26d2906687635cc4bdc59f33cb3bbfbc2095d2e7196b57417eb0e12';
 const TERMINAL_PROJECT_LIFECYCLE_CHECKSUM = 'f5a9541802d114f0959b2e62c9a884cba938c99926fe9547063d95a457a6d284';
+const TERMINAL_CONTINUITY_CATALOG_CHECKSUM = '696e518fbdf82efd12f6276650862e86f0eed5da66013de4ba924cd2a005fe3f';
 
 const MIGRATION_HISTORY = Object.freeze([
   { checksum: FOUNDATION_CHECKSUM, name: 'foundation', version: 1 },
@@ -56,6 +59,11 @@ const MIGRATION_HISTORY = Object.freeze([
     checksum: TERMINAL_PROJECT_LIFECYCLE_CHECKSUM,
     name: 'terminal-project-lifecycle',
     version: 9,
+  },
+  {
+    checksum: TERMINAL_CONTINUITY_CATALOG_CHECKSUM,
+    name: 'terminal-continuity-catalog',
+    version: 10,
   },
 ]);
 
@@ -231,6 +239,12 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
         state: 'applied',
         version: 9,
       },
+      {
+        checksum: TERMINAL_CONTINUITY_CATALOG_CHECKSUM,
+        name: 'terminal-continuity-catalog',
+        state: 'applied',
+        version: 10,
+      },
     ]);
 
     const relations = await client.query<{ readonly relation: string }>(
@@ -264,6 +278,7 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
         'project_memberships',
         'project_principal_bindings',
         'project_terminal_acknowledgements',
+        'project_terminal_continuity_catalog',
         'project_terminal_responder_catalog',
         'project_terminal_responders',
         'project_tombstones',
@@ -325,10 +340,10 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
     await client.query(
       `INSERT INTO claudian_cloud.schema_migrations
         (version, name, checksum, state, applied_at)
-       VALUES (10, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
+       VALUES (11, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
     );
-    await expectMigrationError(migrator, 'schema-newer', 10);
-    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 10');
+    await expectMigrationError(migrator, 'schema-newer', 11);
+    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 11');
 
     await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 1');
     await expectMigrationError(migrator, 'schema-gap', 2);
@@ -437,6 +452,7 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       { owner: 'claudian_cloud_migration', relation: 'project_memberships' },
       { owner: 'claudian_cloud_migration', relation: 'project_principal_bindings' },
       { owner: 'claudian_cloud_migration', relation: 'project_terminal_acknowledgements' },
+      { owner: 'claudian_cloud_migration', relation: 'project_terminal_continuity_catalog' },
       { owner: 'claudian_cloud_migration', relation: 'project_terminal_responder_catalog' },
       { owner: 'claudian_cloud_migration', relation: 'project_terminal_responders' },
       { owner: 'claudian_cloud_migration', relation: 'project_tombstones' },
@@ -478,11 +494,13 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
     }]);
 
     const functionPrivileges = await migrationClient.query<{
+      readonly name: string;
       readonly owner: string;
       readonly public_can_execute: boolean;
       readonly runtime_can_execute: boolean;
     }>(
-      `SELECT pg_get_userbyid(p.proowner) AS owner,
+      `SELECT p.proname AS name,
+              pg_get_userbyid(p.proowner) AS owner,
               has_function_privilege(
                 'claudian_cloud_runtime', p.oid, 'EXECUTE'
               ) AS runtime_can_execute,
@@ -497,13 +515,26 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
          FROM pg_proc p
          JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname = 'claudian_cloud'
-          AND p.proname = 'remove_project_coordination_content'`,
+          AND p.proname IN (
+            'register_project_terminal_continuity',
+            'remove_project_coordination_content'
+          )
+        ORDER BY p.proname`,
     );
-    assert.deepEqual(functionPrivileges.rows, [{
-      owner: 'claudian_cloud_migration',
-      public_can_execute: false,
-      runtime_can_execute: true,
-    }]);
+    assert.deepEqual(functionPrivileges.rows, [
+      {
+        name: 'register_project_terminal_continuity',
+        owner: 'claudian_cloud_migration',
+        public_can_execute: false,
+        runtime_can_execute: false,
+      },
+      {
+        name: 'remove_project_coordination_content',
+        owner: 'claudian_cloud_migration',
+        public_can_execute: false,
+        runtime_can_execute: true,
+      },
+    ]);
 
     const tablePrivileges = await migrationClient.query<{
       readonly privilege: string;
@@ -537,6 +568,7 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       project_memberships: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       project_principal_bindings: ['INSERT', 'SELECT'],
       project_terminal_acknowledgements: ['INSERT', 'SELECT'],
+      project_terminal_continuity_catalog: ['SELECT'],
       project_terminal_responder_catalog: ['DELETE', 'INSERT', 'SELECT'],
       project_terminal_responders: ['DELETE', 'INSERT', 'SELECT'],
       project_tombstones: ['INSERT', 'SELECT'],
@@ -1037,6 +1069,73 @@ describe('PostgresMigrator', () => {
     });
   });
 
+  it('opens only the immediate predecessor for offline upgrade maintenance', async () => {
+    await withPostgresTestDatabase(async database => {
+      const migrator = new PostgresMigrator({
+        connectionString: database.migrationUrl,
+      });
+      await migrator.applyThrough(9);
+      assert.deepEqual(await migrator.preflight(), {
+        currentVersion: 9,
+        targetVersion: 10,
+      });
+      const coordination = new PostgresCoordination({
+        ordinaryPoolMax: 2,
+        pinnedPoolMax: 1,
+        projectLockTimeoutMs: 2_000,
+        reservedPoolMax: 1,
+        runtimeConnectionString: database.runtimeUrl,
+        shutdownTimeoutMs: 2_000,
+      });
+      try {
+        await assert.rejects(coordination.verifySchemaCompatibility());
+        assert.equal(await coordination.verifySchemaCompatibility(
+          MAINTENANCE_POSTGRES_SCHEMA_COMPATIBILITY,
+        ), 9);
+      } finally {
+        await coordination.close();
+      }
+      const projectId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+      const migration = new Client({ connectionString: database.migrationUrl });
+      try {
+        await migration.connect();
+        await migration.query('BEGIN');
+        await migration.query(
+          "SELECT set_config('claudian_cloud.project_id', $1, true)",
+          [projectId],
+        );
+        await migration.query(
+          `INSERT INTO claudian_cloud.project_tombstones (
+             project_id, authority_generation, terminal_operation_kind,
+             terminal_operation_id, result_sha256, retired_at,
+             terminal_expires_at
+           ) VALUES ($1, 4, 'retire', 'retire-one', $2, $3, $4)`,
+          [
+            projectId,
+            'a'.repeat(64),
+            '2026-08-29T00:00:00.000Z',
+            '2026-09-29T00:00:00.000Z',
+          ],
+        );
+        await migration.query('COMMIT');
+      } finally {
+        await migration.end();
+      }
+      await migrator.apply();
+      const verifier = new Client({ connectionString: database.migrationUrl });
+      try {
+        await verifier.connect();
+        const catalog = await verifier.query(
+          `SELECT project_id
+             FROM claudian_cloud.project_terminal_continuity_catalog`,
+        );
+        assert.deepEqual(catalog.rows, [{ project_id: projectId }]);
+      } finally {
+        await verifier.end();
+      }
+    });
+  });
+
   it('sanitizes connection failures', async () => {
     const credential = 'migration-secret-sentinel';
     const migrator = new PostgresMigrator({
@@ -1052,5 +1151,30 @@ describe('PostgresMigrator', () => {
         return true;
       },
     );
+  });
+
+  it('cancels a preflight blocked on the migration lock', async () => {
+    await withPostgresTestDatabase(async database => {
+      const blocker = new Client({ connectionString: database.migrationUrl });
+      const controller = new AbortController();
+      try {
+        await blocker.connect();
+        await blocker.query(
+          'SELECT pg_advisory_lock($1::integer, $2::integer)',
+          [1_665_883_532, 1],
+        );
+        const preflight = new PostgresMigrator({
+          connectionString: database.migrationUrl,
+        }).preflight(controller.signal);
+        controller.abort();
+        await assert.rejects(preflight, error => {
+          assert.ok(error instanceof PostgresMigrationError);
+          assert.equal(error.code, 'migration-failed');
+          return true;
+        });
+      } finally {
+        await blocker.end();
+      }
+    });
   });
 });

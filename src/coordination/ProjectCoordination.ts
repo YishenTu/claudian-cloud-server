@@ -97,3 +97,15 @@ export interface ListActiveRepositoryPlacementsOptions {
   readonly after?: CollabProjectId;
   readonly limit?: number;
 }
+
+export interface TerminalProjectContinuityPage {
+  readonly nextCursor: CollabProjectId | undefined;
+  readonly projectIds: readonly CollabProjectId[];
+}
+
+export interface TerminalProjectContinuityCatalog {
+  listTerminalProjectContinuity(options?: Readonly<{
+    readonly after?: CollabProjectId;
+    readonly limit?: number;
+  }>): Promise<TerminalProjectContinuityPage>;
+}

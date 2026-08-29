@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { describe, it } from 'node:test';
 
 describe('main process', () => {
-  it('reports an unavailable startup dependency without leaking context', async () => {
+  it('keeps startup closed on missing keyring preflight without leaking context', async () => {
     const credential = 'main-process-secret-sentinel';
     const child = spawn(process.execPath, ['--import', 'tsx', 'src/main.ts'], {
       cwd: process.cwd(),
@@ -33,10 +33,11 @@ describe('main process', () => {
     assert.equal(signal, null);
     assert.equal(stderr.join(''), '');
     const output = stdout.join('');
-    assert.deepEqual(parseEvents(stdout), [
-      'server.starting',
-      'server.startup-failed',
-    ]);
+    assert.deepEqual(parseEvents(stdout), ['server.startup-failed']);
+    assert.equal(
+      (JSON.parse(output.trim()) as { context: { reason: string } }).context.reason,
+      'invalid-keyring',
+    );
     assert.doesNotMatch(output, new RegExp(credential));
     assert.doesNotMatch(output, /postgresql:|ECONNREFUSED|127\.0\.0\.1/);
   });

@@ -6,6 +6,19 @@ import { describe, it } from 'node:test';
 const repositoryRoot = resolve(import.meta.dirname, '../..');
 
 describe('Docker dependency context', () => {
+  it('embeds an explicitly supplied immutable server build identity', async () => {
+    const dockerfile = await readFile(
+      resolve(repositoryRoot, 'deploy/Dockerfile'),
+      'utf8',
+    );
+
+    assert.match(dockerfile, /ARG CLAUDIAN_SERVER_BUILD\n/);
+    assert.match(
+      dockerfile,
+      /RUN npm run set-server-build && npm run verify:application/,
+    );
+  });
+
   it('installs registry dependencies from the locked manifest in both stages', async () => {
     const dockerignore = await readFile(
       resolve(repositoryRoot, '.dockerignore'),

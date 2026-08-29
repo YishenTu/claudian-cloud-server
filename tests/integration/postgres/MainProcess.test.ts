@@ -12,6 +12,8 @@ import { Client } from 'pg';
 import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
 import { withPostgresTestDatabase } from '../../helpers/PostgresTestDatabase.js';
 
+const MAIN_PROCESS_ENTRY = 'tests/integration/postgres/MainProcessWithKeyring.ts';
+
 describe('main process with foundation dependencies', () => {
   it('publishes readiness and restarts cleanly after SIGTERM', async () => {
     await withPostgresTestDatabase(async database => {
@@ -31,7 +33,7 @@ describe('main process with foundation dependencies', () => {
       try {
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const port = await findAvailablePort();
-          const child = spawn(process.execPath, ['--import', 'tsx', 'src/main.ts'], {
+          const child = spawn(process.execPath, ['--import', 'tsx', MAIN_PROCESS_ENTRY], {
             cwd: process.cwd(),
             env: {
               ...baseEnvironment(),
@@ -104,7 +106,7 @@ describe('main process with foundation dependencies', () => {
         { mode: 0o600 },
       );
       const port = await findAvailablePort();
-      const child = spawn(process.execPath, ['--import', 'tsx', 'src/main.ts'], {
+      const child = spawn(process.execPath, ['--import', 'tsx', MAIN_PROCESS_ENTRY], {
         cwd: process.cwd(),
         env: {
           ...baseEnvironment(),
@@ -189,7 +191,7 @@ describe('main process with foundation dependencies', () => {
         await blocker.query(
           'LOCK TABLE claudian_cloud.schema_migrations IN ACCESS EXCLUSIVE MODE',
         );
-        const spawned = spawn(process.execPath, ['--import', 'tsx', 'src/main.ts'], {
+        const spawned = spawn(process.execPath, ['--import', 'tsx', MAIN_PROCESS_ENTRY], {
           cwd: process.cwd(),
           env: {
             ...baseEnvironment(),

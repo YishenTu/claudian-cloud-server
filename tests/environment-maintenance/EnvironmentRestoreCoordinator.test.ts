@@ -56,6 +56,7 @@ function catalog(): EnvironmentRestoreCatalog {
     ]),
     repositoryFormatVersion: 1,
     restoreEpoch: 3,
+    terminalProjects: Object.freeze([]),
   });
 }
 
@@ -130,6 +131,7 @@ function journalAt(phase: EnvironmentRestorePhase): EnvironmentRestoreJournal {
     repositoryFormatVersion: 1,
     restoreEpoch: 4,
     schemaVersion: 1,
+    terminalProjects: catalog().terminalProjects,
     updatedAt: '2026-08-29T00:00:00.000Z',
   });
 }
@@ -921,9 +923,21 @@ describe('EnvironmentRestoreCoordinator', () => {
 
   it('re-verifies a completed restore before startup can trust readiness', async () => {
     const calls: string[] = [];
-    const completed = journalAt('completed');
+    const terminalProject = Object.freeze({
+      artifactByteCount: 101,
+      artifactSha256: 'f'.repeat(64),
+      projectId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    });
+    const completedCatalog = Object.freeze({
+      ...catalog(),
+      terminalProjects: Object.freeze([terminalProject]),
+    });
+    const completed = Object.freeze({
+      ...journalAt('completed'),
+      terminalProjects: completedCatalog.terminalProjects,
+    });
     const coordinator = new EnvironmentRestoreCoordinator({
-      backup: { validate: async () => catalog() },
+      backup: { validate: async () => completedCatalog },
       continuity: {
         verifyBeforeCreation: async () => { calls.push('continuity.open'); },
         verifyRestored: async () => { calls.push('continuity.verify'); },
@@ -960,7 +974,9 @@ describe('EnvironmentRestoreCoordinator', () => {
       },
     });
 
-    assert.equal((await coordinator.recover())?.state, 'completed');
+    const result = await coordinator.recover();
+    assert.equal(result?.state, 'completed');
+    assert.equal(result?.projectCount, 3);
     assert.deepEqual(calls, [
       'continuity.open',
       'coordination.verify',

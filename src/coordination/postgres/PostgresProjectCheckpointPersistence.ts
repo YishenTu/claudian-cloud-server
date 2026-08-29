@@ -28,6 +28,7 @@ import type {
   ProjectCheckpointPersistence,
   ProjectCheckpointRecord,
   ReadProjectCheckpointRecordsInput,
+  TerminalProjectContinuityRecord,
 } from '../ProjectCheckpointPersistence.js';
 
 type ProjectQuery = <Row extends QueryResultRow>(
@@ -149,6 +150,32 @@ class BoundedCheckpointRecords {
       return invalidRecord();
     }
   }
+
+  terminal(): readonly TerminalProjectContinuityRecord[] {
+    const allowed = new Set<string>([
+      'lifecycle-journal',
+      'protected-claim-envelope',
+      'terminal-principal',
+      'terminal-responder',
+      'terminal-responder-replay',
+      'tombstone',
+      'transfer-receipt-key',
+      'transfer-redemption-receipt',
+    ]);
+    const sorted = [...this.#records].sort((left, right) => (
+      (KIND_ORDER.get(left.kind) ?? Number.MAX_SAFE_INTEGER)
+        - (KIND_ORDER.get(right.kind) ?? Number.MAX_SAFE_INTEGER)
+      || left.recordId.localeCompare(right.recordId, 'en-US')
+    ));
+    if (sorted.length === 0 || sorted.some(record => !allowed.has(record.kind))) {
+      invalidRecord();
+    }
+    if (Buffer.byteLength(
+      `${sorted.map(record => JSON.stringify(record)).join('\n')}\n`,
+      'utf8',
+    ) > this.#maximumBytes) resourceLimit();
+    return Object.freeze(sorted as readonly TerminalProjectContinuityRecord[]);
+  }
 }
 
 const MAXIMUM_CHECKPOINT_QUERY_PAGE_ROWS = 256;
@@ -168,7 +195,8 @@ implements ProjectCheckpointPersistence {
     input: ReadProjectCheckpointRecordsInput,
   ): Promise<readonly ProjectCheckpointRecord[]> {
     if (
-      !isCollabOpaqueId(input.excludedOperationId)
+      (input.excludedOperationId !== undefined
+        && !isCollabOpaqueId(input.excludedOperationId))
       || !IDENTITY_PATTERN.test(input.metadata.authorityId)
       || !IDENTITY_PATTERN.test(input.metadata.authorityVolumeIdentity)
       || !Number.isSafeInteger(input.metadata.coordinationSchemaVersion)
@@ -188,6 +216,19 @@ implements ProjectCheckpointPersistence {
     await this.#readPortable(records);
     if (input.profile === 'backup') await this.#readBackup(records, input);
     return records.canonical(input.profile);
+  }
+
+  async readTerminalProjectContinuityRecords(input: Readonly<{
+    readonly maximumCoordinationBytes: number;
+  }>): Promise<readonly TerminalProjectContinuityRecord[]> {
+    const records = new BoundedCheckpointRecords(input.maximumCoordinationBytes);
+    await this.#readLifecycle(records, undefined);
+    await this.#readTransferReceiptKeys(records, undefined);
+    await this.#readTransferRedemptionReceipts(records, undefined);
+    await this.#readTerminalResponders(records);
+    await this.#readProtectedEnvelopes(records);
+    await this.#readTombstone(records);
+    return records.terminal();
   }
 
   async #readPortable(records: BoundedCheckpointRecords): Promise<void> {
@@ -632,28 +673,7 @@ implements ProjectCheckpointPersistence {
     await this.#readTerminalResponders(records);
     await this.#readLeaveReplays(records, input.excludedOperationId);
     await this.#readProtectedEnvelopes(records);
-    const tombstones = await this.#query<{
-      readonly authority_generation: string;
-      readonly retired_at: Date;
-      readonly terminal_expires_at: Date;
-    }>(
-      `SELECT authority_generation, retired_at, terminal_expires_at
-         FROM claudian_cloud.project_tombstones
-        WHERE project_id = $1`,
-      [this.#projectId],
-    );
-    const tombstone = tombstones[0];
-    if (tombstone !== undefined) records.push(Object.freeze({
-        kind: 'tombstone',
-      recordId: this.#projectId,
-      revision: 1,
-      value: Object.freeze({
-        authorityGeneration: safeInteger(tombstone.authority_generation),
-        projectId: this.#projectId,
-        retiredAt: iso(tombstone.retired_at),
-        terminalExpiresAt: iso(tombstone.terminal_expires_at),
-      }),
-    }));
+    await this.#readTombstone(records);
 
     records.push(
       Object.freeze({
@@ -690,9 +710,34 @@ implements ProjectCheckpointPersistence {
     );
   }
 
+  async #readTombstone(records: BoundedCheckpointRecords): Promise<void> {
+    const tombstones = await this.#query<{
+      readonly authority_generation: string;
+      readonly retired_at: Date;
+      readonly terminal_expires_at: Date;
+    }>(
+      `SELECT authority_generation, retired_at, terminal_expires_at
+         FROM claudian_cloud.project_tombstones
+        WHERE project_id = $1`,
+      [this.#projectId],
+    );
+    const tombstone = tombstones[0];
+    if (tombstone !== undefined) records.push(Object.freeze({
+      kind: 'tombstone',
+      recordId: this.#projectId,
+      revision: 1,
+      value: Object.freeze({
+        authorityGeneration: safeInteger(tombstone.authority_generation),
+        projectId: this.#projectId,
+        retiredAt: iso(tombstone.retired_at),
+        terminalExpiresAt: iso(tombstone.terminal_expires_at),
+      }),
+    }));
+  }
+
   async #readLifecycle(
     records: BoundedCheckpointRecords,
-    excludedOperationId: string,
+    excludedOperationId: string | undefined,
   ): Promise<void> {
     for await (const row of this.#queryRows<{
       readonly actor_member_id: string | null;
@@ -721,9 +766,10 @@ implements ProjectCheckpointPersistence {
               recovery_from_phase, request_fingerprint, result_sha256,
               scheduled_at, state, updated_at
          FROM claudian_cloud.project_lifecycle_journals
-        WHERE project_id = $1 AND operation_id <> $2
+        WHERE project_id = $1
+          AND ($2::text IS NULL OR operation_id <> $2)
         ORDER BY operation_id`,
-      [this.#projectId, excludedOperationId],
+      [this.#projectId, excludedOperationId ?? null],
       records,
     )) records.push(Object.freeze({
       kind: 'lifecycle-journal',
@@ -757,7 +803,7 @@ implements ProjectCheckpointPersistence {
 
   async #readAuthorityTransferRecovery(
     records: BoundedCheckpointRecords,
-    excludedOperationId: string,
+    excludedOperationId: string | undefined,
   ): Promise<void> {
     for await (const row of this.#queryRows<{
       readonly cancellation_request_sha256: string | null;
@@ -790,9 +836,10 @@ implements ProjectCheckpointPersistence {
               target_authority_kind, target_host_member_id, target_proof,
               target_url, transfer_id, updated_at
          FROM claudian_cloud.authority_transfer_recovery
-        WHERE project_id = $1 AND transfer_id <> $2
+        WHERE project_id = $1
+          AND ($2::text IS NULL OR transfer_id <> $2)
         ORDER BY transfer_id`,
-      [this.#projectId, excludedOperationId],
+      [this.#projectId, excludedOperationId ?? null],
       records,
     )) {
       let relinquishmentProof = null;
@@ -848,7 +895,7 @@ implements ProjectCheckpointPersistence {
 
   async #readTransferredClaims(
     records: BoundedCheckpointRecords,
-    excludedOperationId: string,
+    excludedOperationId: string | undefined,
   ): Promise<void> {
     for await (const row of this.#queryRows<{
       readonly batch_revision: string;
@@ -869,9 +916,10 @@ implements ProjectCheckpointPersistence {
               redemption_receipt_id, state, target_principal_id,
               transfer_id, updated_at
          FROM claudian_cloud.transferred_membership_claims
-        WHERE project_id = $1 AND transfer_id <> $2
+        WHERE project_id = $1
+          AND ($2::text IS NULL OR transfer_id <> $2)
         ORDER BY transfer_id, member_id`,
-      [this.#projectId, excludedOperationId],
+      [this.#projectId, excludedOperationId ?? null],
       records,
     )) records.push(Object.freeze({
       kind: 'transferred-membership-claim',
@@ -897,7 +945,7 @@ implements ProjectCheckpointPersistence {
 
   async #readTransferReceiptKeys(
     records: BoundedCheckpointRecords,
-    excludedOperationId: string,
+    excludedOperationId: string | undefined,
   ): Promise<void> {
     for await (const row of this.#queryRows<{
       readonly created_at: Date;
@@ -909,9 +957,10 @@ implements ProjectCheckpointPersistence {
       `SELECT created_at, public_key, receipt_key_id, signature_algorithm,
               transfer_id
          FROM claudian_cloud.transfer_receipt_keys
-        WHERE project_id = $1 AND transfer_id <> $2
+        WHERE project_id = $1
+          AND ($2::text IS NULL OR transfer_id <> $2)
         ORDER BY transfer_id, receipt_key_id`,
-      [this.#projectId, excludedOperationId],
+      [this.#projectId, excludedOperationId ?? null],
       records,
     )) records.push(Object.freeze({
       kind: 'transfer-receipt-key',
@@ -931,7 +980,7 @@ implements ProjectCheckpointPersistence {
 
   async #readTransferBatchReceipts(
     records: BoundedCheckpointRecords,
-    excludedOperationId: string,
+    excludedOperationId: string | undefined,
   ): Promise<void> {
     for await (const row of this.#queryRows<{
       readonly receipt_json: string;
@@ -939,9 +988,10 @@ implements ProjectCheckpointPersistence {
     }>(
       `SELECT receipt_json, transfer_id
          FROM claudian_cloud.transfer_claim_batch_receipts
-        WHERE project_id = $1 AND transfer_id <> $2
+        WHERE project_id = $1
+          AND ($2::text IS NULL OR transfer_id <> $2)
         ORDER BY transfer_id`,
-      [this.#projectId, excludedOperationId],
+      [this.#projectId, excludedOperationId ?? null],
       records,
     )) records.push(Object.freeze({
       kind: 'transfer-claim-batch-receipt',
@@ -953,7 +1003,7 @@ implements ProjectCheckpointPersistence {
 
   async #readTransferRedemptionReceipts(
     records: BoundedCheckpointRecords,
-    excludedOperationId: string,
+    excludedOperationId: string | undefined,
   ): Promise<void> {
     for await (const row of this.#queryRows<{
       readonly acknowledged_at: Date | null;
@@ -963,9 +1013,10 @@ implements ProjectCheckpointPersistence {
     }>(
       `SELECT acknowledged_at, member_id, receipt_json, transfer_id
          FROM claudian_cloud.transfer_redemption_receipts
-        WHERE project_id = $1 AND transfer_id <> $2
+        WHERE project_id = $1
+          AND ($2::text IS NULL OR transfer_id <> $2)
         ORDER BY transfer_id, member_id`,
-      [this.#projectId, excludedOperationId],
+      [this.#projectId, excludedOperationId ?? null],
       records,
     )) records.push(Object.freeze({
       kind: 'transfer-redemption-receipt',
@@ -1090,7 +1141,7 @@ implements ProjectCheckpointPersistence {
 
   async #readLeaveReplays(
     records: BoundedCheckpointRecords,
-    excludedOperationId: string,
+    excludedOperationId: string | undefined,
   ): Promise<void> {
     for await (const row of this.#queryRows<{
       readonly completed_at: Date | null;
@@ -1109,9 +1160,10 @@ implements ProjectCheckpointPersistence {
               expires_at, intent_id, member_id, operation_id,
               principal_sha256, request_fingerprint, result_sha256, state
          FROM claudian_cloud.leave_former_principal_replays
-        WHERE project_id = $1 AND operation_id <> $2
+        WHERE project_id = $1
+          AND ($2::text IS NULL OR operation_id <> $2)
         ORDER BY operation_id`,
-      [this.#projectId, excludedOperationId],
+      [this.#projectId, excludedOperationId ?? null],
       records,
     )) records.push(Object.freeze({
       kind: 'leave-former-principal-replay',

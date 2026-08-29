@@ -13,6 +13,7 @@ import {
   LAN_TO_CLOUD_TRANSFER_SCHEMA,
   PORTABILITY_LIFECYCLE_SCHEMA,
   PROJECT_READ_EVENTS_SCHEMA,
+  TERMINAL_CONTINUITY_CATALOG_SCHEMA,
   TERMINAL_PROJECT_LIFECYCLE_SCHEMA,
 } from './PostgresSchema.js';
 
@@ -284,6 +285,15 @@ const MIGRATION_RESOURCES = Object.freeze([
     ),
     version: TERMINAL_PROJECT_LIFECYCLE_SCHEMA.version,
   }),
+  Object.freeze({
+    checksum: TERMINAL_CONTINUITY_CATALOG_SCHEMA.checksum,
+    name: TERMINAL_CONTINUITY_CATALOG_SCHEMA.name,
+    resource: new URL(
+      './migrations/0010_terminal_continuity_catalog.sql',
+      import.meta.url,
+    ),
+    version: TERMINAL_CONTINUITY_CATALOG_SCHEMA.version,
+  }),
 ]);
 
 const METADATA_SQL = `
@@ -455,6 +465,7 @@ export class PostgresMigrator {
   async #run(
     apply: boolean,
     signal?: AbortSignal,
+    targetVersion = CURRENT_POSTGRES_SCHEMA_VERSION,
   ): Promise<PostgresMigrationPlan> {
     const client = new Client({
       application_name: 'claudian-cloud-migration',
@@ -481,7 +492,15 @@ export class PostgresMigrator {
     signal?.addEventListener('abort', onAbort, { once: true });
     if (signal?.aborted === true) onAbort();
     try {
-      const migrations = await loadMigrations();
+      const allMigrations = await loadMigrations();
+      if (
+        !Number.isSafeInteger(targetVersion)
+        || targetVersion < 1
+        || targetVersion > CURRENT_POSTGRES_SCHEMA_VERSION
+      ) fail('schema-drift');
+      const migrations = allMigrations.filter(
+        migration => migration.version <= targetVersion,
+      );
       assertActive();
       await client.connect();
       connected = true;
@@ -507,9 +526,9 @@ export class PostgresMigrator {
       }
       return Object.freeze({
         currentVersion: apply
-          ? CURRENT_POSTGRES_SCHEMA_VERSION
+          ? targetVersion
           : currentVersion,
-        targetVersion: CURRENT_POSTGRES_SCHEMA_VERSION,
+        targetVersion,
       });
     } catch (error: unknown) {
       if (error instanceof PostgresMigrationError) throw error;
@@ -536,7 +555,14 @@ export class PostgresMigrator {
     await this.#run(true, signal);
   }
 
-  preflight(): Promise<PostgresMigrationPlan> {
-    return this.#run(false);
+  async applyThrough(
+    targetVersion: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.#run(true, signal, targetVersion);
+  }
+
+  preflight(signal?: AbortSignal): Promise<PostgresMigrationPlan> {
+    return this.#run(false, signal);
   }
 }

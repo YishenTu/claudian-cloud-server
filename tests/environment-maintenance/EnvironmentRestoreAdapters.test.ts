@@ -28,6 +28,7 @@ import { EnvironmentRestoreCoordinationAdapter } from '../../src/environment-mai
 import { EnvironmentRestoreContinuityVerifier } from '../../src/environment-maintenance/restore/EnvironmentRestoreContinuityVerifier.js';
 import { EnvironmentRestoreRepositoryAdapter } from '../../src/environment-maintenance/restore/EnvironmentRestoreRepositoryAdapter.js';
 import { FileEnvironmentBackupCatalogSource } from '../../src/environment-maintenance/restore/FileEnvironmentBackupCatalogSource.js';
+import { createTerminalProjectContinuityArtifact } from '../../src/environment-maintenance/restore/TerminalProjectContinuityArtifact.js';
 import {
   PublishedEnvironmentBackupSource,
 } from '../../src/environment-maintenance/restore/PublishedEnvironmentBackupSource.js';
@@ -199,7 +200,7 @@ function project(checkpointSha256: string): EnvironmentRestoreProject {
   });
 }
 
-function publishedSource() {
+function publishedSource(includeCheckpoint = true) {
   const exactManifest = manifest();
   const manifestBytes = Buffer.from(
     encodeCollabProjectBackupCheckpointManifestCanonicalJson(exactManifest),
@@ -294,7 +295,7 @@ function publishedSource() {
   });
   const source = new PublishedEnvironmentBackupSource({
     catalog: { readCatalog: () => Promise.resolve({}) },
-    checkpoint,
+    ...(includeCheckpoint ? { checkpoint } : {}),
     publication,
   });
   return Object.freeze({ exactManifest, events, source });
@@ -313,10 +314,128 @@ function catalog(exactProject: EnvironmentRestoreProject): EnvironmentRestoreCat
     projects: Object.freeze([exactProject]),
     repositoryFormatVersion: 1,
     restoreEpoch: 3,
+    terminalProjects: Object.freeze([]),
   });
 }
 
 describe('production environment restore adapters', () => {
+  it('verifies a self-contained backup before the clean target database exists', async () => {
+    const { exactManifest, source } = publishedSource(false);
+    const exactProject = project(exactManifest.manifestSha256);
+    const backup = await source.readProjectBackup({
+      project: exactProject,
+      signal: new AbortController().signal,
+    });
+    assert.equal(backup.manifest.projectId, PROJECT_ID);
+    assert.deepEqual(backup.records, backupRecords());
+  });
+
+  it('imports and verifies terminal continuity without a Project repository', async () => {
+    const artifact = createTerminalProjectContinuityArtifact(PROJECT_ID, [{
+      kind: 'tombstone',
+      recordId: PROJECT_ID,
+      revision: 1,
+      value: {
+        authorityGeneration: 4,
+        projectId: PROJECT_ID,
+        retiredAt: CREATED_AT,
+        terminalExpiresAt: EXPIRES_AT,
+      },
+    }] as never);
+    const terminalProject = Object.freeze({
+      artifactByteCount: Buffer.byteLength(artifact.json, 'utf8'),
+      artifactSha256: artifact.sha256,
+      projectId: PROJECT_ID,
+    });
+    const events: string[] = [];
+    const adapter = new EnvironmentRestoreCoordinationAdapter({
+      source: {
+        readProjectBackup: () => assert.fail('unexpected Project backup'),
+        readTerminalProjectBackup: () => Promise.resolve(artifact),
+      },
+      storage: {
+        assertEmpty: () => Promise.resolve(),
+        classifyOrRemoveRestoreOwnedDatabase: () => Promise.resolve('replayed'),
+        createDatabase: () => Promise.resolve({ authorityVolumeId: 'volume-a' }),
+        importProject: () => assert.fail('unexpected Project import'),
+        importTerminalProject: input => {
+          events.push(`import:${input.projectId}`);
+          assert.deepEqual(input.records, artifact.records);
+          return Promise.resolve();
+        },
+        publishAuthority: () => Promise.resolve(),
+        verifyDatabaseIdentity: () => Promise.resolve(),
+        verifyRestoredProject: () => assert.fail('unexpected Project verify'),
+        verifyRestoredTerminalProject: input => {
+          events.push(`verify:${input.projectId}`);
+          assert.deepEqual(input.records, artifact.records);
+          return Promise.resolve();
+        },
+      },
+    });
+    const terminalCatalog = Object.freeze({
+      ...catalog(project('a'.repeat(64))),
+      projects: Object.freeze([]),
+      terminalProjects: Object.freeze([terminalProject]),
+    });
+
+    await adapter.importCoordination({
+      catalog: terminalCatalog,
+      operationId: 'restore-terminal-a',
+      restoreEpoch: 4,
+      signal: new AbortController().signal,
+    });
+    await adapter.verifyRestored({
+      catalog: terminalCatalog,
+      operationId: 'restore-terminal-a',
+      repositories: Object.freeze([]),
+      restoreEpoch: 4,
+      signal: new AbortController().signal,
+    });
+    assert.deepEqual(events, [`import:${PROJECT_ID}`, `verify:${PROJECT_ID}`]);
+  });
+
+  it('verifies terminal continuity key references before reopening it', async () => {
+    const artifact = createTerminalProjectContinuityArtifact(PROJECT_ID, [{
+      kind: 'tombstone',
+      recordId: PROJECT_ID,
+      revision: 1,
+      value: {
+        authorityGeneration: 4,
+        projectId: PROJECT_ID,
+        retiredAt: CREATED_AT,
+        terminalExpiresAt: EXPIRES_AT,
+      },
+    }] as never);
+    const checked: unknown[] = [];
+    const source = new PublishedEnvironmentBackupSource({
+      catalog: {
+        readCatalog: () => assert.fail('unexpected catalog read'),
+        readTerminalArtifact: () => Promise.resolve(artifact.json),
+      },
+      publication: {
+        inspectAttempt: () => assert.fail('unexpected attempt inspection'),
+        readArtifact: () => assert.fail('unexpected artifact read'),
+      },
+      keyReferences: {
+        verify: records => {
+          checked.push(records);
+          return Promise.resolve();
+        },
+      },
+    });
+
+    assert.equal((await source.readTerminalProjectBackup({
+      signal: new AbortController().signal,
+      terminalProject: {
+        artifactByteCount: Buffer.byteLength(artifact.json, 'utf8'),
+        artifactSha256: artifact.sha256,
+        projectId: PROJECT_ID,
+      },
+    })).sha256, artifact.sha256);
+    assert.deepEqual(checked, [artifact.records]);
+  });
+
   it('maps coordination persistence failures at the environment boundary', async () => {
     const coordination = new EnvironmentRestoreCoordinationAdapter({
       source: {

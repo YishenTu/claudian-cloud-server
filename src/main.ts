@@ -1,13 +1,9 @@
 import process from 'node:process';
 
-import { createApplication } from './composition/createApplication.js';
-import {
-  ConfigError,
-  decodeServerConfig,
-} from './config/ServerConfig.js';
+import { createMaintenanceCommand } from './composition/createMaintenanceCommand.js';
+import { runServerProcess } from './composition/ServerProcess.js';
 import { assertSupportedNodeVersion } from './config/RuntimeVersion.js';
 import { reportBootstrapFailure } from './observability/BootstrapReporter.js';
-import { SafeLogger } from './observability/SafeLogger.js';
 
 function writeStandardOutput(line: string): void {
   process.stdout.write(line);
@@ -17,52 +13,33 @@ function writeStandardError(line: string): void {
   process.stderr.write(line);
 }
 
+async function runMaintenance(arguments_: readonly string[]): Promise<void> {
+  const controller = new AbortController();
+  const abort = (signal: NodeJS.Signals): void => controller.abort(signal);
+  process.once('SIGINT', abort);
+  process.once('SIGTERM', abort);
+  try {
+    const runtime = createMaintenanceCommand({
+      source: process.env,
+      write: writeStandardOutput,
+    });
+    const result = await runtime.run(arguments_, controller.signal);
+    process.exitCode = result === 'unsupported' ? 2 : 0;
+  } finally {
+    process.removeListener('SIGINT', abort);
+    process.removeListener('SIGTERM', abort);
+  }
+}
+
 async function run(): Promise<void> {
   assertSupportedNodeVersion();
-  const logger = new SafeLogger({
-    now: () => new Date(),
-    write: writeStandardOutput,
-  });
-
-  let config;
-  try {
-    config = decodeServerConfig(process.env);
-  } catch (error: unknown) {
-    logger.error('server.startup-failed', {
-      reason: error instanceof ConfigError ? error.code : 'config-decode-failed',
-    });
-    process.exitCode = 1;
+  const arguments_ = process.argv.slice(2);
+  if (arguments_[0] === 'maintenance') {
+    await runMaintenance(arguments_.slice(1));
     return;
   }
-
-  const application = createApplication({ config, logger });
-  const shutdownState = { started: false };
-  const shutdown = (_signal: NodeJS.Signals): void => {
-    if (shutdownState.started) return;
-    shutdownState.started = true;
-    void application.close()
-      .then(() => {
-        process.exitCode = 0;
-      })
-      .catch(() => {
-        process.exitCode = 1;
-      });
-  };
-
-  process.once('SIGINT', shutdown);
-  process.once('SIGTERM', shutdown);
-
-  try {
-    await application.start();
-  } catch {
-    let closeFailed = false;
-    try {
-      await application.close();
-    } catch {
-      closeFailed = true;
-    }
-    process.exitCode = shutdownState.started && !closeFailed ? 0 : 1;
-  }
+  if (arguments_.length !== 0) throw new Error('runtime-entry.invalid');
+  await runServerProcess();
 }
 
 try {

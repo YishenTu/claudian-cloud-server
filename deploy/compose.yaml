@@ -17,6 +17,27 @@ x-one-shot-security: &one-shot-security
     - /tmp:rw,noexec,nosuid,nodev,size=64m
   restart: "no"
 
+x-keyring-mount: &keyring-mount
+  type: bind
+  source: ${CLAUDIAN_CLOUD_CLAIM_CUSTODY_KEYRING_FILE:-/etc/claudian-cloud-server/claim-custody-keyring.json}
+  target: /run/secrets/claudian_claim_custody_keyring
+  read_only: true
+
+x-backup-artifact-mount: &backup-artifact-mount
+  type: bind
+  source: ${CLAUDIAN_CLOUD_BACKUP_ARTIFACT_ROOT:-/var/lib/claudian-cloud-server/backups/artifacts}
+  target: /var/lib/claudian-cloud-backups/artifacts
+
+x-backup-catalog-mount: &backup-catalog-mount
+  type: bind
+  source: ${CLAUDIAN_CLOUD_BACKUP_CATALOG_ROOT:-/var/lib/claudian-cloud-server/backups/catalogs}
+  target: /var/lib/claudian-cloud-backups/catalogs
+
+x-export-artifact-mount: &export-artifact-mount
+  type: bind
+  source: ${CLAUDIAN_CLOUD_EXPORT_ARTIFACT_ROOT:-/var/lib/claudian-cloud-server/exports/artifacts}
+  target: /var/lib/claudian-cloud-exports/artifacts
+
 services:
   postgres:
     image: postgres@sha256:7d2695c3aa88e792e8b3b233e7e4adb296a20412c6c0ca361e3edaaacfada108
@@ -67,6 +88,7 @@ services:
       - path: ${CLAUDIAN_CLOUD_BOOTSTRAP_ENV_FILE:-/etc/claudian-cloud-server/bootstrap.env}
         required: true
     environment:
+      CLAUDIAN_CLOUD_BOOTSTRAP_MODE: ${CLAUDIAN_CLOUD_BOOTSTRAP_MODE:-authority}
       PGPORT: ${CLAUDIAN_CLOUD_POSTGRES_PORT:-5432}
     entrypoint:
       - /bin/bash
@@ -89,7 +111,206 @@ services:
         required: true
     command:
       - node
-      - dist/migrate.js
+      - dist/main.js
+      - maintenance
+      - migration
+
+  cloud-backup:
+    <<: [*cloud-image, *one-shot-security]
+    profiles:
+      - backup
+    network_mode: host
+    user: "10001:10001"
+    env_file:
+      - path: ${CLAUDIAN_CLOUD_ENV_FILE:-/etc/claudian-cloud-server/server.env}
+        required: true
+      - path: ${CLAUDIAN_CLOUD_MIGRATION_ENV_FILE:-/etc/claudian-cloud-server/migration.env}
+        required: true
+    environment:
+      CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID: ${CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID:-}
+    command:
+      - node
+      - dist/main.js
+      - maintenance
+      - backup
+    volumes:
+      - cloud-authority:/var/lib/claudian-cloud
+      - *backup-artifact-mount
+      - *backup-catalog-mount
+      - *keyring-mount
+
+  cloud-verify-backup:
+    <<: [*cloud-image, *one-shot-security]
+    profiles:
+      - verify-backup
+    network_mode: host
+    user: "10001:10001"
+    env_file:
+      - path: ${CLAUDIAN_CLOUD_ENV_FILE:-/etc/claudian-cloud-server/server.env}
+        required: true
+      - path: ${CLAUDIAN_CLOUD_MIGRATION_ENV_FILE:-/etc/claudian-cloud-server/migration.env}
+        required: true
+    environment:
+      CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID: ${CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID:-}
+    command:
+      - node
+      - dist/main.js
+      - maintenance
+      - verify-backup
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - cloud-authority:/var/lib/claudian-cloud
+      - <<: *backup-artifact-mount
+        read_only: true
+      - <<: *backup-catalog-mount
+        read_only: true
+      - *keyring-mount
+
+  cloud-restore:
+    <<: [*cloud-image, *one-shot-security]
+    profiles:
+      - restore
+    network_mode: host
+    user: "10001:10001"
+    env_file:
+      - path: ${CLAUDIAN_CLOUD_ENV_FILE:-/etc/claudian-cloud-server/server.env}
+        required: true
+      - path: ${CLAUDIAN_CLOUD_MIGRATION_ENV_FILE:-/etc/claudian-cloud-server/migration.env}
+        required: true
+    environment:
+      CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID: ${CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID:-}
+    command:
+      - node
+      - dist/main.js
+      - maintenance
+      - restore
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - cloud-authority:/var/lib/claudian-cloud
+      - <<: *backup-artifact-mount
+        read_only: true
+      - <<: *backup-catalog-mount
+        read_only: true
+      - *keyring-mount
+
+  cloud-restore-recovery:
+    <<: [*cloud-image, *one-shot-security]
+    network_mode: host
+    user: "10001:10001"
+    env_file:
+      - path: ${CLAUDIAN_CLOUD_ENV_FILE:-/etc/claudian-cloud-server/server.env}
+        required: true
+      - path: ${CLAUDIAN_CLOUD_MIGRATION_ENV_FILE:-/etc/claudian-cloud-server/migration.env}
+        required: false
+    environment:
+      CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED: ${CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED:-true}
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - >-
+        if [ "$${CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED}" != "true" ];
+        then exit 0; fi;
+        exec node dist/main.js maintenance recover-restore
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - cloud-authority:/var/lib/claudian-cloud
+      - <<: *backup-artifact-mount
+        read_only: true
+      - <<: *backup-catalog-mount
+        read_only: true
+      - *keyring-mount
+
+  cloud-export-project:
+    <<: [*cloud-image, *one-shot-security]
+    profiles:
+      - export-project
+    network_mode: host
+    user: "10001:10001"
+    env_file:
+      - path: ${CLAUDIAN_CLOUD_ENV_FILE:-/etc/claudian-cloud-server/server.env}
+        required: true
+    environment:
+      CLAUDIAN_CLOUD_MAINTENANCE_EXPIRES_AT: ${CLAUDIAN_CLOUD_MAINTENANCE_EXPIRES_AT:-}
+      CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID: ${CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID:-}
+      CLAUDIAN_CLOUD_MAINTENANCE_PROJECT_ID: ${CLAUDIAN_CLOUD_MAINTENANCE_PROJECT_ID:-}
+    command:
+      - node
+      - dist/main.js
+      - maintenance
+      - export-project
+    volumes:
+      - cloud-authority:/var/lib/claudian-cloud
+      - *export-artifact-mount
+
+  cloud-reconcile-exports:
+    <<: [*cloud-image, *one-shot-security]
+    profiles:
+      - reconcile-exports
+    network_mode: host
+    user: "10001:10001"
+    env_file:
+      - path: ${CLAUDIAN_CLOUD_ENV_FILE:-/etc/claudian-cloud-server/server.env}
+        required: true
+    command:
+      - node
+      - dist/main.js
+      - maintenance
+      - reconcile-exports
+    volumes:
+      - cloud-authority:/var/lib/claudian-cloud
+      - *export-artifact-mount
+
+  cloud-resume-delete:
+    <<: [*cloud-image, *one-shot-security]
+    profiles:
+      - resume-delete
+    network_mode: host
+    user: "10001:10001"
+    env_file:
+      - path: ${CLAUDIAN_CLOUD_ENV_FILE:-/etc/claudian-cloud-server/server.env}
+        required: true
+    environment:
+      CLAUDIAN_CLOUD_MAINTENANCE_AUTHORIZATION_SHA256: ${CLAUDIAN_CLOUD_MAINTENANCE_AUTHORIZATION_SHA256:-}
+      CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID: ${CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID:-}
+      CLAUDIAN_CLOUD_MAINTENANCE_PROJECT_ID: ${CLAUDIAN_CLOUD_MAINTENANCE_PROJECT_ID:-}
+    command:
+      - node
+      - dist/main.js
+      - maintenance
+      - resume-delete
+    volumes:
+      - cloud-authority:/var/lib/claudian-cloud
+
+  cloud-verify-authority:
+    <<: [*cloud-image, *one-shot-security]
+    profiles:
+      - verify-authority
+    network_mode: host
+    user: "10001:10001"
+    env_file:
+      - path: ${CLAUDIAN_CLOUD_ENV_FILE:-/etc/claudian-cloud-server/server.env}
+        required: true
+      - path: ${CLAUDIAN_CLOUD_MIGRATION_ENV_FILE:-/etc/claudian-cloud-server/migration.env}
+        required: true
+    environment:
+      CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID: ${CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID:-}
+    command:
+      - node
+      - dist/main.js
+      - maintenance
+      - verify-authority
+    volumes:
+      - type: volume
+        source: cloud-authority
+        target: /var/lib/claudian-cloud
+        read_only: true
+      - *keyring-mount
 
   cloud-server:
     <<: *cloud-image
@@ -99,8 +320,12 @@ services:
         required: true
     environment:
       NODE_ENV: production
+    depends_on:
+      cloud-restore-recovery:
+        condition: service_completed_successfully
     volumes:
       - cloud-authority:/var/lib/claudian-cloud
+      - *keyring-mount
     init: true
     read_only: true
     user: "10001:10001"

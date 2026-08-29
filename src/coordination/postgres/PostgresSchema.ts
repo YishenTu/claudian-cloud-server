@@ -52,6 +52,12 @@ export const TERMINAL_PROJECT_LIFECYCLE_SCHEMA = Object.freeze({
   version: 9,
 });
 
+export const TERMINAL_CONTINUITY_CATALOG_SCHEMA = Object.freeze({
+  checksum: '696e518fbdf82efd12f6276650862e86f0eed5da66013de4ba924cd2a005fe3f',
+  name: 'terminal-continuity-catalog',
+  version: 10,
+});
+
 export const POSTGRES_SCHEMAS = Object.freeze([
   FOUNDATION_SCHEMA,
   DEVELOPMENT_BOOTSTRAP_SCHEMA,
@@ -62,4 +68,5 @@ export const POSTGRES_SCHEMAS = Object.freeze([
   LAN_TO_CLOUD_TRANSFER_SCHEMA,
   CLOUD_TO_LAN_TRANSFER_SCHEMA,
   TERMINAL_PROJECT_LIFECYCLE_SCHEMA,
+  TERMINAL_CONTINUITY_CATALOG_SCHEMA,
 ]);
