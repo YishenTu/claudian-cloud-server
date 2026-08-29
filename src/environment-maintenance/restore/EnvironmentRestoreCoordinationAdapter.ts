@@ -1,57 +1,17 @@
-import type { CollabProjectBackupRecord } from '@claudian-collab/protocol';
-
+import { CoordinationError } from '../../coordination/CoordinationError.js';
+import type { EnvironmentRestorePersistence } from '../../coordination/EnvironmentRestorePersistence.js';
 import {
   EnvironmentRestoreCoordinatorError,
   type EnvironmentRestoreCatalog,
   type EnvironmentRestoreCoordinationPort,
-  type EnvironmentRestoreProject,
   type EnvironmentRestoreRepositoryPublication,
 } from './EnvironmentRestoreCoordinator.js';
 import type { EnvironmentProjectBackupSource } from './PublishedEnvironmentBackupSource.js';
 
-export interface EnvironmentRestoreCoordinationStoragePort {
-  assertEmpty(signal: AbortSignal): Promise<void>;
-  createDatabase(input: Readonly<{
-    readonly authorityId: string;
-    readonly authorityVolumeId: string;
-    readonly authorityVolumeIdentity: string;
-    readonly coordinationSchemaVersion: number;
-    readonly operationId: string;
-    readonly restoreEpoch: number;
-    readonly signal: AbortSignal;
-  }>): Promise<Readonly<{ readonly authorityVolumeId: string }>>;
-  importProject(input: Readonly<{
-    readonly operationId: string;
-    readonly project: EnvironmentRestoreProject;
-    readonly records: readonly CollabProjectBackupRecord[];
-    readonly restoreEpoch: number;
-    readonly signal: AbortSignal;
-  }>): Promise<void>;
-  publishAuthority(input: Readonly<{
-    readonly catalog: EnvironmentRestoreCatalog;
-    readonly operationId: string;
-    readonly repositories: readonly EnvironmentRestoreRepositoryPublication[];
-    readonly restoreEpoch: number;
-    readonly signal: AbortSignal;
-  }>): Promise<void>;
-  classifyOrRemoveRestoreOwnedDatabase(input: Readonly<{
-    readonly authorityVolumeId: string;
-    readonly operationId: string;
-    readonly signal: AbortSignal;
-  }>): Promise<'authority-published' | 'removed' | 'replayed'>;
-  verifyDatabaseIdentity(
-    expectedAuthorityVolumeId: string,
-    signal: AbortSignal,
-  ): Promise<void>;
-  verifyRestoredProject(input: Readonly<{
-    readonly operationId: string;
-    readonly project: EnvironmentRestoreProject;
-    readonly records: readonly CollabProjectBackupRecord[];
-    readonly repository: EnvironmentRestoreRepositoryPublication;
-    readonly restoreEpoch: number;
-    readonly signal: AbortSignal;
-  }>): Promise<void>;
-}
+export type EnvironmentRestoreCoordinationStoragePort = Omit<
+  EnvironmentRestorePersistence,
+  'readRestoredContinuity'
+>;
 
 export interface EnvironmentRestoreCoordinationAdapterOptions {
   readonly source: EnvironmentProjectBackupSource;
@@ -60,6 +20,20 @@ export interface EnvironmentRestoreCoordinationAdapterOptions {
 
 function fail(): never {
   throw new EnvironmentRestoreCoordinatorError('dependency-failed');
+}
+
+function translate(error: unknown): never {
+  if (error instanceof EnvironmentRestoreCoordinatorError) throw error;
+  if (error instanceof CoordinationError) {
+    if (error.code === 'cancelled') {
+      throw new EnvironmentRestoreCoordinatorError('cancelled');
+    }
+    if (
+      error.code === 'state-conflict'
+      || error.code === 'authority-volume-mismatch'
+    ) throw new EnvironmentRestoreCoordinatorError('state-conflict');
+  }
+  return fail();
 }
 
 /** Keeps record enumeration and multi-Project replay out of O5 composition. */
@@ -83,14 +57,26 @@ implements EnvironmentRestoreCoordinationPort {
     this.#storage = options.storage;
   }
 
-  assertEmpty(signal: AbortSignal): Promise<void> {
-    return this.#storage.assertEmpty(signal);
+  async assertEmpty(signal: AbortSignal): Promise<void> {
+    try {
+      await this.#storage.assertEmpty(signal);
+    } catch (error: unknown) {
+      if (
+        error instanceof CoordinationError
+        && error.code === 'state-conflict'
+      ) throw new EnvironmentRestoreCoordinatorError('non-empty');
+      return translate(error);
+    }
   }
 
-  createDatabase(input: Parameters<
+  async createDatabase(input: Parameters<
     EnvironmentRestoreCoordinationPort['createDatabase']
   >[0]): ReturnType<EnvironmentRestoreCoordinationPort['createDatabase']> {
-    return this.#storage.createDatabase(input);
+    try {
+      return await this.#storage.createDatabase(input);
+    } catch (error: unknown) {
+      return translate(error);
+    }
   }
 
   async importCoordination(input: Readonly<{
@@ -114,30 +100,44 @@ implements EnvironmentRestoreCoordinationPort {
         });
       }
     } catch (error: unknown) {
-      if (error instanceof EnvironmentRestoreCoordinatorError) throw error;
-      return fail();
+      return translate(error);
     }
   }
 
-  publishAuthority(input: Parameters<
+  async publishAuthority(input: Parameters<
     EnvironmentRestoreCoordinationPort['publishAuthority']
   >[0]): ReturnType<EnvironmentRestoreCoordinationPort['publishAuthority']> {
-    return this.#storage.publishAuthority(input);
+    try {
+      await this.#storage.publishAuthority(input);
+    } catch (error: unknown) {
+      return translate(error);
+    }
   }
 
-  classifyOrRemoveRestoreOwnedDatabase(input: Parameters<
+  async classifyOrRemoveRestoreOwnedDatabase(input: Parameters<
     EnvironmentRestoreCoordinationPort['classifyOrRemoveRestoreOwnedDatabase']
   >[0]): ReturnType<
     EnvironmentRestoreCoordinationPort['classifyOrRemoveRestoreOwnedDatabase']
   > {
-    return this.#storage.classifyOrRemoveRestoreOwnedDatabase(input);
+    try {
+      return await this.#storage.classifyOrRemoveRestoreOwnedDatabase(input);
+    } catch (error: unknown) {
+      return translate(error);
+    }
   }
 
-  verifyDatabaseIdentity(
+  async verifyDatabaseIdentity(
     expectedAuthorityVolumeId: string,
     signal: AbortSignal,
   ): Promise<void> {
-    return this.#storage.verifyDatabaseIdentity(expectedAuthorityVolumeId, signal);
+    try {
+      await this.#storage.verifyDatabaseIdentity(
+        expectedAuthorityVolumeId,
+        signal,
+      );
+    } catch (error: unknown) {
+      return translate(error);
+    }
   }
 
   async verifyRestored(input: Readonly<{
@@ -166,8 +166,7 @@ implements EnvironmentRestoreCoordinationPort {
         });
       }
     } catch (error: unknown) {
-      if (error instanceof EnvironmentRestoreCoordinatorError) throw error;
-      return fail();
+      return translate(error);
     }
   }
 }

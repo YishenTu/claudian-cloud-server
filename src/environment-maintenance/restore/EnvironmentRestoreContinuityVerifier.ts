@@ -2,13 +2,13 @@ import type {
   CollabCheckpointProtectedClaimEnvelopeRecord,
   CollabIsoTimestamp,
   CollabProjectBackupRecord,
-  CollabProjectId,
 } from '@claudian-collab/protocol';
 
 import {
   EnvironmentRestoreCoordinatorError,
   type EnvironmentRestoreCatalog,
   type EnvironmentRestoreContinuityPort,
+  type EnvironmentRestoreProject,
 } from './EnvironmentRestoreCoordinator.js';
 import type { EnvironmentProjectBackupSource } from './PublishedEnvironmentBackupSource.js';
 
@@ -22,7 +22,7 @@ export interface EnvironmentRestoreClaimCustodyPort {
 
 export interface EnvironmentRestoreContinuityStoragePort {
   readRestoredContinuity(
-    projectId: CollabProjectId,
+    project: EnvironmentRestoreProject,
     signal: AbortSignal,
   ): Promise<readonly CollabProjectBackupRecord[]>;
 }
@@ -128,7 +128,7 @@ implements EnvironmentRestoreContinuityPort {
         const expected = continuityRecords(backup.records);
         const restored = continuityRecords(
           await this.#storage.readRestoredContinuity(
-            project.projectId,
+            project,
             input.signal,
           ),
         );

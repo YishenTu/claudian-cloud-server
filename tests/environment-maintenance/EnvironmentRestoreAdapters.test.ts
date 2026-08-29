@@ -21,6 +21,7 @@ import {
   type ProductionCheckpointStagingPort,
   type StagedProductionCheckpointArtifact,
 } from '../../src/onboarding/production/ProductionCheckpointStaging.js';
+import { CoordinationError } from '../../src/coordination/CoordinationError.js';
 import { ProjectCheckpointCoordinator } from '../../src/project-authority/checkpoint/ProjectCheckpointCoordinator.js';
 import type { RepositoryCheckpointCapturePort } from '../../src/repositories/RepositoryCheckpointAuthority.js';
 import { EnvironmentRestoreCoordinationAdapter } from '../../src/environment-maintenance/restore/EnvironmentRestoreCoordinationAdapter.js';
@@ -316,6 +317,50 @@ function catalog(exactProject: EnvironmentRestoreProject): EnvironmentRestoreCat
 }
 
 describe('production environment restore adapters', () => {
+  it('maps coordination persistence failures at the environment boundary', async () => {
+    const coordination = new EnvironmentRestoreCoordinationAdapter({
+      source: {
+        readProjectBackup: () => Promise.reject(
+          new Error('backup-must-not-be-read'),
+        ),
+      },
+      storage: {
+        assertEmpty: () => Promise.reject(new CoordinationError('state-conflict')),
+        classifyOrRemoveRestoreOwnedDatabase: () => Promise.resolve('replayed'),
+        createDatabase: () => Promise.reject(
+          new CoordinationError('dependency-failed'),
+        ),
+        importProject: () => Promise.resolve(),
+        publishAuthority: () => Promise.resolve(),
+        verifyDatabaseIdentity: () => Promise.resolve(),
+        verifyRestoredProject: () => Promise.resolve(),
+      },
+    });
+    await assert.rejects(
+      coordination.assertEmpty(new AbortController().signal),
+      (error: unknown) => (
+        error instanceof EnvironmentRestoreCoordinatorError
+        && error.code === 'non-empty'
+      ),
+    );
+    await assert.rejects(
+      coordination.createDatabase({
+        authorityId: 'authority-a',
+        authorityVolumeId: 'volume-a',
+        authorityVolumeIdentity: 'volume-identity-a',
+        coordinationSchemaVersion: 9,
+        operationId: 'restore-a',
+        restoreEpoch: 2,
+        signal: new AbortController().signal,
+      }),
+      (error: unknown) => (
+        error instanceof EnvironmentRestoreCoordinatorError
+        && error.code === 'dependency-failed'
+        && error.retryable
+      ),
+    );
+  });
+
   it('reopens and verifies the canonical O1 publication before exposing it', async () => {
     const { exactManifest, events, source } = publishedSource();
     const exactProject = project(exactManifest.manifestSha256);
