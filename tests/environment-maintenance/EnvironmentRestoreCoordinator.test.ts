@@ -625,7 +625,13 @@ describe('EnvironmentRestoreCoordinator', () => {
         },
         phase,
       );
-      assert.deepEqual(calls, ['continuity', 'identity'], phase);
+      assert.deepEqual(
+        calls,
+        phase === 'verified' || phase === 'completed'
+          ? ['identity']
+          : ['continuity', 'identity'],
+        phase,
+      );
     }
   });
 
@@ -921,7 +927,7 @@ describe('EnvironmentRestoreCoordinator', () => {
     assert.equal(journal?.phase, 'completed');
   });
 
-  it('re-verifies a completed restore before startup can trust readiness', async () => {
+  it('recovers a completed restore without retaining its source backup', async () => {
     const calls: string[] = [];
     const terminalProject = Object.freeze({
       artifactByteCount: 101,
@@ -937,10 +943,10 @@ describe('EnvironmentRestoreCoordinator', () => {
       terminalProjects: completedCatalog.terminalProjects,
     });
     const coordinator = new EnvironmentRestoreCoordinator({
-      backup: { validate: async () => completedCatalog },
+      backup: { validate: async () => { throw new Error('source unavailable'); } },
       continuity: {
-        verifyBeforeCreation: async () => { calls.push('continuity.open'); },
-        verifyRestored: async () => { calls.push('continuity.verify'); },
+        verifyBeforeCreation: async () => { throw new Error('unexpected'); },
+        verifyRestored: async () => { throw new Error('unexpected'); },
       },
       coordination: {
         assertEmpty: async () => { throw new Error('unexpected'); },
@@ -949,7 +955,7 @@ describe('EnvironmentRestoreCoordinator', () => {
         publishAuthority: async () => { throw new Error('unexpected'); },
         classifyOrRemoveRestoreOwnedDatabase: async () => 'removed' as const,
         verifyDatabaseIdentity: async () => undefined,
-        verifyRestored: async () => { calls.push('coordination.verify'); },
+        verifyRestored: async () => { throw new Error('unexpected'); },
       },
       repositories: {
         assertEmpty: async () => { throw new Error('unexpected'); },
@@ -957,7 +963,7 @@ describe('EnvironmentRestoreCoordinator', () => {
         removeRestoreOwned: async () => 'removed' as const,
         removeRestoreStaging: async () => 'removed' as const,
         stage: async () => { throw new Error('unexpected'); },
-        verifyRestored: async () => { calls.push('repositories.verify'); },
+        verifyRestored: async () => { throw new Error('unexpected'); },
       },
       state: {
         runExclusive,
@@ -977,12 +983,7 @@ describe('EnvironmentRestoreCoordinator', () => {
     const result = await coordinator.recover();
     assert.equal(result?.state, 'completed');
     assert.equal(result?.projectCount, 3);
-    assert.deepEqual(calls, [
-      'continuity.open',
-      'coordination.verify',
-      'repositories.verify',
-      'continuity.verify',
-    ]);
+    assert.deepEqual(calls, []);
   });
 
   it('rejects unavailable claim continuity before inspecting or creating target state', async () => {

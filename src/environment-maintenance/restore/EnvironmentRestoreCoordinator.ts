@@ -1030,6 +1030,30 @@ export class EnvironmentRestoreCoordinator {
         ...(input.signal === undefined ? {} : { signal: input.signal }),
       }));
     }
+    if (exact.phase === 'verified' || exact.phase === 'completed') {
+      const signal = input.signal ?? new AbortController().signal;
+      assertNotAborted(signal);
+      if (
+        typeof inspected.pair !== 'object'
+        || inspected.pair.authorityVolumeId !== exact.authorityVolumeId
+      ) fail(inspected.pair === 'ambiguous' ? 'recovery-required' : 'pair-mismatch');
+      await this.#coordination.verifyDatabaseIdentity(
+        exact.authorityVolumeId,
+        signal,
+      );
+      const completed = exact.phase === 'verified'
+        ? await this.#advance(exact, 'completed')
+        : exact;
+      return Object.freeze({
+        catalogId: completed.catalogId,
+        catalogSha256: completed.catalogSha256,
+        completedAt: completed.updatedAt,
+        operationId: completed.operationId,
+        projectCount: completed.projects.length + completed.terminalProjects.length,
+        restoreEpoch: completed.restoreEpoch,
+        state: 'completed' as const,
+      });
+    }
     return this.#restore(snapshotInput({
       authorityVolumeId: exact.authorityVolumeId,
       authorityVolumeIdentity: exact.authorityVolumeIdentity,

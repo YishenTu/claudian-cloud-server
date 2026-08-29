@@ -444,6 +444,7 @@ class Harness {
   readonly state: MemoryState;
   readonly targetTrust: CloudToLanTargetTrustPort;
   captureFailures = 0;
+  checkpointExpiresAt: string | undefined;
   cleanupFailures = 0;
   discardFailures = 0;
   relinquishCalls = 0;
@@ -461,13 +462,16 @@ class Harness {
           this.captureFailures -= 1;
           throw new Error('capture-failed');
         }
+        this.checkpointExpiresAt = input.expiresAt;
         return Object.freeze({
           checkpointSha256: CHECKPOINT_SHA,
+          expiresAt: input.expiresAt,
           operationId: input.operationId,
           projectId: input.projectId,
         });
       },
-      discard: async () => {
+      discard: async captured => {
+        assert.equal(captured.expiresAt, this.checkpointExpiresAt);
         if (this.discardFailures > 0) {
           this.discardFailures -= 1;
           throw new Error('discard-failed');

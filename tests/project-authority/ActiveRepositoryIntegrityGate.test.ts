@@ -156,6 +156,69 @@ describe('ActiveRepositoryIntegrityGate', () => {
       .verifyAll();
   });
 
+  it('verifies every active Member while ignoring historical memberships', async () => {
+    const historicalScope = {
+      ...scope(),
+      listMemberships: () => Promise.resolve([{
+        displayName: 'Alice',
+        memberId: 'member-a',
+        revision: 1n,
+        role: 'manager' as const,
+        status: 'active' as const,
+      }, {
+        displayName: 'Bob',
+        memberId: 'member-b',
+        revision: 2n,
+        role: 'member' as const,
+        status: 'left' as const,
+      }, {
+        displayName: 'Carol',
+        memberId: 'member-c',
+        revision: 1n,
+        role: 'member' as const,
+        status: 'active' as const,
+      }, {
+        displayName: 'Dylan',
+        memberId: 'member-d',
+        revision: 1n,
+        role: 'member' as const,
+        status: 'active' as const,
+      }]),
+    } as unknown as ProjectScope;
+    let expectedRefs: readonly { readonly name: string }[] = [];
+    const coordination: ActiveRepositoryIntegrityCoordination = {
+      acquireProjectLease: () => Promise.resolve({
+        close: () => Promise.resolve(),
+        drainDevelopmentBootstrapUploads: () => Promise.resolve(),
+        handoffToDevelopmentBootstrapUpload: () => Promise.resolve({
+          close: () => Promise.resolve(),
+        }),
+        withProjectScope: operation => operation(historicalScope),
+      } satisfies PinnedProjectLease),
+      listActiveRepositoryPlacements: () => Promise.resolve({
+        nextCursor: undefined,
+        placements: [placement],
+      }),
+    };
+    const repository: ActiveRepositoryIntegrityRepository = {
+      cleanupReceivePackState: () => Promise.resolve(),
+      verifyIntegrity: (_accepted, options) => {
+        expectedRefs = options.expectedRefs;
+        return Promise.resolve({ status: 'valid' });
+      },
+    };
+
+    await new ActiveRepositoryIntegrityGate({ coordination, repository })
+      .verifyAll();
+
+    assert.deepEqual(expectedRefs.map(ref => ref.name), [
+      'refs/heads/main',
+      'refs/heads/members/member-a',
+      'refs/heads/members/member-c',
+      'refs/heads/members/member-d',
+    ]);
+  });
+
   it('propagates maintenance cancellation into repository verification', async () => {
     const controller = new AbortController();
     let received: AbortSignal | undefined;

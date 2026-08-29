@@ -197,6 +197,71 @@ async function expectRecoveryError(
 }
 
 describe('ProjectLifecycleRecoveryDispatcher', () => {
+  it('strictly drains lifecycle catalog candidates before maintenance work', async () => {
+    const record = journal();
+    const coordination = new MemoryLifecycleCoordination(record);
+    const dispatcher = new ProjectLifecycleRecoveryDispatcher({
+      coordination,
+      owners: owners({
+        recover: input => {
+          coordination.current = Object.freeze({
+            ...input.journal,
+            phase: 'completed',
+            state: 'completed',
+          });
+          return Promise.resolve('settled');
+        },
+      }),
+    });
+
+    await dispatcher.recoverAll({
+      listRecoveryCandidates: () => Promise.resolve({
+        candidates: [{
+          kind: record.kind,
+          operationId: record.operationId,
+          projectId: record.projectId,
+          scheduledAt: record.scheduledAt,
+        }],
+        nextCursor: undefined,
+      }),
+    });
+
+    assert.equal(coordination.current?.state, 'completed');
+    dispatcher.close();
+  });
+
+  it('fails a strict catalog drain when external proof is still required', async () => {
+    const record = Object.freeze({
+      ...journal('authority-transfer'),
+      direction: 'lan-to-cloud' as const,
+      phase: 'repository-published',
+    });
+    const coordination = new MemoryLifecycleCoordination(record);
+    const waiting: ProjectLifecycleRecoveryOwner = {
+      recover: () => Promise.resolve('waiting-for-external-proof'),
+    };
+    const dispatcher = new ProjectLifecycleRecoveryDispatcher({
+      coordination,
+      owners: Object.freeze({
+        ...owners(waiting),
+        authorityTransfer: waiting,
+      }),
+    });
+
+    await expectRecoveryError(dispatcher.recoverAll({
+      listRecoveryCandidates: () => Promise.resolve({
+        candidates: [{
+          kind: record.kind,
+          operationId: record.operationId,
+          projectId: record.projectId,
+          scheduledAt: record.scheduledAt,
+        }],
+        nextCursor: undefined,
+      }),
+    }), 'recovery-required');
+    dispatcher.close();
+  });
+
   it('re-reads an exact candidate under one Project lease before dispatch', async () => {
     const record = journal();
     const coordination = new MemoryLifecycleCoordination(record);

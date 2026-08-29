@@ -1,12 +1,17 @@
 name: claudian-cloud-server
 
+x-restore-owner-labels: &restore-owner-labels
+  com.claudian.restore-owner: ${CLAUDIAN_CLOUD_RESTORE_OWNERSHIP_ID:-unowned}
+
 x-cloud-image: &cloud-image
   image: ${CLAUDIAN_CLOUD_IMAGE:-claudian-cloud-server:local}
+  labels: *restore-owner-labels
   build:
     context: ..
     dockerfile: deploy/Dockerfile
 
 x-one-shot-security: &one-shot-security
+  labels: *restore-owner-labels
   init: true
   read_only: true
   cap_drop:
@@ -47,6 +52,7 @@ services:
         required: true
     environment:
       PGPORT: ${CLAUDIAN_CLOUD_POSTGRES_PORT:-5432}
+    labels: *restore-owner-labels
     command:
       - postgres
       - -c
@@ -362,4 +368,8 @@ services:
 
 volumes:
   cloud-authority:
+    labels:
+      com.claudian.restore-owner: ${CLAUDIAN_CLOUD_RESTORE_OWNERSHIP_ID:-unowned}
   postgres-data:
+    labels:
+      com.claudian.restore-owner: ${CLAUDIAN_CLOUD_RESTORE_OWNERSHIP_ID:-unowned}

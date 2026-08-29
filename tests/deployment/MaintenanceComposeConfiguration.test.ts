@@ -18,6 +18,7 @@ interface Service {
   }>>>;
   readonly entrypoint?: readonly string[];
   readonly environment?: Readonly<Record<string, string>>;
+  readonly labels?: Readonly<Record<string, string>>;
   readonly profiles?: readonly string[];
   readonly read_only?: boolean;
   readonly restart?: string;
@@ -28,10 +29,14 @@ interface Service {
 
 interface Model {
   readonly services: Readonly<Record<string, Service>>;
+  readonly volumes: Readonly<Record<string, Readonly<{
+    readonly labels?: Readonly<Record<string, string>>;
+  }>>>;
 }
 
 const repositoryRoot = resolve(import.meta.dirname, '../..');
 const keyringTarget = '/run/secrets/claudian_claim_custody_keyring';
+const restoreOwnershipId = 'd'.repeat(64);
 
 function render(): Model {
   return JSON.parse(execFileSync('docker', [
@@ -53,6 +58,7 @@ function render(): Model {
       CLAUDIAN_CLOUD_BACKUP_ARTIFACT_ROOT: '/operator/backups/artifacts',
       CLAUDIAN_CLOUD_BACKUP_CATALOG_ROOT: '/operator/backups/catalogs',
       CLAUDIAN_CLOUD_EXPORT_ARTIFACT_ROOT: '/operator/exports/artifacts',
+      CLAUDIAN_CLOUD_RESTORE_OWNERSHIP_ID: restoreOwnershipId,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })) as Model;
@@ -97,6 +103,24 @@ function authorityMount(value: Service, readOnly: boolean): boolean {
 }
 
 describe('maintenance Compose configuration', () => {
+  it('binds every restore container and volume to the operator ownership identity', () => {
+    const model = render();
+    for (const [name, value] of Object.entries(model.services)) {
+      assert.equal(
+        value.labels?.['com.claudian.restore-owner'],
+        restoreOwnershipId,
+        name,
+      );
+    }
+    for (const name of ['cloud-authority', 'postgres-data']) {
+      assert.equal(
+        model.volumes[name]?.labels?.['com.claudian.restore-owner'],
+        restoreOwnershipId,
+        name,
+      );
+    }
+  });
+
   it('routes every one-shot profile through the compiled maintenance entry', () => {
     const model = render();
     const commands = {
