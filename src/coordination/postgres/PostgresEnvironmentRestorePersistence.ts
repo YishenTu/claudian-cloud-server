@@ -10,7 +10,10 @@ import {
 } from '@claudian-collab/protocol';
 import { Client, type QueryResultRow } from 'pg';
 
-import { CURRENT_POSTGRES_SCHEMA_VERSION } from '../../config/PostgresSchemaCompatibility.js';
+import {
+  MAINTENANCE_POSTGRES_SCHEMA_COMPATIBILITY,
+  supportsPostgresSchemaVersion,
+} from '../../config/PostgresSchemaCompatibility.js';
 import { CoordinationError } from '../CoordinationError.js';
 import type {
   EnvironmentRestorePersistence,
@@ -20,6 +23,8 @@ import type {
 } from '../EnvironmentRestorePersistence.js';
 import { PostgresMigrator } from './PostgresMigrator.js';
 import { PostgresProjectCheckpointPersistence } from './PostgresProjectCheckpointPersistence.js';
+import type { TerminalProjectContinuityRecord } from '../ProjectCheckpointPersistence.js';
+import { createTerminalProjectContinuityArtifact } from '../../environment-maintenance/restore/TerminalProjectContinuityArtifact.js';
 
 export interface PostgresEnvironmentRestorePersistenceOptions {
   readonly connectionString: string;
@@ -158,6 +163,61 @@ function exactRecord<Kind extends CollabProjectBackupRecord['kind']>(
   return matches[0] ?? fail('state-conflict');
 }
 
+function canonicalTerminalRecords(
+  projectId: CollabProjectId,
+  records: readonly CollabProjectBackupRecord[],
+): readonly TerminalProjectContinuityRecord[] {
+  try {
+    return createTerminalProjectContinuityArtifact(
+      projectId,
+      records as readonly TerminalProjectContinuityRecord[],
+    ).records;
+  } catch {
+    return fail('state-conflict');
+  }
+}
+
+function terminalAssociation(
+  records: readonly TerminalProjectContinuityRecord[],
+): Readonly<{
+  readonly operationId: string;
+  readonly operationKind: 'authority-transfer' | 'retire';
+  readonly resultSha256: string;
+}> {
+  const tombstone = records.find(record => record.kind === 'tombstone');
+  if (tombstone?.kind !== 'tombstone') return fail('state-conflict');
+  const terminal = records.find(record => record.kind === 'terminal-responder');
+  if (terminal?.kind === 'terminal-responder') return Object.freeze({
+    operationId: terminal.value.operationId,
+    operationKind: terminal.value.operation === 'retireProject'
+      ? 'retire'
+      : 'authority-transfer',
+    resultSha256: createHash('sha256')
+      .update(terminal.value.responseJson)
+      .digest('hex'),
+  });
+  const candidates = records.flatMap(record => (
+    record.kind === 'lifecycle-journal'
+    && record.value.state === 'completed'
+    && record.value.resultSha256 !== null
+    && record.value.updatedAt === tombstone.value.retiredAt
+    && (
+      record.value.operationKind === 'retire'
+      || record.value.operationKind === 'authority-transfer'
+    )
+      ? [Object.freeze({
+          operationId: record.value.operationId,
+          operationKind: record.value.operationKind,
+          resultSha256: record.value.resultSha256,
+        })]
+      : []
+  ));
+  if (candidates.length !== 1 || candidates[0] === undefined) {
+    return fail('state-conflict');
+  }
+  return candidates[0];
+}
+
 async function schemaState(client: Client): Promise<RestoreSchemaState> {
   const result = await client.query<RestoreSchemaState>(
     `SELECT to_regnamespace('claudian_cloud')::text AS canonical_schema,
@@ -221,7 +281,10 @@ implements EnvironmentRestorePersistence {
       || !validIdentity(input.authorityVolumeId)
       || !validIdentity(input.authorityVolumeIdentity)
       || !validIdentity(input.operationId)
-      || input.coordinationSchemaVersion !== CURRENT_POSTGRES_SCHEMA_VERSION
+      || !supportsPostgresSchemaVersion(
+        input.coordinationSchemaVersion,
+        MAINTENANCE_POSTGRES_SCHEMA_COMPATIBILITY,
+      )
       || !Number.isSafeInteger(input.restoreEpoch)
       || input.restoreEpoch <= 0
     ) fail('state-conflict');
@@ -284,7 +347,7 @@ implements EnvironmentRestorePersistence {
     try {
       await new PostgresMigrator({
         connectionString: this.#connectionString,
-      }).apply(input.signal);
+      }).applyThrough(input.coordinationSchemaVersion, input.signal);
     } catch (error: unknown) {
       if (error instanceof CoordinationError) throw error;
       if (input.signal.aborted) fail('cancelled');
@@ -318,8 +381,10 @@ implements EnvironmentRestorePersistence {
       || sourcePlacement.value.placementGeneration
         !== input.project.placementGeneration
       || schemaCatalog.value.projectId !== input.project.projectId
-      || schemaCatalog.value.coordinationSchemaVersion
-        !== CURRENT_POSTGRES_SCHEMA_VERSION
+      || !supportsPostgresSchemaVersion(
+        schemaCatalog.value.coordinationSchemaVersion,
+        MAINTENANCE_POSTGRES_SCHEMA_COMPATIBILITY,
+      )
       || authorityPair.value.projectId !== input.project.projectId
       || authorityPair.value.restoreEpoch + 1 !== input.restoreEpoch
     ) fail('state-conflict');
@@ -1117,6 +1182,250 @@ implements EnvironmentRestorePersistence {
     });
   }
 
+  async importTerminalProject(input: Readonly<{
+    readonly operationId: string;
+    readonly projectId: CollabProjectId;
+    readonly records: readonly CollabProjectBackupRecord[];
+    readonly restoreEpoch: number;
+    readonly signal: AbortSignal;
+  }>): Promise<void> {
+    assertActive(input.signal);
+    if (!validIdentity(input.operationId) || !isCollabOpaqueId(input.projectId)) {
+      fail('state-conflict');
+    }
+    const records = canonicalTerminalRecords(input.projectId, input.records);
+    const tombstone = records.find(record => record.kind === 'tombstone');
+    if (tombstone?.kind !== 'tombstone') fail('state-conflict');
+    const association = terminalAssociation(records);
+    await this.#withClient(input.signal, async client => {
+      await client.query('BEGIN');
+      try {
+        const fence = await this.#lockExactFence(client, {
+          operationId: input.operationId,
+          projectId: input.projectId,
+          restoreEpoch: input.restoreEpoch,
+        }, input.signal);
+        if (fence.state !== 'staged') fail('state-conflict');
+        await client.query(
+          "SELECT set_config('claudian_cloud.project_id', $1, true)",
+          [input.projectId],
+        );
+        const active = await client.query(
+          'SELECT project_id FROM claudian_cloud.projects WHERE project_id = $1',
+          [input.projectId],
+        );
+        if (active.rows.length !== 0) fail('state-conflict');
+        for (const record of records) {
+          if (record.kind !== 'lifecycle-journal') continue;
+          await client.query(
+            `INSERT INTO claudian_cloud.project_lifecycle_journals (
+               project_id, operation_id, kind, direction, phase,
+               recovery_from_phase, state, expected_authority_generation,
+               actor_member_id, idempotency_key, request_fingerprint,
+               checkpoint_sha256, batch_revision, batch_sha256,
+               result_sha256, scheduled_at, created_at, updated_at,
+               expected_personal_ref_oid
+             ) VALUES (
+               $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+               $13, $14, $15, $16, $17, $18, $19
+             ) ON CONFLICT (project_id, operation_id) DO NOTHING`,
+            [
+              record.value.projectId,
+              record.value.operationId,
+              record.value.operationKind,
+              record.value.direction,
+              record.value.phase,
+              record.value.recoveryFromPhase,
+              record.value.state,
+              record.value.expectedAuthorityGeneration,
+              record.value.actorMemberId,
+              record.value.idempotencyKey,
+              record.value.requestFingerprint,
+              record.value.checkpointSha256,
+              record.value.batchRevision,
+              record.value.batchSha256,
+              record.value.resultSha256,
+              record.value.scheduledAt,
+              record.value.createdAt,
+              record.value.updatedAt,
+              record.value.expectedPersonalRefOid,
+            ],
+          );
+        }
+        for (const record of records) {
+          if (record.kind !== 'transfer-receipt-key') continue;
+          await client.query(
+            `INSERT INTO claudian_cloud.transfer_receipt_keys (
+               project_id, transfer_id, receipt_key_id,
+               signature_algorithm, public_key, created_at
+             ) VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (project_id, transfer_id, receipt_key_id) DO NOTHING`,
+            [
+              record.value.projectId,
+              record.value.transferId,
+              record.value.receiptKeyId,
+              record.value.signatureAlgorithm,
+              record.value.receiptPublicKey,
+              record.value.createdAt,
+            ],
+          );
+        }
+        for (const record of records) {
+          if (record.kind !== 'transfer-redemption-receipt') continue;
+          const receipt = record.value.receipt;
+          await client.query(
+            `INSERT INTO claudian_cloud.transfer_redemption_receipts (
+               project_id, transfer_id, member_id, receipt_id,
+               claim_sha256, operation_intent_id, receipt_key_id,
+               receipt_json, redeemed_at, acknowledged_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (project_id, transfer_id, member_id) DO NOTHING`,
+            [
+              record.value.projectId,
+              receipt.transferId,
+              receipt.memberId,
+              receipt.receiptId,
+              receipt.claimSha256,
+              receipt.operationIntentId,
+              receipt.receiptKeyId,
+              JSON.stringify(receipt),
+              receipt.redeemedAt,
+              record.value.acknowledgedAt,
+            ],
+          );
+        }
+        for (const record of records) {
+          if (record.kind !== 'terminal-responder') continue;
+          const operationKind = record.value.operation === 'retireProject'
+            ? 'retire'
+            : 'authority-transfer';
+          const replay = records.find(candidate => (
+            candidate.kind === 'terminal-responder-replay'
+            && candidate.value.operationId === record.value.operationId
+          ));
+          await client.query(
+            `INSERT INTO claudian_cloud.project_terminal_responders (
+               project_id, operation_kind, operation_id, response_sha256,
+               response_json, expires_at, created_at, updated_at,
+               replay_member_id, replay_request_sha256
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, $9)
+             ON CONFLICT (project_id, operation_kind, operation_id) DO NOTHING`,
+            [
+              record.value.projectId,
+              operationKind,
+              record.value.operationId,
+              createHash('sha256').update(record.value.responseJson).digest('hex'),
+              record.value.responseJson,
+              record.value.expiresAt,
+              tombstone.value.retiredAt,
+              replay?.kind === 'terminal-responder-replay'
+                ? replay.value.memberId
+                : null,
+              replay?.kind === 'terminal-responder-replay'
+                ? replay.value.requestSha256
+                : null,
+            ],
+          );
+          await client.query(
+            `INSERT INTO claudian_cloud.project_terminal_responder_catalog (
+               project_id, operation_kind, operation_id, expires_at, created_at
+             ) VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (project_id, operation_kind, operation_id) DO NOTHING`,
+            [
+              record.value.projectId,
+              operationKind,
+              record.value.operationId,
+              record.value.expiresAt,
+              tombstone.value.retiredAt,
+            ],
+          );
+        }
+        for (const record of records) {
+          if (record.kind !== 'terminal-principal') continue;
+          await client.query(
+            `INSERT INTO claudian_cloud.project_terminal_acknowledgements (
+               project_id, operation_kind, operation_id, principal_id,
+               member_id, acknowledged_at
+             ) VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (
+               project_id, operation_kind, operation_id, member_id
+             ) DO NOTHING`,
+            [
+              record.value.projectId,
+              record.value.operationKind,
+              record.value.operationId,
+              record.value.principalId,
+              record.value.memberId,
+              record.value.acknowledgedAt,
+            ],
+          );
+        }
+        for (const record of records) {
+          if (record.kind !== 'protected-claim-envelope') continue;
+          const associatedData = record.value.associatedData;
+          await client.query(
+            `INSERT INTO claudian_cloud.source_protected_claim_envelopes (
+               project_id, transfer_id, member_id, claim_sha256,
+               checkpoint_sha256, environment_identity,
+               authority_generation, envelope_version,
+               encryption_algorithm, key_id, key_version, receipt_key_id,
+               associated_data_sha256, nonce, ciphertext, tag, expires_at,
+               created_at
+             ) VALUES (
+               $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+               $13, $14, $15, $16, $17, $18
+             ) ON CONFLICT (project_id, transfer_id, member_id) DO NOTHING`,
+            [
+              associatedData.projectId,
+              record.value.transferId,
+              record.value.memberId,
+              associatedData.claimSha256,
+              associatedData.checkpointSha256,
+              associatedData.environmentIdentity,
+              associatedData.authorityGeneration,
+              associatedData.envelopeVersion,
+              record.value.encryptionAlgorithm,
+              record.value.keyId,
+              record.value.keyVersion,
+              record.value.receiptKeyId,
+              record.value.associatedDataSha256,
+              record.value.nonce,
+              record.value.ciphertext,
+              record.value.tag,
+              record.value.expiresAt,
+              tombstone.value.retiredAt,
+            ],
+          );
+        }
+        await client.query(
+          `INSERT INTO claudian_cloud.project_tombstones (
+             project_id, authority_generation, terminal_operation_kind,
+             terminal_operation_id, result_sha256, retired_at,
+             terminal_expires_at
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+           ON CONFLICT (project_id) DO NOTHING`,
+          [
+            tombstone.value.projectId,
+            tombstone.value.authorityGeneration,
+            association.operationKind,
+            association.operationId,
+            association.resultSha256,
+            tombstone.value.retiredAt,
+            tombstone.value.terminalExpiresAt,
+          ],
+        );
+        const restored = await this.#readTerminalRecords(client, input.projectId);
+        if (JSON.stringify(restored) !== JSON.stringify(records)) {
+          fail('state-conflict');
+        }
+        await client.query('COMMIT');
+      } catch (error: unknown) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        throw error;
+      }
+    });
+  }
+
   async publishAuthority(input: Readonly<{
     readonly catalog: EnvironmentRestorePersistenceCatalog;
     readonly operationId: string;
@@ -1316,6 +1625,54 @@ implements EnvironmentRestorePersistence {
     return Object.freeze(records.filter(record => CONTINUITY_KINDS.has(record.kind)));
   }
 
+  async verifyRestoredTerminalProject(input: Readonly<{
+    readonly operationId: string;
+    readonly projectId: CollabProjectId;
+    readonly records: readonly CollabProjectBackupRecord[];
+    readonly restoreEpoch: number;
+    readonly signal: AbortSignal;
+  }>): Promise<void> {
+    const expected = canonicalTerminalRecords(input.projectId, input.records);
+    const restored = await this.#readPublishedTerminalProject(input);
+    if (JSON.stringify(restored) !== JSON.stringify(expected)) {
+      fail('state-conflict');
+    }
+  }
+
+  async readRestoredTerminalContinuity(
+    projectId: CollabProjectId,
+    signal: AbortSignal,
+  ): Promise<readonly CollabProjectBackupRecord[]> {
+    assertActive(signal);
+    const records = await this.#withClient(signal, async client => {
+      await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      try {
+        const fence = await client.query<RestoreFenceRow>(
+          `SELECT operation_id, authority_id, authority_volume_id,
+                  authority_volume_identity, coordination_schema_version,
+                  restore_epoch, state
+             FROM claudian_cloud_restore.database_fence`,
+        );
+        if (fence.rows.length !== 1 || fence.rows[0]?.state !== 'published') {
+          fail('state-conflict');
+        }
+        await client.query(
+          "SELECT set_config('claudian_cloud.project_id', $1, true)",
+          [projectId],
+        );
+        const restored = await this.#readTerminalRecords(client, projectId);
+        await client.query('COMMIT');
+        return restored;
+      } catch (error: unknown) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        throw error;
+      }
+    });
+    return Object.freeze(
+      records.filter(record => CONTINUITY_KINDS.has(record.kind)),
+    );
+  }
+
   async classifyOrRemoveRestoreOwnedDatabase(input: Readonly<{
     readonly authorityVolumeId: string;
     readonly operationId: string;
@@ -1476,6 +1833,61 @@ implements EnvironmentRestorePersistence {
         || await databaseIdentity(client) !== fence.authority_volume_id
       ) fail('state-conflict');
       return fence;
+    });
+  }
+
+  async #readPublishedTerminalProject(input: Readonly<{
+    readonly operationId: string;
+    readonly projectId: CollabProjectId;
+    readonly restoreEpoch: number;
+    readonly signal: AbortSignal;
+  }>): Promise<readonly TerminalProjectContinuityRecord[]> {
+    assertActive(input.signal);
+    return this.#withClient(input.signal, async client => {
+      await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      try {
+        const fence = await client.query<RestoreFenceRow>(
+          `SELECT operation_id, authority_id, authority_volume_id,
+                  authority_volume_identity, coordination_schema_version,
+                  restore_epoch, state
+             FROM claudian_cloud_restore.database_fence`,
+        );
+        const exact = fence.rows[0];
+        if (
+          fence.rows.length !== 1
+          || exact?.state !== 'published'
+          || exact.operation_id !== input.operationId
+          || Number(exact.restore_epoch) !== input.restoreEpoch
+        ) fail('state-conflict');
+        await client.query(
+          "SELECT set_config('claudian_cloud.project_id', $1, true)",
+          [input.projectId],
+        );
+        const records = await this.#readTerminalRecords(client, input.projectId);
+        await client.query('COMMIT');
+        return records;
+      } catch (error: unknown) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        throw error;
+      }
+    });
+  }
+
+  async #readTerminalRecords(
+    client: Client,
+    projectId: CollabProjectId,
+  ): Promise<readonly TerminalProjectContinuityRecord[]> {
+    const checkpoint = new PostgresProjectCheckpointPersistence(
+      projectId,
+      async <Row extends QueryResultRow>(
+        sql: string,
+        values: readonly unknown[],
+      ): Promise<readonly Row[]> => (
+        (await client.query<Row>(sql, [...values])).rows
+      ),
+    );
+    return checkpoint.readTerminalProjectContinuityRecords({
+      maximumCoordinationBytes: MAXIMUM_RESTORE_COORDINATION_BYTES,
     });
   }
 

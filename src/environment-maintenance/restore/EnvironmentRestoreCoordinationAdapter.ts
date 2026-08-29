@@ -6,7 +6,10 @@ import {
   type EnvironmentRestoreCoordinationPort,
   type EnvironmentRestoreRepositoryPublication,
 } from './EnvironmentRestoreCoordinator.js';
-import type { EnvironmentProjectBackupSource } from './PublishedEnvironmentBackupSource.js';
+import type {
+  EnvironmentProjectBackupSource,
+  EnvironmentTerminalProjectBackupSource,
+} from './PublishedEnvironmentBackupSource.js';
 
 export type EnvironmentRestoreCoordinationStoragePort = Omit<
   EnvironmentRestorePersistence,
@@ -14,7 +17,8 @@ export type EnvironmentRestoreCoordinationStoragePort = Omit<
 >;
 
 export interface EnvironmentRestoreCoordinationAdapterOptions {
-  readonly source: EnvironmentProjectBackupSource;
+  readonly source: EnvironmentProjectBackupSource
+    & Partial<EnvironmentTerminalProjectBackupSource>;
   readonly storage: EnvironmentRestoreCoordinationStoragePort;
 }
 
@@ -39,7 +43,8 @@ function translate(error: unknown): never {
 /** Keeps record enumeration and multi-Project replay out of O5 composition. */
 export class EnvironmentRestoreCoordinationAdapter
 implements EnvironmentRestoreCoordinationPort {
-  readonly #source: EnvironmentProjectBackupSource;
+  readonly #source: EnvironmentProjectBackupSource
+    & Partial<EnvironmentTerminalProjectBackupSource>;
   readonly #storage: EnvironmentRestoreCoordinationStoragePort;
 
   constructor(options: EnvironmentRestoreCoordinationAdapterOptions) {
@@ -94,6 +99,24 @@ implements EnvironmentRestoreCoordinationPort {
         await this.#storage.importProject({
           operationId: input.operationId,
           project,
+          records: backup.records,
+          restoreEpoch: input.restoreEpoch,
+          signal: input.signal,
+        });
+      }
+      for (const terminalProject of input.catalog.terminalProjects) {
+        const readTerminal = this.#source.readTerminalProjectBackup;
+        const importTerminal = this.#storage.importTerminalProject;
+        if (readTerminal === undefined || importTerminal === undefined) {
+          return fail();
+        }
+        const backup = await readTerminal.call(this.#source, {
+          signal: input.signal,
+          terminalProject,
+        });
+        await importTerminal.call(this.#storage, {
+          operationId: input.operationId,
+          projectId: terminalProject.projectId,
           records: backup.records,
           restoreEpoch: input.restoreEpoch,
           signal: input.signal,
@@ -161,6 +184,24 @@ implements EnvironmentRestoreCoordinationPort {
           project,
           records: backup.records,
           repository,
+          restoreEpoch: input.restoreEpoch,
+          signal: input.signal,
+        });
+      }
+      for (const terminalProject of input.catalog.terminalProjects) {
+        const readTerminal = this.#source.readTerminalProjectBackup;
+        const verifyTerminal = this.#storage.verifyRestoredTerminalProject;
+        if (readTerminal === undefined || verifyTerminal === undefined) {
+          return fail();
+        }
+        const backup = await readTerminal.call(this.#source, {
+          signal: input.signal,
+          terminalProject,
+        });
+        await verifyTerminal.call(this.#storage, {
+          operationId: input.operationId,
+          projectId: terminalProject.projectId,
+          records: backup.records,
           restoreEpoch: input.restoreEpoch,
           signal: input.signal,
         });

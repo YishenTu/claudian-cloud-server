@@ -31,7 +31,7 @@ async function runMigration(
       ...baseEnvironment(),
       ...(postgresUrl === undefined
         ? {}
-        : { CLAUDIAN_CLOUD_POSTGRES_URL: postgresUrl }),
+        : { CLAUDIAN_CLOUD_POSTGRES_MIGRATION_URL: postgresUrl }),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
     },
@@ -88,7 +88,7 @@ describe('migration process', () => {
       assert.deepEqual(await runMigration(database.migrationUrl, 'preflight'), {
         exitCode: 0,
         stderr: '',
-        stdout: '9\n',
+        stdout: '10\n',
       });
     });
   });
@@ -97,7 +97,7 @@ describe('migration process', () => {
     assert.deepEqual(await runMigration(undefined, 'target'), {
       exitCode: 0,
       stderr: '',
-      stdout: '9\n',
+      stdout: '10\n',
     });
     assert.deepEqual(await runMigration(undefined, 'supports', '9'), {
       exitCode: 0,

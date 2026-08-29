@@ -189,11 +189,11 @@ async function createFixture(): Promise<CompositionFixture> {
       '',
     ].join('\n'), { mode: 0o600 }),
     writeFile(migrationEnvironmentFile, [
-      `CLAUDIAN_CLOUD_POSTGRES_URL=${migrationUrl}`,
+      `CLAUDIAN_CLOUD_POSTGRES_MIGRATION_URL=${migrationUrl}`,
       '',
     ].join('\n'), { mode: 0o600 }),
     writeFile(wrongRoleMigrationEnvironmentFile, [
-      `CLAUDIAN_CLOUD_POSTGRES_URL=${runtimeUrl}`,
+      `CLAUDIAN_CLOUD_POSTGRES_MIGRATION_URL=${runtimeUrl}`,
       '',
     ].join('\n'), { mode: 0o600 }),
     writeFile(runtimeEnvironmentFile, [
@@ -309,7 +309,7 @@ describe('persistent local Compose model', () => {
         '',
       ].join('\n')),
       writeFile(migrationEnvironmentFile, [
-        'CLAUDIAN_CLOUD_POSTGRES_URL=postgresql://claudian_cloud_migration:migration-secret-value@127.0.0.1:55432/claudian_cloud',
+        'CLAUDIAN_CLOUD_POSTGRES_MIGRATION_URL=postgresql://claudian_cloud_migration:migration-secret-value@127.0.0.1:55432/claudian_cloud',
         '',
       ].join('\n')),
       writeFile(runtimeEnvironmentFile, [
@@ -372,12 +372,17 @@ describe('persistent local Compose model', () => {
       assert.equal(migration.user, '10001:10001');
       assert.equal(migration.volumes, undefined);
       assert.deepEqual(Object.keys(migration.environment ?? {}), [
-        'CLAUDIAN_CLOUD_POSTGRES_URL',
+        'CLAUDIAN_CLOUD_POSTGRES_MIGRATION_URL',
       ]);
 
       assert.equal(runtime.network_mode, 'host');
       assert.equal(runtime.ports, undefined);
-      assert.equal(runtime.depends_on, undefined);
+      assert.deepEqual(runtime.depends_on, {
+        'cloud-restore-recovery': {
+          condition: 'service_completed_successfully',
+          required: true,
+        },
+      });
       assert.equal(runtime.user, '10001:10001');
       assert.equal(runtime.restart, 'unless-stopped');
       assert.equal(

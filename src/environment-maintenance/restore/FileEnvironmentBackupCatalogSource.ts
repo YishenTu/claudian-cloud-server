@@ -2,10 +2,14 @@ import { lstat, readFile } from 'node:fs/promises';
 import { isAbsolute, join, normalize, parse } from 'node:path';
 import { getgid, getuid } from 'node:process';
 
-import { isCollabOpaqueId } from '@claudian-collab/protocol';
+import {
+  COLLAB_CHECKPOINT_ARTIFACT_LIMITS,
+  isCollabOpaqueId,
+} from '@claudian-collab/protocol';
 
 import { EnvironmentBackupCatalogVerifierError } from './EnvironmentBackupCatalog.js';
 import type { EnvironmentBackupCatalogDocumentSource } from './PublishedEnvironmentBackupSource.js';
+import type { EnvironmentRestoreTerminalProject } from './EnvironmentRestoreCoordinator.js';
 
 export interface FileEnvironmentBackupCatalogSourceOptions {
   readonly catalogRoot: string;
@@ -89,6 +93,61 @@ implements EnvironmentBackupCatalogDocumentSource {
         return fail();
       }
       return JSON.parse(value) as unknown;
+    } catch (error: unknown) {
+      if (error instanceof EnvironmentBackupCatalogVerifierError) throw error;
+      return fail();
+    }
+  }
+
+  readTerminalArtifact(input: Readonly<{
+    readonly signal: AbortSignal;
+    readonly terminalProject: EnvironmentRestoreTerminalProject;
+  }>): Promise<string> {
+    const project = Buffer.from(
+      input.terminalProject.projectId,
+      'utf8',
+    ).toString('hex');
+    const file = join(
+      this.#catalogRoot,
+      `${project}.${input.terminalProject.artifactSha256}.terminal.json`,
+    );
+    return this.#readPrivateText(
+      file,
+      COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxCoordinationBytes,
+      input.signal,
+    );
+  }
+
+  async #readPrivateText(
+    file: string,
+    maximumBytes: number,
+    signal: AbortSignal,
+  ): Promise<string> {
+    assertNotAborted(signal);
+    const identity = runtimeIdentity();
+    try {
+      const [root, artifact] = await Promise.all([
+        lstat(this.#catalogRoot, { bigint: true }),
+        lstat(file, { bigint: true }),
+      ]);
+      if (
+        !root.isDirectory()
+        || root.isSymbolicLink()
+        || root.uid !== identity.uid
+        || root.gid !== identity.gid
+        || Number(root.mode & 0o777n) !== 0o700
+        || !artifact.isFile()
+        || artifact.isSymbolicLink()
+        || artifact.uid !== identity.uid
+        || artifact.gid !== identity.gid
+        || Number(artifact.mode & 0o777n) !== 0o600
+        || artifact.size <= 0n
+        || artifact.size > BigInt(maximumBytes)
+      ) return fail();
+      const value = await readFile(file, 'utf8');
+      assertNotAborted(signal);
+      if (Buffer.byteLength(value, 'utf8') > maximumBytes) return fail();
+      return value;
     } catch (error: unknown) {
       if (error instanceof EnvironmentBackupCatalogVerifierError) throw error;
       return fail();

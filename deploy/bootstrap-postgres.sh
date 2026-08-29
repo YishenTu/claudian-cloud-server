@@ -29,6 +29,9 @@ done
   fail 'configuration-invalid'
 [[ "$CLAUDIAN_CLOUD_POSTGRES_RUNTIME_PASSWORD" =~ ^[A-Za-z0-9_-]{16,128}$ ]] || \
   fail 'configuration-invalid'
+bootstrap_mode="${CLAUDIAN_CLOUD_BOOTSTRAP_MODE:-authority}"
+[[ "$bootstrap_mode" == 'authority' || "$bootstrap_mode" == 'restore-target' ]] || \
+  fail 'configuration-invalid'
 
 migration_password="${CLAUDIAN_CLOUD_POSTGRES_MIGRATION_PASSWORD//\'/\'\'}"
 runtime_password="${CLAUDIAN_CLOUD_POSTGRES_RUNTIME_PASSWORD//\'/\'\'}"
@@ -91,6 +94,10 @@ if [[ -e "$pending_authority_marker" ]]; then
 fi
 [[ -z "$authority_id" || -z "$pending_authority_id" ]] || \
   fail 'authority-marker-invalid'
+if [[ "$bootstrap_mode" == 'restore-target' \
+    && ( -n "$authority_id" || -n "$pending_authority_id" ) ]]; then
+  fail 'restore-target-not-empty'
+fi
 
 persist_database_authority_id() {
   local id="$1"
@@ -116,7 +123,7 @@ database_owner="$(
 if [[ -z "$database_owner" ]]; then
   [[ -z "$authority_id" ]] || fail 'authority-volume-pair-mismatch'
   install -d -m 0700 -o 10001 -g 10001 /var/lib/claudian-cloud
-  if [[ -z "$pending_authority_id" ]]; then
+  if [[ "$bootstrap_mode" == 'authority' && -z "$pending_authority_id" ]]; then
     temporary_marker="$(mktemp /var/lib/claudian-cloud/.authority-volume-id.XXXXXX)"
     tr -d '-' < /proc/sys/kernel/random/uuid > "$temporary_marker"
     pending_authority_id="$(<"$temporary_marker")"
@@ -127,14 +134,21 @@ if [[ -z "$database_owner" ]]; then
     mv "$temporary_marker" "$pending_authority_marker"
     temporary_marker=''
   fi
+  if [[ "$bootstrap_mode" == 'restore-target' ]]; then
+    pending_authority_id="$(tr -d '-' < /proc/sys/kernel/random/uuid)"
+    [[ "$pending_authority_id" =~ ^[0-9a-f]{32}$ ]] || \
+      fail 'authority-marker-invalid'
+  fi
   psql \
     --no-psqlrc \
     --set ON_ERROR_STOP=on \
     --command='CREATE DATABASE claudian_cloud OWNER claudian_cloud_migration' \
     >/dev/null 2>&1 || fail 'database-provisioning-failed'
   persist_database_authority_id "$pending_authority_id"
-  mv "$pending_authority_marker" "$authority_marker"
-  authority_id="$pending_authority_id"
+  if [[ "$bootstrap_mode" == 'authority' ]]; then
+    mv "$pending_authority_marker" "$authority_marker"
+    authority_id="$pending_authority_id"
+  fi
   pending_authority_id=''
 elif [[ "$database_owner" != 'claudian_cloud_migration' ]]; then
   fail 'database-owner-mismatch'
@@ -148,7 +162,12 @@ else
       --command="SELECT current_setting('claudian_cloud.authority_volume_id', true)" \
       2>/dev/null
   )" || fail 'authority-volume-pair-inspection-failed'
-  if [[ -n "$authority_id" ]]; then
+  if [[ "$bootstrap_mode" == 'restore-target' ]]; then
+    [[ -z "$authority_id" \
+        && -z "$pending_authority_id" \
+        && "$database_authority_id" =~ ^[0-9a-f]{32}$ ]] || \
+      fail 'restore-target-not-empty'
+  elif [[ -n "$authority_id" ]]; then
     [[ -z "$pending_authority_id" && "$database_authority_id" == "$authority_id" ]] || \
       fail 'authority-volume-pair-mismatch'
   elif [[ -n "$pending_authority_id" ]]; then

@@ -55,6 +55,37 @@ function scope(options: { readonly bothManagers?: boolean } = {}): ProjectScope 
 }
 
 describe('ActiveRepositoryIntegrityGate', () => {
+  it('can verify without mutating receive-pack state', async () => {
+    let cleaned = false;
+    const coordination: ActiveRepositoryIntegrityCoordination = {
+      acquireProjectLease: () => Promise.resolve({
+        close: () => Promise.resolve(),
+        drainDevelopmentBootstrapUploads: () => Promise.resolve(),
+        handoffToDevelopmentBootstrapUpload: () => Promise.resolve({
+          close: () => Promise.resolve(),
+        }),
+        withProjectScope: operation => operation(scope()),
+      } satisfies PinnedProjectLease),
+      listActiveRepositoryPlacements: () => Promise.resolve({
+        nextCursor: undefined,
+        placements: [placement],
+      }),
+    };
+    const repository: ActiveRepositoryIntegrityRepository = {
+      cleanupReceivePackState: () => {
+        cleaned = true;
+        return Promise.resolve();
+      },
+      verifyIntegrity: () => Promise.resolve({ status: 'valid' }),
+    };
+    await new ActiveRepositoryIntegrityGate({
+      cleanupReceivePackState: false,
+      coordination,
+      repository,
+    }).verifyAll();
+    assert.equal(cleaned, false);
+  });
+
   it('re-enters Project scope and verifies exact authoritative refs', async () => {
     const calls: unknown[] = [];
     const coordination: ActiveRepositoryIntegrityCoordination = {
@@ -123,5 +154,35 @@ describe('ActiveRepositoryIntegrityGate', () => {
 
     await new ActiveRepositoryIntegrityGate({ coordination, repository })
       .verifyAll();
+  });
+
+  it('propagates maintenance cancellation into repository verification', async () => {
+    const controller = new AbortController();
+    let received: AbortSignal | undefined;
+    const coordination: ActiveRepositoryIntegrityCoordination = {
+      acquireProjectLease: () => Promise.resolve({
+        close: () => Promise.resolve(),
+        drainDevelopmentBootstrapUploads: () => Promise.resolve(),
+        handoffToDevelopmentBootstrapUpload: () => Promise.resolve({
+          close: () => Promise.resolve(),
+        }),
+        withProjectScope: operation => operation(scope()),
+      } satisfies PinnedProjectLease),
+      listActiveRepositoryPlacements: () => Promise.resolve({
+        nextCursor: undefined,
+        placements: [placement],
+      }),
+    };
+    const repository: ActiveRepositoryIntegrityRepository = {
+      cleanupReceivePackState: () => Promise.resolve(),
+      verifyIntegrity: (_placement, options) => {
+        received = options.signal;
+        return Promise.resolve({ status: 'valid' });
+      },
+    };
+
+    await new ActiveRepositoryIntegrityGate({ coordination, repository })
+      .verifyAll(controller.signal);
+    assert.equal(received, controller.signal);
   });
 });

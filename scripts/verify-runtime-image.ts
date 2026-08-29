@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import {
   mkdtemp,
@@ -18,6 +18,7 @@ import { acquirePostgresTestDatabase } from '../tests/helpers/PostgresTestDataba
 
 const execFileAsync = promisify(execFile);
 const IMAGE = 'claudian-cloud-server:local';
+const EXPECTED_SERVER_BUILD = 'c'.repeat(40);
 
 async function docker(arguments_: readonly string[]): Promise<string> {
   try {
@@ -95,14 +96,30 @@ async function verifyRuntimeImage(): Promise<void> {
     await docker(['run', '--rm', '--entrypoint', '/usr/bin/git', IMAGE, '--version']),
     /^git version (?:2\.(?:39|[4-9][0-9])|[3-9]\.)/,
   );
+  assert.equal(
+    await docker([
+      'run',
+      '--rm',
+      '--entrypoint',
+      'node',
+      IMAGE,
+      '--input-type=module',
+      '--eval',
+      "process.stdout.write((await import('/app/dist/config/ServerBuild.js')).SERVER_BUILD)",
+    ]),
+    EXPECTED_SERVER_BUILD,
+  );
 
   const database = await acquirePostgresTestDatabase();
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'claudian-runtime-image-'));
   const token = randomBytes(8).toString('hex');
   const containerName = `claudian-runtime-${token}`;
   const volumeName = `claudian-runtime-repositories-${token}`;
+  const keyringVolumeName = `claudian-runtime-keyring-${token}`;
   const environmentFile = join(temporaryRoot, 'server.env');
+  const keyringFile = join(temporaryRoot, 'keyring.json');
   let child: ReturnType<typeof spawn> | undefined;
+  let keyringVolumeCreated = false;
   let volumeCreated = false;
 
   try {
@@ -124,9 +141,45 @@ async function verifyRuntimeImage(): Promise<void> {
       ].join('\n'),
       { mode: 0o600 },
     );
+    const pair = generateKeyPairSync('ed25519');
+    await writeFile(keyringFile, JSON.stringify({
+      activeEncryptionKeyId: 'runtime-image-encryption-key',
+      activeReceiptKeyId: 'runtime-image-receipt-key',
+      encryptionKeys: [{
+        key: Buffer.alloc(32, 7).toString('base64url'),
+        keyId: 'runtime-image-encryption-key',
+        keyVersion: 1,
+      }],
+      receiptKeys: [{
+        keyId: 'runtime-image-receipt-key',
+        keyVersion: 1,
+        privateKey: pair.privateKey.export({ format: 'der', type: 'pkcs8' })
+          .toString('base64url'),
+        publicKey: pair.publicKey.export({ format: 'der', type: 'spki' })
+          .toString('base64url'),
+      }],
+      schemaVersion: 1,
+    }), { mode: 0o600 });
 
     await docker(['volume', 'create', volumeName]);
     volumeCreated = true;
+    await docker(['volume', 'create', keyringVolumeName]);
+    keyringVolumeCreated = true;
+    await docker([
+      'run',
+      '--rm',
+      '--user',
+      '0:0',
+      '--mount',
+      `source=${keyringVolumeName},target=/run/secrets`,
+      '--mount',
+      `type=bind,source=${temporaryRoot},target=/input,readonly`,
+      '--entrypoint',
+      '/bin/sh',
+      IMAGE,
+      '-c',
+      'cp /input/keyring.json /run/secrets/claudian_claim_custody_keyring && chown 10001:10001 /run/secrets/claudian_claim_custody_keyring && chmod 0400 /run/secrets/claudian_claim_custody_keyring',
+    ]);
     await docker([
       'run',
       '--rm',
@@ -163,6 +216,8 @@ async function verifyRuntimeImage(): Promise<void> {
       environmentFile,
       '--mount',
       `source=${volumeName},target=/var/lib/claudian-cloud`,
+      '--mount',
+      `source=${keyringVolumeName},target=/run/secrets,readonly`,
       IMAGE,
     ], {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -216,6 +271,13 @@ async function verifyRuntimeImage(): Promise<void> {
     if (volumeCreated) {
       try {
         await docker(['volume', 'rm', '--force', volumeName]);
+      } catch {
+        // The final generic failure remains sanitized below.
+      }
+    }
+    if (keyringVolumeCreated) {
+      try {
+        await docker(['volume', 'rm', '--force', keyringVolumeName]);
       } catch {
         // The final generic failure remains sanitized below.
       }

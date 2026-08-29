@@ -4,7 +4,14 @@ import {
   COLLAB_LIMITS,
   type CollabCloudCapability,
 } from '@claudian-collab/protocol';
+import { dirname } from 'node:path';
 
+import type { ClaimCustodyKeyringConfig } from '../config/ClaimCustodyKeyringConfig.js';
+import { CURRENT_POSTGRES_SCHEMA_VERSION } from '../config/PostgresSchemaCompatibility.js';
+import {
+  REPOSITORY_FORMAT_VERSION,
+  SERVER_BUILD,
+} from '../config/ServerBuild.js';
 import type { ServerConfig } from '../config/ServerConfig.js';
 import { CoordinationError } from '../coordination/CoordinationError.js';
 import { PostgresCoordination } from '../coordination/postgres/PostgresCoordination.js';
@@ -20,6 +27,11 @@ import { ProjectPersonalRefAuthority } from '../project-authority/writes/Project
 import { ProjectRecoveryCoordinator } from '../project-authority/recovery/ProjectRecoveryCoordinator.js';
 import { ProjectEventWakeup } from '../project-authority/reads/ProjectEventWakeup.js';
 import { ActiveRepositoryIntegrityGate } from '../project-authority/lifecycle/ActiveRepositoryIntegrityGate.js';
+import { ActiveClaimCustodyKeyReferenceGate } from '../project-authority/lifecycle/ActiveClaimCustodyKeyReferenceGate.js';
+import { XChaCha20ClaimCustody } from '../project-authority/lifecycle/cloud-to-lan/XChaCha20ClaimCustody.js';
+import { ClaimCustodyKeyReferenceVerifier } from '../environment-maintenance/commands/ClaimCustodyKeyReferenceVerifier.js';
+import { EnvironmentBackupMetadataSource } from '../environment-maintenance/commands/EnvironmentBackupMetadataSource.js';
+import { FileEnvironmentRestoreState } from '../environment-maintenance/restore/FileEnvironmentRestoreState.js';
 import { GitBundleImporter } from '../repositories/GitBundleImporter.js';
 import { BootstrapRepositoryIntegrityVerifier } from '../repositories/BootstrapRepositoryIntegrityVerifier.js';
 import { DevelopmentBootstrapUploadGate } from '../project-authority/lifecycle/DevelopmentBootstrapUploadGate.js';
@@ -77,6 +89,7 @@ export interface Application {
 
 export interface CreateApplicationOptions {
   readonly config: ServerConfig;
+  readonly keyring?: ClaimCustodyKeyringConfig;
   readonly lifecycle?: CloudLifecycleRuntime;
   readonly logger: SafeLogger;
 }
@@ -88,7 +101,13 @@ type ApplicationState =
   | 'stopped'
   | 'stopping';
 
-type StartupPhase = 'authority' | 'http' | 'postgres' | 'recovery' | 'repository';
+type StartupPhase =
+  | 'authority'
+  | 'http'
+  | 'keyring'
+  | 'postgres'
+  | 'recovery'
+  | 'repository';
 
 function startupFailureReason(
   phase: StartupPhase,
@@ -108,6 +127,7 @@ function startupFailureReason(
     }
     return 'postgres-unavailable';
   }
+  if (phase === 'keyring') return 'keyring-reference-unavailable';
   if (phase === 'repository') {
     if (
       error instanceof GitRepositoryError
@@ -147,6 +167,7 @@ class CloudApplication implements Application {
   readonly #acceptCoordinator: ProjectAcceptCoordinator;
   readonly #activationCoordinator: ProjectActivationCoordinator;
   readonly #activeRepositoryIntegrity: ActiveRepositoryIntegrityGate;
+  readonly #activeKeyReferences: ActiveClaimCustodyKeyReferenceGate | undefined;
   readonly #authorityVolumePair: AuthorityVolumePairVerifier;
   readonly #bootstrapUploadAdmission: BootstrapUploadAdmission;
   readonly #bootstrapRepositoryIntegrity: BootstrapRepositoryIntegrityVerifier;
@@ -166,6 +187,7 @@ class CloudApplication implements Application {
   readonly #repositoryPublication: RepositoryPublication;
   readonly #recoveryCoordinator: ProjectRecoveryCoordinator;
   readonly #resourceAdmission: ResourceAdmission;
+  readonly #startupController = new AbortController();
   #address: HttpServerAddress | undefined;
   #closePromise: Promise<void> | undefined;
   #disposePromise: Promise<void> | undefined;
@@ -300,6 +322,31 @@ class CloudApplication implements Application {
       coordination: this.#coordination,
       repository: this.#repositoryAuthority,
     });
+    const metadataSource = new EnvironmentBackupMetadataSource({
+      state: new FileEnvironmentRestoreState({
+        authorityRoot: dirname(options.config.repository.root),
+      }),
+    });
+    this.#activeKeyReferences = options.keyring === undefined
+      ? undefined
+      : new ActiveClaimCustodyKeyReferenceGate({
+        coordination: this.#coordination,
+        metadata: {
+          read: async () => Object.freeze({
+            ...await metadataSource.read(),
+            coordinationSchemaVersion: CURRENT_POSTGRES_SCHEMA_VERSION,
+            repositoryFormatVersion: REPOSITORY_FORMAT_VERSION,
+            serverBuild: SERVER_BUILD,
+          }),
+        },
+        verifier: new ClaimCustodyKeyReferenceVerifier({
+          custody: new XChaCha20ClaimCustody({
+            activeKeyId: options.keyring.activeEncryptionKeyId,
+            keys: options.keyring.encryptionKeys,
+          }),
+          keyring: options.keyring,
+        }),
+      });
     this.#bootstrapExpiryReconciler = new DevelopmentBootstrapExpiryReconciler({
       catalog: this.#coordination,
       settlement: this.#activationCoordinator,
@@ -479,6 +526,10 @@ class CloudApplication implements Application {
       await this.#recoveryCoordinator.recoverAll();
       await this.#lifecycle?.reconcileAll();
       await this.#bootstrapExpiryReconciler.reconcileAll();
+      phase = 'keyring';
+      await this.#activeKeyReferences?.verifyAll(
+        this.#startupController.signal,
+      );
       phase = 'repository';
       await this.#activeRepositoryIntegrity.verifyAll();
       this.#assertStarting();
@@ -546,6 +597,7 @@ class CloudApplication implements Application {
   }
 
   async #disposeOwners(): Promise<void> {
+    this.#startupController.abort('closed');
     const deadline = Date.now() + this.#config.shutdownTimeoutMs;
     const results: boolean[] = [];
 

@@ -3,11 +3,16 @@ export interface PostgresSchemaCompatibility {
   readonly minimumVersion: number;
 }
 
-export const CURRENT_POSTGRES_SCHEMA_VERSION = 9;
+export const CURRENT_POSTGRES_SCHEMA_VERSION = 10;
 
 export const RUNTIME_POSTGRES_SCHEMA_COMPATIBILITY = Object.freeze({
   maximumVersion: CURRENT_POSTGRES_SCHEMA_VERSION,
   minimumVersion: CURRENT_POSTGRES_SCHEMA_VERSION,
+}) satisfies PostgresSchemaCompatibility;
+
+export const MAINTENANCE_POSTGRES_SCHEMA_COMPATIBILITY = Object.freeze({
+  maximumVersion: CURRENT_POSTGRES_SCHEMA_VERSION,
+  minimumVersion: CURRENT_POSTGRES_SCHEMA_VERSION - 1,
 }) satisfies PostgresSchemaCompatibility;
 
 export function supportsPostgresSchemaVersion(

@@ -497,6 +497,7 @@ function catalogDocument() {
     repositoryFormatVersion: 1,
     restoreEpoch: 3,
     schemaVersion: 1 as const,
+    terminalProjects: Object.freeze([]),
   });
   return Object.freeze({
     ...content,

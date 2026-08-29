@@ -125,6 +125,7 @@ describe('Project event persistence', () => {
           { name: 'lan-to-cloud-transfer', state: 'applied', version: 7 },
           { name: 'cloud-to-lan-transfer', state: 'applied', version: 8 },
           { name: 'terminal-project-lifecycle', state: 'applied', version: 9 },
+          { name: 'terminal-continuity-catalog', state: 'applied', version: 10 },
         ]);
 
         const rls = await client.query<{

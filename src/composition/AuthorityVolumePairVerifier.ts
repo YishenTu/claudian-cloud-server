@@ -36,7 +36,7 @@ export class AuthorityVolumePairVerifier {
     this.#coordination = options.coordination;
   }
 
-  async verify(): Promise<void> {
+  async verify(): Promise<string> {
     const markerPath = join(this.#authorityRoot, '.authority-volume-id');
     try {
       const [root, marker, value] = await Promise.all([
@@ -63,7 +63,9 @@ export class AuthorityVolumePairVerifier {
       ) {
         throw new AuthorityVolumePairError();
       }
-      await this.#coordination.verifyAuthorityVolumeId(value.trim());
+      const authorityVolumeId = value.trim();
+      await this.#coordination.verifyAuthorityVolumeId(authorityVolumeId);
+      return authorityVolumeId;
     } catch (error: unknown) {
       if (error instanceof AuthorityVolumePairError) throw error;
       throw new AuthorityVolumePairError();

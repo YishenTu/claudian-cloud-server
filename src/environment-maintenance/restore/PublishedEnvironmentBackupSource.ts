@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import {
   COLLAB_CHECKPOINT_ARTIFACT_LIMITS,
+  decodeCollabProjectBackupCheckpointCoordinationNdjson,
   decodeCollabProjectBackupCheckpointManifest,
   encodeCollabProjectBackupCheckpointManifestCanonicalJson,
   encodeCollabProjectBackupCheckpointManifestDigestInput,
@@ -26,13 +27,22 @@ import {
 } from './EnvironmentBackupCatalog.js';
 import type {
   EnvironmentRestoreProject,
+  EnvironmentRestoreTerminalProject,
 } from './EnvironmentRestoreCoordinator.js';
+import {
+  decodeTerminalProjectContinuityArtifact,
+  type TerminalProjectContinuityArtifact,
+} from './TerminalProjectContinuityArtifact.js';
 
 export interface EnvironmentBackupCatalogDocumentSource {
   readCatalog(input: Readonly<{
     readonly catalogId: string;
     readonly signal: AbortSignal;
   }>): Promise<unknown>;
+  readTerminalArtifact?(input: Readonly<{
+    readonly signal: AbortSignal;
+    readonly terminalProject: EnvironmentRestoreTerminalProject;
+  }>): Promise<string>;
 }
 
 export interface VerifiedEnvironmentProjectCheckpoint {
@@ -55,9 +65,16 @@ export interface EnvironmentProjectBackupSource {
   }>): Promise<VerifiedEnvironmentProjectCheckpoint>;
 }
 
+export interface EnvironmentTerminalProjectBackupSource {
+  readTerminalProjectBackup(input: Readonly<{
+    readonly signal: AbortSignal;
+    readonly terminalProject: EnvironmentRestoreTerminalProject;
+  }>): Promise<TerminalProjectContinuityArtifact>;
+}
+
 export interface PublishedEnvironmentBackupSourceOptions {
   readonly catalog: EnvironmentBackupCatalogDocumentSource;
-  readonly checkpoint: Pick<
+  readonly checkpoint?: Pick<
     ProjectCheckpointCoordinator,
     | 'readPublishedOutboundRecords'
     | 'reserveOutbound'
@@ -67,6 +84,9 @@ export interface PublishedEnvironmentBackupSourceOptions {
     ProductionCheckpointStagingPort,
     'inspectAttempt' | 'readArtifact'
   >;
+  readonly keyReferences?: Readonly<{
+    verify(records: readonly CollabProjectBackupRecord[]): Promise<void>;
+  }>;
 }
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
@@ -129,23 +149,30 @@ function exactAttemptProject(
  * verifier before exposing canonical records or repository bytes to restore.
  */
 export class PublishedEnvironmentBackupSource
-implements EnvironmentBackupCatalogSource, EnvironmentProjectBackupSource {
+implements
+  EnvironmentBackupCatalogSource,
+  EnvironmentProjectBackupSource,
+  EnvironmentTerminalProjectBackupSource {
   readonly #catalog: EnvironmentBackupCatalogDocumentSource;
   readonly #checkpoint: PublishedEnvironmentBackupSourceOptions['checkpoint'];
   readonly #publication: PublishedEnvironmentBackupSourceOptions['publication'];
+  readonly #keyReferences: PublishedEnvironmentBackupSourceOptions['keyReferences'];
 
   constructor(options: PublishedEnvironmentBackupSourceOptions) {
     if (
       typeof options.catalog.readCatalog !== 'function'
-      || typeof options.checkpoint.readPublishedOutboundRecords !== 'function'
-      || typeof options.checkpoint.reserveOutbound !== 'function'
-      || typeof options.checkpoint.verifyOutboundOperation !== 'function'
+      || (options.checkpoint !== undefined && (
+        typeof options.checkpoint.readPublishedOutboundRecords !== 'function'
+        || typeof options.checkpoint.reserveOutbound !== 'function'
+        || typeof options.checkpoint.verifyOutboundOperation !== 'function'
+      ))
       || typeof options.publication.inspectAttempt !== 'function'
       || typeof options.publication.readArtifact !== 'function'
     ) throw new TypeError('published-environment-backup-source.options-invalid');
     this.#catalog = options.catalog;
     this.#checkpoint = options.checkpoint;
     this.#publication = options.publication;
+    this.#keyReferences = options.keyReferences;
   }
 
   readCatalog(input: Readonly<{
@@ -153,6 +180,40 @@ implements EnvironmentBackupCatalogSource, EnvironmentProjectBackupSource {
     readonly signal: AbortSignal;
   }>): Promise<unknown> {
     return this.#catalog.readCatalog(input);
+  }
+
+  verifyTerminalProjectBackup(input: Readonly<{
+    readonly signal: AbortSignal;
+    readonly terminalProject: EnvironmentRestoreTerminalProject;
+  }>): Promise<TerminalProjectContinuityArtifact> {
+    return this.readTerminalProjectBackup(input);
+  }
+
+  async readTerminalProjectBackup(input: Readonly<{
+    readonly signal: AbortSignal;
+    readonly terminalProject: EnvironmentRestoreTerminalProject;
+  }>): Promise<TerminalProjectContinuityArtifact> {
+    try {
+      if (this.#catalog.readTerminalArtifact === undefined) return invalid();
+      const json = await this.#catalog.readTerminalArtifact(input);
+      const artifact = decodeTerminalProjectContinuityArtifact(json, {
+        projectId: input.terminalProject.projectId,
+        sha256: input.terminalProject.artifactSha256,
+      });
+      if (
+        Buffer.byteLength(artifact.json, 'utf8')
+          !== input.terminalProject.artifactByteCount
+      ) return invalid();
+      if (this.#keyReferences === undefined) return invalid();
+      await this.#keyReferences.verify(artifact.records);
+      return artifact;
+    } catch (error: unknown) {
+      if (error instanceof EnvironmentBackupCatalogVerifierError) throw error;
+      if (input.signal.aborted) {
+        throw new EnvironmentBackupCatalogVerifierError('cancelled');
+      }
+      return invalid();
+    }
   }
 
   async verifyProjectBackup(input: Readonly<{
@@ -204,27 +265,23 @@ implements EnvironmentBackupCatalogSource, EnvironmentProjectBackupSource {
     });
     let reservation;
     try {
-      reservation = await this.#checkpoint.reserveOutbound(
-        input.project.projectId,
-        input.signal,
-      );
-      await this.#checkpoint.verifyOutboundOperation({
-        expectedCheckpointSha256: input.project.checkpointSha256,
-        expectedProfile: 'backup',
-        expectedSourceAuthority: Object.freeze({
-          generation: input.project.authorityGeneration,
-          kind: 'cloud',
-        }),
-        expiresAt: input.project.expiresAt,
-        operationId: input.project.backupId,
-        projectId: input.project.projectId,
-      }, reservation, input.signal);
-      const records = await this.#checkpoint.readPublishedOutboundRecords({
-        expectedProfile: 'backup',
-        expiresAt: input.project.expiresAt,
-        operationId: input.project.backupId,
-        projectId: input.project.projectId,
-      }, reservation, input.signal) as readonly CollabProjectBackupRecord[];
+      if (this.#checkpoint !== undefined) {
+        reservation = await this.#checkpoint.reserveOutbound(
+          input.project.projectId,
+          input.signal,
+        );
+        await this.#checkpoint.verifyOutboundOperation({
+          expectedCheckpointSha256: input.project.checkpointSha256,
+          expectedProfile: 'backup',
+          expectedSourceAuthority: Object.freeze({
+            generation: input.project.authorityGeneration,
+            kind: 'cloud',
+          }),
+          expiresAt: input.project.expiresAt,
+          operationId: input.project.backupId,
+          projectId: input.project.projectId,
+        }, reservation, input.signal);
+      }
       const inspected = await this.#publication.inspectAttempt(
         attempt,
         input.signal,
@@ -238,9 +295,18 @@ implements EnvironmentBackupCatalogSource, EnvironmentProjectBackupSource {
         inspected.artifacts,
         'repository.bundle',
       );
+      const coordinationArtifact = exactArtifact(
+        inspected.artifacts,
+        'coordination.ndjson',
+      );
+      if (
+        inspected.artifacts.length !== 3
+        || new Set(inspected.artifacts.map(artifact => artifact.name)).size !== 3
+      ) return invalid();
       const manifestJson = await this.#readTextArtifact(
         attempt,
         manifestArtifact,
+        COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxManifestBytes,
         input.signal,
       );
       const manifest = decodeCollabProjectBackupCheckpointManifest(
@@ -258,12 +324,40 @@ implements EnvironmentBackupCatalogSource, EnvironmentProjectBackupSource {
       const repositoryFact = manifest.artifacts.find(
         artifact => artifact.name === 'repository.bundle',
       );
+      const coordinationFact = manifest.artifacts.find(
+        artifact => artifact.name === 'coordination.ndjson',
+      );
       if (
         repositoryFact === undefined
         || repositoryFact.byteCount !== repositoryArtifact.byteCount
         || repositoryFact.sha256 !== repositoryArtifact.sha256
         || !SHA256_PATTERN.test(repositoryArtifact.sha256)
+        || coordinationFact === undefined
+        || coordinationFact.byteCount !== coordinationArtifact.byteCount
+        || coordinationFact.sha256 !== coordinationArtifact.sha256
+        || !SHA256_PATTERN.test(coordinationArtifact.sha256)
       ) return invalid();
+      const coordinationNdjson = await this.#readTextArtifact(
+        attempt,
+        coordinationArtifact,
+        COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxCoordinationBytes,
+        input.signal,
+      );
+      const records = decodeCollabProjectBackupCheckpointCoordinationNdjson(
+        coordinationNdjson,
+      );
+      await this.#keyReferences?.verify(records);
+      if (this.#checkpoint !== undefined && reservation !== undefined) {
+        const catalogRecords = await this.#checkpoint.readPublishedOutboundRecords({
+          expectedProfile: 'backup',
+          expiresAt: input.project.expiresAt,
+          operationId: input.project.backupId,
+          projectId: input.project.projectId,
+        }, reservation, input.signal) as readonly CollabProjectBackupRecord[];
+        if (JSON.stringify(catalogRecords) !== JSON.stringify(records)) {
+          return invalid();
+        }
+      }
       return Object.freeze({
         manifest,
         project: input.project,
@@ -292,9 +386,10 @@ implements EnvironmentBackupCatalogSource, EnvironmentProjectBackupSource {
   async #readTextArtifact(
     attempt: PreparedProductionCheckpointAttempt,
     artifact: StagedProductionCheckpointArtifact,
+    maximumBytes: number,
     signal: AbortSignal,
   ): Promise<string> {
-    if (artifact.byteCount > COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxManifestBytes) {
+    if (artifact.byteCount > maximumBytes) {
       return invalid();
     }
     const chunks: Buffer[] = [];
@@ -310,6 +405,10 @@ implements EnvironmentBackupCatalogSource, EnvironmentProjectBackupSource {
       signal,
     });
     if (byteCount !== artifact.byteCount) return invalid();
-    return Buffer.concat(chunks, byteCount).toString('utf8');
+    const bytes = Buffer.concat(chunks, byteCount);
+    if (createHash('sha256').update(bytes).digest('hex') !== artifact.sha256) {
+      return invalid();
+    }
+    return bytes.toString('utf8');
   }
 }

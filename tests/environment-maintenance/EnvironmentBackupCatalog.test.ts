@@ -11,12 +11,14 @@ import {
 const PROJECT_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const PROJECT_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 
-function document(): Readonly<Record<string, unknown>> {
+function document(
+  coordinationSchemaVersion = 9,
+): Readonly<Record<string, unknown>> {
   const content = {
     authorityId: 'cloud-authority-a',
     authorityVolumeIdentity: 'authority-volume-a',
     catalogId: 'backup-catalog-a',
-    coordinationSchemaVersion: 9,
+    coordinationSchemaVersion,
     createdAt: '2026-08-29T00:00:00.000Z',
     maximumServerBuild: 'cloud-build-a',
     minimumServerBuild: 'cloud-build-a',
@@ -41,6 +43,7 @@ function document(): Readonly<Record<string, unknown>> {
     repositoryFormatVersion: 1,
     restoreEpoch: 3,
     schemaVersion: 1,
+    terminalProjects: [],
   } as const;
   const catalogSha256 = createHash('sha256')
     .update(JSON.stringify(content), 'utf8')
@@ -93,6 +96,58 @@ describe('EnvironmentBackupCatalogVerifier', () => {
       PROJECT_A,
       PROJECT_B,
     ]);
+  });
+
+  it('accepts only backup schemas inside the offline maintenance interval', async () => {
+    const accepted = document(9);
+    const rejected = document(8);
+    let sourceDocument = accepted;
+    const verifier = new EnvironmentBackupCatalogVerifier({
+      coordinationSchemaCompatibility: {
+        maximumVersion: 10,
+        minimumVersion: 9,
+      },
+      repositoryFormatVersion: 1,
+      serverBuild: 'cloud-build-a',
+      source: {
+        readCatalog: async () => sourceDocument,
+        verifyProjectBackup: async input => Object.freeze({
+          authorityGeneration: input.project.authorityGeneration,
+          authorityId: 'cloud-authority-a',
+          authorityVolumeIdentity: 'authority-volume-a',
+          backupId: input.project.backupId,
+          checkpointSha256: input.project.checkpointSha256,
+          expiresAt: input.project.expiresAt,
+          coordinationSchemaVersion:
+            sourceDocument.coordinationSchemaVersion as number,
+          maximumServerBuild: 'cloud-build-a',
+          minimumServerBuild: 'cloud-build-a',
+          placementGeneration: input.project.placementGeneration,
+          projectId: input.project.projectId,
+          repositoryFormatVersion: 1,
+          restoreEpoch: 3,
+        }),
+      },
+    });
+
+    await verifier.validate({
+      catalogId: 'backup-catalog-a',
+      expectedCatalogSha256: accepted.catalogSha256 as string,
+      signal: new AbortController().signal,
+    });
+    sourceDocument = rejected;
+    await assert.rejects(
+      verifier.validate({
+        catalogId: 'backup-catalog-a',
+        expectedCatalogSha256: rejected.catalogSha256 as string,
+        signal: new AbortController().signal,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof EnvironmentBackupCatalogVerifierError);
+        assert.equal(error.code, 'invalid-backup');
+        return true;
+      },
+    );
   });
 
   it('fails closed when a Project checkpoint contradicts the environment catalog', async () => {

@@ -9,12 +9,15 @@ export interface MigrationConfig {
 }
 
 const MIGRATION_CONFIG_FIELDS = new Set([
-  'CLAUDIAN_CLOUD_POSTGRES_URL',
+  'CLAUDIAN_CLOUD_POSTGRES_MIGRATION_URL',
 ]);
 
 export function decodeMigrationConfig(source: ConfigSource): MigrationConfig {
   rejectUnknownConfigFields(source, MIGRATION_CONFIG_FIELDS);
   return Object.freeze({
-    postgresUrl: requirePostgresUrl(source),
+    postgresUrl: requirePostgresUrl(
+      source,
+      'CLAUDIAN_CLOUD_POSTGRES_MIGRATION_URL',
+    ),
   });
 }

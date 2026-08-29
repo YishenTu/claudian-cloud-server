@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import {
+  COLLAB_CHECKPOINT_ARTIFACT_LIMITS,
   isCollabOpaqueId,
   isCollabProjectId,
   type CollabIsoTimestamp,
@@ -12,7 +13,9 @@ import {
   type EnvironmentRestoreBackupPort,
   type EnvironmentRestoreCatalog,
   type EnvironmentRestoreProject,
+  type EnvironmentRestoreTerminalProject,
 } from './EnvironmentRestoreCoordinator.js';
+import type { TerminalProjectContinuityArtifact } from './TerminalProjectContinuityArtifact.js';
 
 export type EnvironmentBackupCatalogVerifierErrorCode = Extract<
   EnvironmentRestoreCoordinatorErrorCode,
@@ -49,10 +52,18 @@ export interface EnvironmentBackupCatalogSource {
     readonly project: EnvironmentRestoreProject;
     readonly signal: AbortSignal;
   }>): Promise<VerifiedEnvironmentProjectBackup>;
+  verifyTerminalProjectBackup?(input: Readonly<{
+    readonly signal: AbortSignal;
+    readonly terminalProject: EnvironmentRestoreTerminalProject;
+  }>): Promise<TerminalProjectContinuityArtifact>;
 }
 
 export interface EnvironmentBackupCatalogVerifierOptions {
-  readonly coordinationSchemaVersion: number;
+  readonly coordinationSchemaCompatibility?: Readonly<{
+    readonly maximumVersion: number;
+    readonly minimumVersion: number;
+  }>;
+  readonly coordinationSchemaVersion?: number;
   readonly repositoryFormatVersion: number;
   readonly serverBuild: string;
   readonly source: EnvironmentBackupCatalogSource;
@@ -60,6 +71,24 @@ export interface EnvironmentBackupCatalogVerifierOptions {
 
 interface EnvironmentBackupCatalogDocument extends EnvironmentRestoreCatalog {
   readonly schemaVersion: 1;
+}
+
+export interface CreateEnvironmentBackupCatalogInput {
+  readonly authorityId: string;
+  readonly authorityVolumeIdentity: string;
+  readonly catalogId: string;
+  readonly coordinationSchemaVersion: number;
+  readonly createdAt: CollabIsoTimestamp;
+  readonly projects: readonly EnvironmentRestoreProject[];
+  readonly repositoryFormatVersion: number;
+  readonly restoreEpoch: number;
+  readonly serverBuild: string;
+  readonly terminalProjects: readonly EnvironmentRestoreTerminalProject[];
+}
+
+export interface CreatedEnvironmentBackupCatalog {
+  readonly catalog: EnvironmentRestoreCatalog;
+  readonly json: string;
 }
 
 const IDENTITY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
@@ -77,6 +106,7 @@ const EXPECTED_KEYS = Object.freeze([
   'repositoryFormatVersion',
   'restoreEpoch',
   'schemaVersion',
+  'terminalProjects',
 ]);
 const PROJECT_KEYS = Object.freeze([
   'authorityGeneration',
@@ -84,6 +114,11 @@ const PROJECT_KEYS = Object.freeze([
   'checkpointSha256',
   'expiresAt',
   'placementGeneration',
+  'projectId',
+]);
+const TERMINAL_PROJECT_KEYS = Object.freeze([
+  'artifactByteCount',
+  'artifactSha256',
   'projectId',
 ]);
 
@@ -148,6 +183,28 @@ function project(value: unknown): EnvironmentRestoreProject {
   });
 }
 
+function terminalProject(value: unknown): EnvironmentRestoreTerminalProject {
+  if (!plainRecord(value) || !exactKeys(value, TERMINAL_PROJECT_KEYS)) {
+    return fail('invalid-backup');
+  }
+  if (
+    typeof value.artifactByteCount !== 'number'
+    || !Number.isSafeInteger(value.artifactByteCount)
+    || value.artifactByteCount <= 0
+    || value.artifactByteCount
+      > COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxCoordinationBytes
+    || typeof value.artifactSha256 !== 'string'
+    || !SHA256_PATTERN.test(value.artifactSha256)
+    || typeof value.projectId !== 'string'
+    || !isCollabProjectId(value.projectId)
+  ) fail('invalid-backup');
+  return Object.freeze({
+    artifactByteCount: value.artifactByteCount,
+    artifactSha256: value.artifactSha256,
+    projectId: value.projectId,
+  });
+}
+
 function digestInput(document: Omit<EnvironmentBackupCatalogDocument, 'catalogSha256'>): string {
   return JSON.stringify({
     authorityId: document.authorityId,
@@ -168,6 +225,11 @@ function digestInput(document: Omit<EnvironmentBackupCatalogDocument, 'catalogSh
     repositoryFormatVersion: document.repositoryFormatVersion,
     restoreEpoch: document.restoreEpoch,
     schemaVersion: document.schemaVersion,
+    terminalProjects: document.terminalProjects.map(item => ({
+      artifactByteCount: item.artifactByteCount,
+      artifactSha256: item.artifactSha256,
+      projectId: item.projectId,
+    })),
   });
 }
 
@@ -200,7 +262,8 @@ function decodeDocument(
     || value.minimumServerBuild.length === 0
     || Buffer.byteLength(value.minimumServerBuild, 'utf8') > 128
     || !Array.isArray(value.projects)
-    || value.projects.length === 0
+    || !Array.isArray(value.terminalProjects)
+    || value.projects.length + value.terminalProjects.length === 0
     || typeof value.repositoryFormatVersion !== 'number'
     || !Number.isSafeInteger(value.repositoryFormatVersion)
     || value.repositoryFormatVersion <= 0
@@ -210,6 +273,9 @@ function decodeDocument(
     || value.schemaVersion !== 1
   ) fail('invalid-backup');
   const projects = Object.freeze(value.projects.map(project));
+  const terminalProjects = Object.freeze(
+    value.terminalProjects.map(terminalProject),
+  );
   const seenProjects = new Set<string>();
   const seenBackups = new Set<string>();
   let priorProjectId: string | undefined;
@@ -221,6 +287,15 @@ function decodeDocument(
     ) fail('invalid-backup');
     seenProjects.add(item.projectId);
     seenBackups.add(item.backupId);
+    priorProjectId = item.projectId;
+  }
+  priorProjectId = undefined;
+  for (const item of terminalProjects) {
+    if (
+      seenProjects.has(item.projectId)
+      || (priorProjectId !== undefined && priorProjectId >= item.projectId)
+    ) fail('invalid-backup');
+    seenProjects.add(item.projectId);
     priorProjectId = item.projectId;
   }
   const withoutDigest = Object.freeze({
@@ -235,6 +310,7 @@ function decodeDocument(
     repositoryFormatVersion: value.repositoryFormatVersion,
     restoreEpoch: value.restoreEpoch,
     schemaVersion: 1 as const,
+    terminalProjects,
   });
   if (sha256(digestInput(withoutDigest)) !== value.catalogSha256) {
     fail('invalid-backup');
@@ -242,6 +318,64 @@ function decodeDocument(
   return Object.freeze({
     ...withoutDigest,
     catalogSha256: value.catalogSha256,
+  });
+}
+
+export function createEnvironmentBackupCatalog(
+  input: CreateEnvironmentBackupCatalogInput,
+): CreatedEnvironmentBackupCatalog {
+  const projects = Object.freeze(
+    input.projects
+      .map(item => project(item))
+      .sort((left, right) => left.projectId.localeCompare(
+        right.projectId,
+        'en-US',
+      )),
+  );
+  const terminalProjects = Object.freeze(
+    input.terminalProjects
+      .map(item => terminalProject(item))
+      .sort((left, right) => left.projectId.localeCompare(
+        right.projectId,
+        'en-US',
+      )),
+  );
+  const withoutDigest = Object.freeze({
+    authorityId: input.authorityId,
+    authorityVolumeIdentity: input.authorityVolumeIdentity,
+    catalogId: input.catalogId,
+    coordinationSchemaVersion: input.coordinationSchemaVersion,
+    createdAt: input.createdAt,
+    maximumServerBuild: input.serverBuild,
+    minimumServerBuild: input.serverBuild,
+    projects,
+    repositoryFormatVersion: input.repositoryFormatVersion,
+    restoreEpoch: input.restoreEpoch,
+    schemaVersion: 1 as const,
+    terminalProjects,
+  });
+  const catalogSha256 = sha256(digestInput(withoutDigest));
+  const document = decodeDocument(
+    Object.freeze({ ...withoutDigest, catalogSha256 }),
+    input.catalogId,
+    catalogSha256,
+  );
+  return Object.freeze({
+    catalog: Object.freeze({
+      authorityId: document.authorityId,
+      authorityVolumeIdentity: document.authorityVolumeIdentity,
+      catalogId: document.catalogId,
+      catalogSha256: document.catalogSha256,
+      coordinationSchemaVersion: document.coordinationSchemaVersion,
+      createdAt: document.createdAt,
+      maximumServerBuild: document.maximumServerBuild,
+      minimumServerBuild: document.minimumServerBuild,
+      projects: document.projects,
+      repositoryFormatVersion: document.repositoryFormatVersion,
+      restoreEpoch: document.restoreEpoch,
+      terminalProjects: document.terminalProjects,
+    }),
+    json: JSON.stringify(document),
   });
 }
 
@@ -269,22 +403,39 @@ function exactProjectBackup(
 
 export class EnvironmentBackupCatalogVerifier
 implements EnvironmentRestoreBackupPort {
-  readonly #coordinationSchemaVersion: number;
+  readonly #coordinationSchemaCompatibility: Readonly<{
+    readonly maximumVersion: number;
+    readonly minimumVersion: number;
+  }>;
   readonly #repositoryFormatVersion: number;
   readonly #serverBuild: string;
   readonly #source: EnvironmentBackupCatalogSource;
 
   constructor(options: EnvironmentBackupCatalogVerifierOptions) {
+    const compatibility = options.coordinationSchemaCompatibility
+      ?? (options.coordinationSchemaVersion === undefined
+        ? undefined
+        : Object.freeze({
+            maximumVersion: options.coordinationSchemaVersion,
+            minimumVersion: options.coordinationSchemaVersion,
+          }));
     if (
-      !Number.isSafeInteger(options.coordinationSchemaVersion)
-      || options.coordinationSchemaVersion <= 0
+      compatibility === undefined
+      || !Number.isSafeInteger(compatibility.minimumVersion)
+      || !Number.isSafeInteger(compatibility.maximumVersion)
+      || compatibility.minimumVersion <= 0
+      || compatibility.maximumVersion < compatibility.minimumVersion
+      || (
+        options.coordinationSchemaCompatibility !== undefined
+        && options.coordinationSchemaVersion !== undefined
+      )
       || !Number.isSafeInteger(options.repositoryFormatVersion)
       || options.repositoryFormatVersion <= 0
       || !IDENTITY_PATTERN.test(options.serverBuild)
       || typeof options.source.readCatalog !== 'function'
       || typeof options.source.verifyProjectBackup !== 'function'
     ) throw new TypeError('environment-backup-catalog.options-invalid');
-    this.#coordinationSchemaVersion = options.coordinationSchemaVersion;
+    this.#coordinationSchemaCompatibility = Object.freeze({ ...compatibility });
     this.#repositoryFormatVersion = options.repositoryFormatVersion;
     this.#serverBuild = options.serverBuild;
     this.#source = options.source;
@@ -310,7 +461,10 @@ implements EnvironmentRestoreBackupPort {
         input.expectedCatalogSha256,
       );
       if (
-        document.coordinationSchemaVersion !== this.#coordinationSchemaVersion
+        document.coordinationSchemaVersion
+          < this.#coordinationSchemaCompatibility.minimumVersion
+        || document.coordinationSchemaVersion
+          > this.#coordinationSchemaCompatibility.maximumVersion
         || document.repositoryFormatVersion !== this.#repositoryFormatVersion
         || document.minimumServerBuild !== this.#serverBuild
         || document.maximumServerBuild !== this.#serverBuild
@@ -326,6 +480,21 @@ implements EnvironmentRestoreBackupPort {
           }),
         );
       }
+      for (const item of document.terminalProjects) {
+        assertNotAborted(input.signal);
+        if (this.#source.verifyTerminalProjectBackup === undefined) {
+          fail('invalid-backup');
+        }
+        const artifact = await this.#source.verifyTerminalProjectBackup({
+          signal: input.signal,
+          terminalProject: item,
+        });
+        if (
+          artifact.projectId !== item.projectId
+          || artifact.sha256 !== item.artifactSha256
+          || Buffer.byteLength(artifact.json, 'utf8') !== item.artifactByteCount
+        ) fail('invalid-backup');
+      }
       return Object.freeze({
         authorityId: document.authorityId,
         authorityVolumeIdentity: document.authorityVolumeIdentity,
@@ -338,6 +507,7 @@ implements EnvironmentRestoreBackupPort {
         projects: document.projects,
         repositoryFormatVersion: document.repositoryFormatVersion,
         restoreEpoch: document.restoreEpoch,
+        terminalProjects: document.terminalProjects,
       });
     } catch (error: unknown) {
       if (error instanceof EnvironmentBackupCatalogVerifierError) throw error;

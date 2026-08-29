@@ -53,8 +53,10 @@ export function rejectUnknownConfigFields(
   }
 }
 
-export function requirePostgresUrl(source: ConfigSource): string {
-  const field = 'CLAUDIAN_CLOUD_POSTGRES_URL';
+export function requirePostgresUrl(
+  source: ConfigSource,
+  field = 'CLAUDIAN_CLOUD_POSTGRES_URL',
+): string {
   const value = requireConfigValue(source, field);
   try {
     const parsed = new URL(value);

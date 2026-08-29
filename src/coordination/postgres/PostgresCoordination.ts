@@ -56,6 +56,8 @@ import type {
   ProjectReadScope,
   ProjectScope,
   ProjectSnapshotMembershipRecord,
+  TerminalProjectContinuityCatalog,
+  TerminalProjectContinuityPage,
 } from '../ProjectCoordination.js';
 export type {
   AcquireProjectLeaseOptions,
@@ -67,6 +69,8 @@ export type {
   ProjectReadScope,
   ProjectScope,
   ProjectSnapshotMembershipRecord,
+  TerminalProjectContinuityCatalog,
+  TerminalProjectContinuityPage,
 } from '../ProjectCoordination.js';
 import {
   assertRepositoryPlacementLease,
@@ -85,7 +89,11 @@ import { PostgresCollaborationPersistence } from './PostgresCollaborationPersist
 import { PostgresPortabilityLifecyclePersistence } from './PostgresPortabilityLifecyclePersistence.js';
 import { PostgresProjectCheckpointPersistence } from './PostgresProjectCheckpointPersistence.js';
 import { POSTGRES_SCHEMAS } from './PostgresSchema.js';
-import { supportsPostgresSchemaVersion } from '../../config/PostgresSchemaCompatibility.js';
+import {
+  RUNTIME_POSTGRES_SCHEMA_COMPATIBILITY,
+  supportsPostgresSchemaVersion,
+  type PostgresSchemaCompatibility,
+} from '../../config/PostgresSchemaCompatibility.js';
 
 export interface PostgresCoordinationOptions {
   readonly onProjectEventCommitted?: (projectId: CollabProjectId) => void;
@@ -1584,7 +1592,8 @@ implements DevelopmentBootstrapUploadLease {
 export class PostgresCoordination
   implements DevelopmentBootstrapAttemptLocator,
   ExpiredDevelopmentBootstrapAttemptCatalog, RecoveryCandidateCatalog,
-  RepositoryPlacementValidator, TerminalResponderCatalog {
+  RepositoryPlacementValidator, TerminalProjectContinuityCatalog,
+  TerminalResponderCatalog {
   readonly #checkedOutClients = new CheckedOutPoolClients();
   readonly #ordinaryPool: Pool;
   readonly #onProjectEventCommitted: ((projectId: CollabProjectId) => void)
@@ -1774,6 +1783,59 @@ export class PostgresCoordination
     }
   }
 
+  async listTerminalProjectContinuity(options: Readonly<{
+    readonly after?: CollabProjectId;
+    readonly limit?: number;
+  }> = {}): Promise<TerminalProjectContinuityPage> {
+    this.#assertOpen();
+    const limit = options.limit ?? 100;
+    if (
+      !Number.isSafeInteger(limit)
+      || limit < 1
+      || limit > 100
+      || (options.after !== undefined && !isCollabProjectId(options.after))
+    ) throw new CoordinationError('invalid-record');
+    const deadline = Date.now() + this.#projectLockTimeoutMs;
+    const checkedOut = await checkout(
+      this.#reservedPool,
+      deadline,
+      undefined,
+      this.#checkedOutClients,
+    );
+    try {
+      const catalog = await safeQuery<{ readonly relation: string | null }>(
+        checkedOut.client,
+        `SELECT to_regclass(
+           'claudian_cloud.project_terminal_continuity_catalog'
+         )::text AS relation`,
+        [],
+        checkedOut.markBroken,
+      );
+      if (
+        catalog[0]?.relation
+          !== 'claudian_cloud.project_terminal_continuity_catalog'
+      ) throw new CoordinationError('schema-incompatible');
+      const rows = await safeQuery<{ readonly project_id: string }>(
+        checkedOut.client,
+        `SELECT project_id
+           FROM claudian_cloud.project_terminal_continuity_catalog
+          WHERE ($1::varchar IS NULL OR project_id > $1)
+          ORDER BY project_id
+          LIMIT $2`,
+        [options.after ?? null, limit + 1],
+        checkedOut.markBroken,
+      );
+      const page = rows.slice(0, limit);
+      const projectIds = Object.freeze(page.map(row => row.project_id));
+      return Object.freeze({
+        nextCursor: rows.length > limit ? projectIds.at(-1) : undefined,
+        projectIds,
+      });
+    } finally {
+      checkedOut.release();
+    }
+  }
+
   async listActiveRepositoryPlacements(
     options: ListActiveRepositoryPlacementsOptions = {},
   ): Promise<ActiveRepositoryPlacementPage> {
@@ -1932,7 +1994,10 @@ export class PostgresCoordination
       && current.generation === placement.generation;
   }
 
-  async verifySchemaCompatibility(): Promise<void> {
+  async verifySchemaCompatibility(
+    compatibility: PostgresSchemaCompatibility =
+      RUNTIME_POSTGRES_SCHEMA_COMPATIBILITY,
+  ): Promise<number> {
     this.#assertOpen();
     const deadline = Date.now() + this.#projectLockTimeoutMs;
     const checkedOut = await checkout(
@@ -1970,7 +2035,7 @@ export class PostgresCoordination
         checkedOut.markBroken,
       );
       const currentVersion = rows.at(-1)?.version;
-      if (!supportsPostgresSchemaVersion(currentVersion)) {
+      if (!supportsPostgresSchemaVersion(currentVersion, compatibility)) {
         throw new CoordinationError('schema-incompatible');
       }
       const expectedSchemas = POSTGRES_SCHEMAS.filter(
@@ -1990,6 +2055,7 @@ export class PostgresCoordination
           throw new CoordinationError('schema-incompatible');
         }
       }
+      return currentVersion;
     } finally {
       checkedOut.release();
     }

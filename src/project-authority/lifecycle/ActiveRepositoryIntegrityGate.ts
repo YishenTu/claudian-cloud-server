@@ -27,11 +27,15 @@ export interface ActiveRepositoryIntegrityRepository {
   cleanupReceivePackState(placement: RepositoryPlacementLease): Promise<void>;
   verifyIntegrity(
     placement: RepositoryPlacementLease,
-    options: Readonly<{ expectedRefs: readonly ExpectedRepositoryRef[] }>,
+    options: Readonly<{
+      expectedRefs: readonly ExpectedRepositoryRef[];
+      signal?: AbortSignal;
+    }>,
   ): Promise<RepositoryIntegrityResult>;
 }
 
 export interface ActiveRepositoryIntegrityGateOptions {
+  readonly cleanupReceivePackState?: boolean;
   readonly coordination: ActiveRepositoryIntegrityCoordination;
   readonly repository: ActiveRepositoryIntegrityRepository;
 }
@@ -62,34 +66,44 @@ function expectedMemberRefs(
 }
 
 export class ActiveRepositoryIntegrityGate {
+  readonly #cleanupReceivePackState: boolean;
   readonly #coordination: ActiveRepositoryIntegrityCoordination;
   readonly #repository: ActiveRepositoryIntegrityRepository;
 
   constructor(options: ActiveRepositoryIntegrityGateOptions) {
+    this.#cleanupReceivePackState = options.cleanupReceivePackState ?? true;
     this.#coordination = options.coordination;
     this.#repository = options.repository;
   }
 
-  async verifyAll(): Promise<void> {
+  async verifyAll(signal?: AbortSignal): Promise<void> {
     let after: CollabProjectId | undefined;
     do {
+      signal?.throwIfAborted();
       const page = await this.#coordination.listActiveRepositoryPlacements({
         ...(after === undefined ? {} : { after }),
         limit: 100,
       });
       for (const placement of page.placements) {
-        await this.#verifyPlacement(placement);
+        signal?.throwIfAborted();
+        await this.#verifyPlacement(placement, signal);
       }
       after = page.nextCursor;
     } while (after !== undefined);
   }
 
-  async #verifyPlacement(catalogPlacement: RepositoryPlacementLease): Promise<void> {
+  async #verifyPlacement(
+    catalogPlacement: RepositoryPlacementLease,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
     const lease = await this.#coordination.acquireProjectLease(
       catalogPlacement.projectId,
     );
     try {
+      signal?.throwIfAborted();
       const authority = await lease.withProjectScope(async scope => {
+        signal?.throwIfAborted();
         const project = await scope.getProject();
         const placement = await scope.getRepositoryPlacement();
         const memberships = await scope.listMemberships();
@@ -108,9 +122,12 @@ export class ActiveRepositoryIntegrityGate {
           placement,
         });
       });
-      await this.#repository.cleanupReceivePackState(authority.placement);
+      if (this.#cleanupReceivePackState) {
+        await this.#repository.cleanupReceivePackState(authority.placement);
+      }
       await this.#repository.verifyIntegrity(authority.placement, {
         expectedRefs: authority.expectedRefs,
+        ...(signal === undefined ? {} : { signal }),
       });
     } finally {
       await lease.close();

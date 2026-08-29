@@ -68,6 +68,7 @@ function journal(
     repositoryFormatVersion: 1,
     restoreEpoch: 4,
     schemaVersion: 1,
+    terminalProjects: Object.freeze([]),
     updatedAt: '2026-08-29T00:00:00.000Z',
   });
 }

@@ -774,6 +774,43 @@ function minimumBackupRecords() {
 }
 
 describe('PostgresEnvironmentRestorePersistence', () => {
+  it('creates a clean restore target at the immediate predecessor schema', async () => {
+    await withPostgresTestDatabase(async database => {
+      const persistence = new PostgresEnvironmentRestorePersistence({
+        connectionString: database.migrationUrl,
+      });
+      await persistence.createDatabase({
+        authorityId: SOURCE_METADATA.authorityId,
+        authorityVolumeId: database.authorityVolumeId,
+        authorityVolumeIdentity: TARGET_VOLUME_IDENTITY,
+        coordinationSchemaVersion: CURRENT_POSTGRES_SCHEMA_VERSION - 1,
+        operationId: 'restore-previous-schema',
+        restoreEpoch: SOURCE_METADATA.restoreEpoch + 1,
+        signal: new AbortController().signal,
+      });
+
+      const client = new Client({ connectionString: database.migrationUrl });
+      try {
+        await client.connect();
+        const version = await client.query<{ readonly version: number }>(
+          `SELECT version
+             FROM claudian_cloud.schema_migrations
+            ORDER BY version DESC
+            LIMIT 1`,
+        );
+        const catalog = await client.query<{ readonly relation: string | null }>(
+          `SELECT to_regclass(
+             'claudian_cloud.project_terminal_continuity_catalog'
+           )::text AS relation`,
+        );
+        assert.deepEqual(version.rows, [{ version: 9 }]);
+        assert.deepEqual(catalog.rows, [{ relation: null }]);
+      } finally {
+        await client.end();
+      }
+    });
+  });
+
   it('creates one private restore fence before migrations and removes only its exact unpublished state', async () => {
     await withPostgresTestDatabase(async database => {
       const persistence = new PostgresEnvironmentRestorePersistence({
@@ -1199,6 +1236,12 @@ describe('PostgresEnvironmentRestorePersistence', () => {
             WHERE project_id = $1`,
           [PROJECT_ID],
         );
+        const continuityCatalog = await client.query(
+          `SELECT project_id
+             FROM claudian_cloud.project_terminal_continuity_catalog
+            WHERE project_id = $1`,
+          [PROJECT_ID],
+        );
         await client.query('COMMIT');
         assert.deepEqual(tombstone.rows, [{
           result_sha256: 'd'.repeat(64),
@@ -1206,6 +1249,89 @@ describe('PostgresEnvironmentRestorePersistence', () => {
           terminal_operation_kind: 'authority-transfer',
         }]);
         assert.deepEqual(responders.rows, []);
+        assert.deepEqual(continuityCatalog.rows, [{ project_id: PROJECT_ID }]);
+      } finally {
+        await client.end();
+      }
+    });
+  });
+
+  it('restores retained terminal continuity without recreating a Project', async () => {
+    await withPostgresTestDatabase(async database => {
+      const persistence = new PostgresEnvironmentRestorePersistence({
+        connectionString: database.migrationUrl,
+      });
+      const signal = new AbortController().signal;
+      const operationId = 'restore-terminal-continuity';
+      const restoreEpoch = SOURCE_METADATA.restoreEpoch + 1;
+      const records = minimumBackupRecords().filter(record => (
+        record.kind === 'lifecycle-journal'
+        || record.kind === 'protected-claim-envelope'
+        || record.kind === 'terminal-principal'
+        || record.kind === 'terminal-responder'
+        || record.kind === 'terminal-responder-replay'
+        || record.kind === 'tombstone'
+        || record.kind === 'transfer-receipt-key'
+        || record.kind === 'transfer-redemption-receipt'
+      ));
+
+      await persistence.createDatabase({
+        authorityId: SOURCE_METADATA.authorityId,
+        authorityVolumeId: database.authorityVolumeId,
+        authorityVolumeIdentity: TARGET_VOLUME_IDENTITY,
+        coordinationSchemaVersion: SOURCE_METADATA.coordinationSchemaVersion,
+        operationId,
+        restoreEpoch,
+        signal,
+      });
+      await persistence.importTerminalProject({
+        operationId,
+        projectId: PROJECT_ID,
+        records,
+        restoreEpoch,
+        signal,
+      });
+      await persistence.publishAuthority({
+        catalog: Object.freeze({
+          ...SOURCE_METADATA,
+          createdAt: CREATED_AT,
+          projects: Object.freeze([]),
+        }),
+        operationId,
+        repositories: Object.freeze([]),
+        restoreEpoch,
+        signal,
+      });
+      await persistence.verifyRestoredTerminalProject({
+        operationId,
+        projectId: PROJECT_ID,
+        records,
+        restoreEpoch,
+        signal,
+      });
+
+      const continuity = await persistence.readRestoredTerminalContinuity(
+        PROJECT_ID,
+        signal,
+      );
+      assert.deepEqual(continuity, records.filter(record => (
+        record.kind !== 'lifecycle-journal' && record.kind !== 'tombstone'
+      )));
+      const client = new Client({ connectionString: database.migrationUrl });
+      try {
+        await client.connect();
+        const projects = await client.query(
+          'SELECT project_id FROM claudian_cloud.projects WHERE project_id = $1',
+          [PROJECT_ID],
+        );
+        const terminal = await client.query(
+          `SELECT project_id
+             FROM claudian_cloud.project_terminal_continuity_catalog
+            WHERE project_id = $1`,
+          [PROJECT_ID],
+        );
+        assert.deepEqual(projects.rows, []);
+        assert.deepEqual(terminal.rows, [{ project_id: PROJECT_ID }]);
       } finally {
         await client.end();
       }

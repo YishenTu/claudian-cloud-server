@@ -1,7 +1,10 @@
 ARG NODE_IMAGE=node:24.16.0-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203
 ARG GIT_PACKAGE_VERSION=1:2.39.5-0+deb12u3
+ARG CLAUDIAN_SERVER_BUILD
 
 FROM ${NODE_IMAGE} AS build
+
+ARG CLAUDIAN_SERVER_BUILD
 
 WORKDIR /workspace
 
@@ -14,7 +17,7 @@ COPY scripts ./scripts
 COPY src ./src
 COPY tests ./tests
 
-RUN npm run verify:application
+RUN npm run set-server-build && npm run verify:application
 
 FROM ${NODE_IMAGE} AS production-dependencies
 

@@ -173,12 +173,12 @@ export class FileEnvironmentRestoreState implements EnvironmentRestoreStatePort 
     return this.#withLock(operation, signal);
   }
 
-  async inspect(): Promise<EnvironmentRestoreStateInspection> {
+  async inspect(signal?: AbortSignal): Promise<EnvironmentRestoreStateInspection> {
     return this.#withLock(async () => {
       const journal = await this.#readJournal();
       const pair = await this.#readPair(journal);
       return Object.freeze({ journal, pair });
-    });
+    }, signal);
   }
 
   async create(

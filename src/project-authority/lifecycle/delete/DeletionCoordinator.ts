@@ -48,7 +48,10 @@ export class DeletionCoordinatorError extends Error {
 export interface DeletionCoordinatorOptions {
   readonly clock?: () => Date;
   readonly coordination: Readonly<{
-    acquireProjectLease(projectId: CollabProjectId): Promise<PinnedProjectLease>;
+    acquireProjectLease(
+      projectId: CollabProjectId,
+      options?: Readonly<{ readonly signal?: AbortSignal }>,
+    ): Promise<PinnedProjectLease>;
   }>;
   readonly repository: ExactRepositoryRemovalPort;
 }
@@ -57,6 +60,7 @@ export interface ResumeAuthorizedDeletionInput {
   readonly authorizationSha256: string;
   readonly operationId: string;
   readonly projectId: CollabProjectId;
+  readonly signal?: AbortSignal;
 }
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
@@ -126,20 +130,25 @@ export class DeletionCoordinator implements ProjectLifecycleRecoveryOwner {
       || !isCollabProjectId(input.projectId)
       || !isCollabOpaqueId(input.operationId)
       || !SHA256_PATTERN.test(input.authorizationSha256)
+      || input.signal?.aborted === true
     ) {
       return this.#closed ? fail('closed') : fail('authorization-denied');
     }
     let reservation: ExactRepositoryOperationReservation;
     try {
       reservation = await this.#repository.reserveExactRepositoryOperation(
-        input.projectId,
+      input.projectId,
+      input.signal,
       );
     } catch (error: unknown) {
       return mapDependency(error);
     }
     let lease: PinnedProjectLease;
     try {
-      lease = await this.#coordination.acquireProjectLease(input.projectId);
+      lease = await this.#coordination.acquireProjectLease(
+        input.projectId,
+        input.signal === undefined ? {} : { signal: input.signal },
+      );
     } catch (error: unknown) {
       await reservation.close().catch(() => undefined);
       return mapDependency(error);
@@ -158,6 +167,7 @@ export class DeletionCoordinator implements ProjectLifecycleRecoveryOwner {
         journal: facts.journal,
         lease,
         repositoryReservation: reservation,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
       });
     } catch (error: unknown) {
       return mapDependency(error);
@@ -177,6 +187,7 @@ export class DeletionCoordinator implements ProjectLifecycleRecoveryOwner {
     if (journal.kind !== 'delete') return fail('state-conflict');
     try {
       for (let step = 0; step < MAXIMUM_PHASES; step += 1) {
+        if (input.signal?.aborted === true) return fail('closed');
         if (journal.state === 'completed' && journal.phase === 'completed') {
           return 'settled';
         }
@@ -196,6 +207,7 @@ export class DeletionCoordinator implements ProjectLifecycleRecoveryOwner {
             repositoryStorageKey: intent.repositoryStorageKey,
             storageNodeId: intent.storageNodeId,
             },
+            input.signal,
           );
           await this.#advance(input.lease, journal, 'repository-removed');
         } else if (journal.phase === 'repository-removed') {

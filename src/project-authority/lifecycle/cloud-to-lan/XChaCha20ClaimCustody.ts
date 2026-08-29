@@ -49,6 +49,11 @@ export interface XChaCha20ClaimCustodyOptions {
   readonly nonceFactory?: () => Uint8Array;
 }
 
+type OpenProtectedClaimEnvelope = Omit<
+  ProtectedClaimEnvelopeInput,
+  'createdAt'
+> & Readonly<{ readonly createdAt?: string }>;
+
 interface StoredKey {
   readonly key: Buffer;
   readonly keyId: string;
@@ -254,7 +259,7 @@ export class XChaCha20ClaimCustody implements CloudToLanClaimCustodyPort {
     }
   }
 
-  open(envelope: ProtectedClaimEnvelopeInput): Promise<string> {
+  open(envelope: OpenProtectedClaimEnvelope): Promise<string> {
     try {
       const key = this.#keys.get(envelope.keyId);
       const encodedAssociatedData = associatedData(envelope.associatedData);

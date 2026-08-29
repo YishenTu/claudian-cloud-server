@@ -15,6 +15,7 @@ import { describe, it } from 'node:test';
 const deployScript = resolve(import.meta.dirname, '../../deploy/deploy.sh');
 const previousImage = `sha256:${'a'.repeat(64)}`;
 const candidateImage = `sha256:${'b'.repeat(64)}`;
+const repairedCandidateImage = `sha256:${'c'.repeat(64)}`;
 
 interface DeploymentFixture {
   readonly attemptStateFile: string;
@@ -26,6 +27,7 @@ interface DeploymentFixture {
   readonly migrationEnvironmentFile: string;
   readonly postgresEnvironmentFile: string;
   readonly restoreEnvironmentFile: string;
+  readonly restoreBootstrapEnvironmentFile: string;
   readonly restoreMigrationEnvironmentFile: string;
   readonly restorePostgresEnvironmentFile: string;
   readonly root: string;
@@ -53,6 +55,7 @@ async function createFixture(): Promise<DeploymentFixture> {
   const migrationEnvironmentFile = join(root, 'migration.env');
   const postgresEnvironmentFile = join(root, 'postgres.env');
   const restoreEnvironmentFile = join(root, 'restore-server.env');
+  const restoreBootstrapEnvironmentFile = join(root, 'restore-bootstrap.env');
   const restoreMigrationEnvironmentFile = join(root, 'restore-migration.env');
   const restorePostgresEnvironmentFile = join(root, 'restore-postgres.env');
   const attemptStateFile = join(root, 'deploy-attempt');
@@ -88,6 +91,10 @@ async function createFixture(): Promise<DeploymentFixture> {
     fakeDocker,
     `#!/usr/bin/env bash
 set -u
+schema_state_file="$FAKE_SCHEMA_STATE_FILE"
+if [[ "\${CLAUDIAN_CLOUD_POSTGRES_PORT:-}" == "55432" ]]; then
+  schema_state_file="$FAKE_SCHEMA_STATE_FILE.restore"
+fi
 printf 'image=%s|operation=%s|%s\n' "\${CLAUDIAN_CLOUD_IMAGE:-}" "\${CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID:-}" "$*" >> "$FAKE_DOCKER_LOG"
 if [[ "$1" == "compose" && "$*" == *" ps --all --quiet cloud-server"* ]]; then
   printf '%s\n' existing-container
@@ -98,7 +105,7 @@ if [[ "$1" == "inspect" && "$*" == *"{{.Image}}"* ]]; then
   exit 0
 fi
 if [[ "$1" == "image" && "$2" == "inspect" ]]; then
-  printf '%s\n' ${candidateImage}
+  printf '%s\n' "\${FAKE_CANDIDATE_IMAGE:-${candidateImage}}"
   exit 0
 fi
 if [[ "$1" == "build" && -n "\${FAKE_DEPLOY_PAUSE_FILE:-}" ]]; then
@@ -110,7 +117,7 @@ if [[ "$1" == "build" && -n "\${FAKE_DEPLOY_PAUSE_FILE:-}" ]]; then
   fi
 fi
 if [[ "$1" == "run" && "$*" == *" dist/migrate.js target"* ]]; then
-  printf '9\n'
+  printf '10\n'
   exit 0
 fi
 if [[ "$1" == "run" && "$*" == *" dist/migrate.js supports "* ]]; then
@@ -119,8 +126,12 @@ if [[ "$1" == "run" && "$*" == *" dist/migrate.js supports "* ]]; then
       && "$*" == *"${previousImage}"* ]]; then
     exit 2
   fi
-  if [[ ("$*" == *"${candidateImage}"* && "$version" == "9") \
-      || "$version" == "\${FAKE_SCHEMA_BEFORE:-9}" \
+  if [[ ("$*" == *"${candidateImage}"* && "$version" == "10") \
+      || ("$*" == *"${candidateImage}"* \
+        && "\${FAKE_CANDIDATE_SUPPORTS_BEFORE:-1}" == "1" \
+        && "$version" == "\${FAKE_SCHEMA_BEFORE:-10}") \
+      || ("$*" == *"${previousImage}"* \
+        && "$version" == "\${FAKE_SCHEMA_BEFORE:-10}") \
       || "$version" == "\${FAKE_PREVIOUS_SUPPORTS_VERSION:-}" \
       || "\${FAKE_PREVIOUS_SUPPORTS_TARGET:-0}" == "1" ]]; then
     exit 0
@@ -131,23 +142,23 @@ if [[ "$1" == "compose" && "$*" == *" run --rm cloud-migration node dist/migrate
   if [[ "\${FAKE_PREFLIGHT_FAIL:-0}" == "1" ]]; then
     exit 25
   fi
-  if [[ -f "$FAKE_SCHEMA_STATE_FILE" ]]; then
-    sed -n '1p' "$FAKE_SCHEMA_STATE_FILE"
+  if [[ -f "$schema_state_file" ]]; then
+    sed -n '1p' "$schema_state_file"
   else
-    printf '%s\n' "\${FAKE_SCHEMA_BEFORE:-9}"
+    printf '%s\n' "\${FAKE_SCHEMA_BEFORE:-10}"
   fi
   exit 0
 fi
 if [[ "$1" == "compose" && "$*" == *" run --rm cloud-migration"* && "$*" != *" preflight"* ]]; then
-  if [[ "\${FAKE_MIGRATION_FAIL_AFTER_ADVANCE:-0}" == "1" && ! -f "$FAKE_SCHEMA_STATE_FILE.attempted" ]]; then
-    printf '8\n' > "$FAKE_SCHEMA_STATE_FILE"
-    : > "$FAKE_SCHEMA_STATE_FILE.attempted"
+  if [[ "\${FAKE_MIGRATION_FAIL_AFTER_ADVANCE:-0}" == "1" && ! -f "$schema_state_file.attempted" ]]; then
+    printf '9\n' > "$schema_state_file"
+    : > "$schema_state_file.attempted"
     exit 18
   fi
   if [[ "\${FAKE_MIGRATION_FAIL:-0}" == "1" ]]; then
     exit 19
   fi
-  printf '9\n' > "$FAKE_SCHEMA_STATE_FILE"
+  printf '10\n' > "$schema_state_file"
   exit 0
 fi
 if [[ "$1" == "compose" && "$*" == *" run --rm cloud-backup"* && "\${FAKE_BACKUP_FAIL:-0}" == "1" ]]; then
@@ -158,26 +169,56 @@ if [[ "$1" == "compose" && "$*" == *" run --rm cloud-backup"* \
     && "\${CLAUDIAN_CLOUD_IMAGE:-}" == "${previousImage}" ]]; then
   exit 28
 fi
-if [[ "$1" == "compose" && "$*" == *" run --rm cloud-verify-backup"* && "\${FAKE_VERIFY_BACKUP_FAIL:-0}" == "1" ]]; then
-  exit 21
+if [[ "$1" == "compose" && "$*" == *" run --rm cloud-backup"* ]]; then
+  printf '%s\n' "\${CLAUDIAN_CLOUD_IMAGE:-}" > "$FAKE_SCHEMA_STATE_FILE.backup-image"
 fi
-if [[ "$1" == "compose" && "$*" == *" run --rm cloud-restore"* ]]; then
+if [[ "$1" == "compose" && "$*" == *" run --rm cloud-bootstrap"* \
+    && "\${CLAUDIAN_CLOUD_POSTGRES_PORT:-}" == "55432" \
+    && "\${CLAUDIAN_CLOUD_BOOTSTRAP_MODE:-}" != "restore-target" ]]; then
+  exit 29
+fi
+if [[ "$1" == "compose" && "$*" == *" run --rm cloud-verify-backup"* ]]; then
+  if [[ "\${FAKE_VERIFY_BACKUP_FAIL:-0}" == "1" ]]; then
+    exit 21
+  fi
+  if [[ -f "$FAKE_SCHEMA_STATE_FILE.backup-image" \
+      && "$(sed -n '1p' "$FAKE_SCHEMA_STATE_FILE.backup-image")" \
+        != "\${CLAUDIAN_CLOUD_IMAGE:-}" ]]; then
+    exit 30
+  fi
+  if [[ "\${CLAUDIAN_CLOUD_POSTGRES_PORT:-}" == "55432" ]]; then
+    printf '%s\n' "\${FAKE_BACKUP_SCHEMA:-\${FAKE_SCHEMA_BEFORE:-10}}" > "$schema_state_file"
+  fi
+  exit 0
+fi
+if [[ "$1" == "compose" && "$*" == *" run --rm cloud-verify-authority"* \
+    && "\${FAKE_PREVIOUS_MAINTENANCE_UNAVAILABLE:-0}" == "1" \
+    && "\${CLAUDIAN_CLOUD_IMAGE:-}" == "${previousImage}" ]]; then
+  exit 31
+fi
+if [[ "$1" == "compose" && "$*" == *" run --rm cloud-restore" ]]; then
   if [[ "\${FAKE_RESTORE_FAIL:-0}" == "1" ]]; then
     exit 22
   fi
-  printf '%s\n' "\${FAKE_BACKUP_SCHEMA:-\${FAKE_SCHEMA_BEFORE:-9}}" > "$FAKE_SCHEMA_STATE_FILE"
+  if [[ -f "$FAKE_SCHEMA_STATE_FILE.backup-image" \
+      && "$(sed -n '1p' "$FAKE_SCHEMA_STATE_FILE.backup-image")" \
+        != "\${CLAUDIAN_CLOUD_IMAGE:-}" ]]; then
+    exit 30
+  fi
+  printf '%s\n' "\${FAKE_BACKUP_SCHEMA:-\${FAKE_SCHEMA_BEFORE:-10}}" > "$schema_state_file"
   exit 0
 fi
 if [[ "$1" == "compose" && "$*" == *" run --rm cloud-verify-authority"* ]]; then
-  if [[ "\${FAKE_VERIFY_AUTHORITY_FAIL:-0}" == "1" ]]; then
+  if [[ "\${FAKE_VERIFY_AUTHORITY_FAIL:-0}" == "1" \
+      && "$*" == *"--project-name claudian-cloud-server"* ]]; then
     exit 23
   fi
   exit 0
 fi
-if [[ "$1" == "compose" && "$*" == *" up "* && "\${FAKE_DEPLOY_FAIL_NEW:-0}" == "1" && "\${CLAUDIAN_CLOUD_IMAGE:-}" == "${candidateImage}" ]]; then
+if [[ "$1" == "compose" && "$*" == *"--project-name claudian-cloud-server up "* && "\${FAKE_DEPLOY_FAIL_NEW:-0}" == "1" && "\${CLAUDIAN_CLOUD_IMAGE:-}" != "${previousImage}" ]]; then
   exit 17
 fi
-if [[ "$1" == "compose" && "$*" == *" up "* \
+if [[ "$1" == "compose" && "$*" == *"--project-name claudian-cloud-server up "* \
     && "\${CLAUDIAN_CLOUD_IMAGE:-}" == "${candidateImage}" \
     && "$(sed -n '1s/ .*//p' "$FAKE_ATTEMPT_STATE_FILE" 2>/dev/null)" == "backup-active" ]]; then
   exit 24
@@ -225,13 +266,14 @@ fi
   await writeFile(environmentFile, 'CLAUDIAN_CLOUD_PORT=8787\n');
   await writeFile(
     migrationEnvironmentFile,
-    'CLAUDIAN_CLOUD_POSTGRES_URL=postgresql://migration.invalid/db\n',
+    'CLAUDIAN_CLOUD_POSTGRES_MIGRATION_URL=postgresql://migration.invalid/db\n',
   );
   await writeFile(postgresEnvironmentFile, 'POSTGRES_DB=postgres\n');
   await writeFile(restoreEnvironmentFile, 'CLAUDIAN_CLOUD_PORT=8788\n');
+  await writeFile(restoreBootstrapEnvironmentFile, 'POSTGRES_USER=restore\n');
   await writeFile(
     restoreMigrationEnvironmentFile,
-    'CLAUDIAN_CLOUD_POSTGRES_URL=postgresql://restore.invalid/db\n',
+    'CLAUDIAN_CLOUD_POSTGRES_MIGRATION_URL=postgresql://restore.invalid/db\n',
   );
   await writeFile(restorePostgresEnvironmentFile, 'POSTGRES_DB=restore\n');
 
@@ -245,6 +287,7 @@ fi
     migrationEnvironmentFile,
     postgresEnvironmentFile,
     restoreEnvironmentFile,
+    restoreBootstrapEnvironmentFile,
     restoreMigrationEnvironmentFile,
     restorePostgresEnvironmentFile,
     root,
@@ -264,6 +307,15 @@ function deploymentEnvironment(
     CLAUDIAN_DEPLOY_ENV_FILE: fixture.environmentFile,
     CLAUDIAN_DEPLOY_MIGRATION_ENV_FILE: fixture.migrationEnvironmentFile,
     CLAUDIAN_DEPLOY_POSTGRES_ENV_FILE: fixture.postgresEnvironmentFile,
+    CLAUDIAN_DEPLOY_RESTORE_BOOTSTRAP_ENV_FILE:
+      fixture.restoreBootstrapEnvironmentFile,
+    CLAUDIAN_DEPLOY_RESTORE_COMPOSE_PROJECT: 'claudian-cloud-restore-test',
+    CLAUDIAN_DEPLOY_RESTORE_ENV_FILE: fixture.restoreEnvironmentFile,
+    CLAUDIAN_DEPLOY_RESTORE_MIGRATION_ENV_FILE:
+      fixture.restoreMigrationEnvironmentFile,
+    CLAUDIAN_DEPLOY_RESTORE_POSTGRES_ENV_FILE:
+      fixture.restorePostgresEnvironmentFile,
+    CLAUDIAN_DEPLOY_RESTORE_POSTGRES_PORT: '55432',
     FAKE_DOCKER_LOG: fixture.dockerLog,
     FAKE_DURABILITY_LOG: fixture.durabilityLog,
     FAKE_DURABILITY_COUNT_FILE: `${fixture.durabilityLog}.count`,
@@ -319,6 +371,12 @@ function expectRollback(dockerLog: string): void {
   assert.match(
     dockerLog,
     new RegExp(`image=${previousImage}\\|operation=[0-9a-f]{64}\\|compose .* up `),
+  );
+  assert.doesNotMatch(
+    dockerLog,
+    new RegExp(
+      `image=${previousImage}\\|operation=[0-9a-f]{64}\\|compose .* run --rm cloud-restore-recovery`,
+    ),
   );
 }
 
@@ -428,7 +486,10 @@ describe('deployment', () => {
       );
       const dockerLog = await readFile(fixture.dockerLog, 'utf8');
       assert.doesNotMatch(dockerLog, / run --rm cloud-migration\n/);
-      assert.doesNotMatch(dockerLog, / up --detach/);
+      assert.doesNotMatch(
+        dockerLog,
+        /--project-name claudian-cloud-server up --detach/u,
+      );
     } finally {
       await rm(fixture.root, { force: true, recursive: true });
     }
@@ -492,7 +553,9 @@ exit 29
       assert.equal(await readFile(fixture.attemptStateFile, 'utf8').catch(() => ''), '');
       assert.match(
         dockerLog,
-        new RegExp(`build .*--network host .*--tag claudian-cloud-server:${fixture.targetRevision}`),
+        new RegExp(
+          `build .*--network host .*--build-arg CLAUDIAN_SERVER_BUILD=${fixture.targetRevision} .*--tag claudian-cloud-server:${fixture.targetRevision}`,
+        ),
       );
       assert.match(
         dockerLog,
@@ -509,19 +572,25 @@ exit 29
         / run --rm cloud-migration node dist\/migrate\.js preflight/g,
       )].map(match => match.index);
       const schemaProbe = preflightPositions[0] ?? -1;
-      const preflight = preflightPositions[1] ?? -1;
+      const restoredSchemaProbe = preflightPositions[1] ?? -1;
+      const preflight = preflightPositions[2] ?? -1;
       const migrate = dockerLog.indexOf(' run --rm cloud-migration\n');
-      const start = dockerLog.indexOf(' up --detach');
+      const start = dockerLog.lastIndexOf(' up --detach');
       const verifyAuthority = dockerLog.lastIndexOf(' run --rm cloud-verify-authority');
+      const recoverRestore = dockerLog.lastIndexOf(
+        ' run --rm cloud-restore-recovery',
+      );
       assert.equal(
         stop < backup
           && stop < schemaProbe
           && schemaProbe < backup
           && backup < verifyBackup
-          && verifyBackup < preflight
+          && verifyBackup < restoredSchemaProbe
+          && restoredSchemaProbe < preflight
           && preflight < migrate
           && migrate < verifyAuthority
-          && verifyAuthority < start,
+          && verifyAuthority < recoverRestore
+          && recoverRestore < start,
         true,
       );
       assert.match(
@@ -532,6 +601,12 @@ exit 29
         dockerLog,
         new RegExp(`image=${previousImage}\\|operation=.*\\|compose .* run --rm cloud-backup`),
       );
+      assert.match(
+        dockerLog,
+        new RegExp(
+          `image=${candidateImage}\\|operation=[0-9a-f]{64}\\|compose .* --project-name claudian-cloud-restore-test run --rm cloud-verify-backup`,
+        ),
+      );
     } finally {
       await rm(fixture.root, { force: true, recursive: true });
     }
@@ -541,6 +616,7 @@ exit 29
     const fixture = await createFixture();
     try {
       const result = runDeployment(fixture, {
+        FAKE_SCHEMA_BEFORE: '9',
         FAKE_PREVIOUS_BACKUP_UNAVAILABLE: '1',
       });
 
@@ -629,17 +705,33 @@ exit 29
       git(repair, 'commit', '-m', 'fix: repair candidate');
       git(repair, 'push', 'origin', 'main');
 
-      const repaired = runDeployment(fixture);
-      assert.equal(repaired.status, 0, repaired.stderr);
+      const repaired = runDeployment(fixture, {
+        CLAUDIAN_DEPLOY_FAILURE_MODE: 'restore',
+        FAKE_CANDIDATE_IMAGE: repairedCandidateImage,
+        FAKE_DEPLOY_FAIL_NEW: '1',
+        FAKE_SCHEMA_BEFORE: '8',
+      });
+      assert.notEqual(repaired.status, 0);
+      assert.match(repaired.stderr, /deployment\.restored-backup/u);
       const dockerLog = await readFile(fixture.dockerLog, 'utf8');
       const operationIds = [...dockerLog.matchAll(
         /operation=([0-9a-f]{64})\|compose .* run --rm cloud-backup/g,
       )].map(match => match[1]);
-      const candidateStartOperation = new RegExp(
-        `image=${candidateImage}\\|operation=([0-9a-f]{64})\\|compose .* up `,
-      ).exec(dockerLog)?.[1];
       assert.equal(operationIds.length, 1);
-      assert.equal(candidateStartOperation, operationIds[0]);
+      const operationId = operationIds[0];
+      assert.ok(operationId !== undefined);
+      assert.match(
+        dockerLog,
+        new RegExp(
+          `image=${candidateImage}\\|operation=${operationId}\\|compose .* --project-name claudian-cloud-restore-test run --rm cloud-restore`,
+        ),
+      );
+      assert.doesNotMatch(
+        dockerLog,
+        new RegExp(
+          `image=${repairedCandidateImage}\\|operation=${operationId}\\|compose .* --project-name claudian-cloud-restore-test run --rm cloud-restore`,
+        ),
+      );
     } finally {
       await rm(fixture.root, { force: true, recursive: true });
     }
@@ -695,7 +787,10 @@ exit 29
         dockerLog,
         new RegExp(`image=${previousImage}\\|operation=[0-9a-f]{64}\\|compose .* up `),
       );
-      assert.doesNotMatch(dockerLog, / run --rm cloud-restore/);
+      assert.equal(
+        dockerLog.match(/ run --rm cloud-restore\n/g)?.length ?? 0,
+        0,
+      );
     } finally {
       await rm(fixture.root, { force: true, recursive: true });
     }
@@ -749,7 +844,68 @@ exit 29
       assert.match(
         dockerLog,
         new RegExp(
+          `image=${candidateImage}\\|operation=[0-9a-f]{64}\\|compose .* --project-name claudian-cloud-restore-test run --rm cloud-verify-authority`,
+        ),
+      );
+    } finally {
+      await rm(fixture.root, { force: true, recursive: true });
+    }
+  });
+
+  it('uses candidate maintenance to verify a first-upgrade restored authority', async () => {
+    const fixture = await createFixture();
+    try {
+      const result = runDeployment(fixture, {
+        CLAUDIAN_DEPLOY_FAILURE_MODE: 'restore',
+        FAKE_DEPLOY_FAIL_NEW: '1',
+        FAKE_PREVIOUS_BACKUP_UNAVAILABLE: '1',
+        FAKE_PREVIOUS_MAINTENANCE_UNAVAILABLE: '1',
+        FAKE_SCHEMA_BEFORE: '9',
+      });
+
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /deployment\.restored-backup/u);
+      const dockerLog = await readFile(fixture.dockerLog, 'utf8');
+      assert.match(
+        dockerLog,
+        new RegExp(
+          `image=${candidateImage}\\|operation=[0-9a-f]{64}\\|compose .* --project-name claudian-cloud-restore-test run --rm cloud-verify-authority`,
+        ),
+      );
+      assert.doesNotMatch(
+        dockerLog,
+        new RegExp(
           `image=${previousImage}\\|operation=[0-9a-f]{64}\\|compose .* --project-name claudian-cloud-restore-test run --rm cloud-verify-authority`,
+        ),
+      );
+    } finally {
+      await rm(fixture.root, { force: true, recursive: true });
+    }
+  });
+
+  it('restores with the exact image that produced a pre-upgrade-schema backup', async () => {
+    const fixture = await createFixture();
+    try {
+      const result = runDeployment(fixture, {
+        CLAUDIAN_DEPLOY_FAILURE_MODE: 'restore',
+        FAKE_CANDIDATE_SUPPORTS_BEFORE: '0',
+        FAKE_DEPLOY_FAIL_NEW: '1',
+        FAKE_SCHEMA_BEFORE: '8',
+      });
+
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /deployment\.restored-backup/);
+      const dockerLog = await readFile(fixture.dockerLog, 'utf8');
+      assert.match(
+        dockerLog,
+        new RegExp(
+          `image=${previousImage}\\|operation=[0-9a-f]{64}\\|compose .* run --rm cloud-backup`,
+        ),
+      );
+      assert.match(
+        dockerLog,
+        new RegExp(
+          `image=${previousImage}\\|operation=[0-9a-f]{64}\\|compose .* --project-name claudian-cloud-restore-test run --rm cloud-restore`,
         ),
       );
     } finally {
@@ -802,7 +958,7 @@ exit 29
         FAKE_SCHEMA_BEFORE: '7',
       });
       assert.notEqual(partial.status, 0);
-      assert.equal(await readFile(fixture.schemaStateFile, 'utf8'), '8\n');
+      assert.equal(await readFile(fixture.schemaStateFile, 'utf8'), '9\n');
 
       const restored = runDeployment(fixture, {
         CLAUDIAN_DEPLOY_FAILURE_MODE: 'restore',
@@ -820,7 +976,10 @@ exit 29
 
       assert.notEqual(restored.status, 0);
       assert.match(restored.stderr, /deployment\.restored-backup/);
-      assert.equal(await readFile(fixture.schemaStateFile, 'utf8'), '7\n');
+      assert.equal(
+        await readFile(`${fixture.schemaStateFile}.restore`, 'utf8'),
+        '7\n',
+      );
       assert.match(
         await readFile(fixture.attemptStateFile, 'utf8'),
         /^restored-active /,
@@ -835,6 +994,7 @@ exit 29
     try {
       const result = runDeployment(fixture, {
         CLAUDIAN_DEPLOY_FAILURE_MODE: 'restore',
+        CLAUDIAN_DEPLOY_RESTORE_COMPOSE_PROJECT: '',
       });
 
       assert.equal(result.status, 1);
@@ -859,7 +1019,10 @@ exit 29
       assert.notEqual(result.status, 0);
       const dockerLog = await readFile(fixture.dockerLog, 'utf8');
       expectRollback(dockerLog);
-      assert.doesNotMatch(dockerLog, / run --rm cloud-restore/);
+      assert.equal(
+        dockerLog.match(/ run --rm cloud-restore\n/g)?.length ?? 0,
+        0,
+      );
     } finally {
       await rm(fixture.root, { force: true, recursive: true });
     }
@@ -894,7 +1057,7 @@ exit 29
       });
 
       assert.equal(result.status, 0, result.stderr);
-      assert.equal(await readFile(fixture.schemaStateFile, 'utf8'), '9\n');
+      assert.equal(await readFile(fixture.schemaStateFile, 'utf8'), '10\n');
       const dockerLog = await readFile(fixture.dockerLog, 'utf8');
       assert.equal(
         dockerLog.match(/ run --rm cloud-migration\n/g)?.length,
@@ -915,7 +1078,7 @@ exit 29
       const result = runDeployment(fixture, {
         FAKE_MIGRATION_FAIL: '1',
         FAKE_MIGRATION_FAIL_AFTER_ADVANCE: '1',
-        FAKE_PREVIOUS_SUPPORTS_VERSION: '8',
+        FAKE_PREVIOUS_SUPPORTS_VERSION: '9',
         FAKE_SCHEMA_BEFORE: '7',
       });
 

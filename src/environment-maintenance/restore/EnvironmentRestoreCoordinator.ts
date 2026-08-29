@@ -2,6 +2,7 @@ import {
   COLLAB_MAIN_REF,
   COLLAB_MEMBER_REF_PREFIX,
   COLLAB_CLOUD_BINDING_LIMITS,
+  COLLAB_CHECKPOINT_ARTIFACT_LIMITS,
   collabMemberRef,
   isCollabGitOid,
   isCollabMemberId,
@@ -70,6 +71,12 @@ export interface EnvironmentRestoreProject {
   readonly projectId: CollabProjectId;
 }
 
+export interface EnvironmentRestoreTerminalProject {
+  readonly artifactByteCount: number;
+  readonly artifactSha256: string;
+  readonly projectId: CollabProjectId;
+}
+
 export interface EnvironmentRestoreCatalog {
   readonly authorityId: string;
   readonly authorityVolumeIdentity: string;
@@ -82,6 +89,7 @@ export interface EnvironmentRestoreCatalog {
   readonly projects: readonly EnvironmentRestoreProject[];
   readonly repositoryFormatVersion: number;
   readonly restoreEpoch: number;
+  readonly terminalProjects: readonly EnvironmentRestoreTerminalProject[];
 }
 
 export interface EnvironmentRestoreRepositoryPublication {
@@ -119,6 +127,7 @@ export interface EnvironmentRestoreJournal {
   readonly repositoryFormatVersion: number;
   readonly restoreEpoch: number;
   readonly schemaVersion: 1;
+  readonly terminalProjects: readonly EnvironmentRestoreTerminalProject[];
   readonly updatedAt: CollabIsoTimestamp;
 }
 
@@ -327,6 +336,7 @@ const CATALOG_KEYS = Object.freeze([
   'projects',
   'repositoryFormatVersion',
   'restoreEpoch',
+  'terminalProjects',
 ]);
 const PROJECT_KEYS = Object.freeze([
   'authorityGeneration',
@@ -334,6 +344,11 @@ const PROJECT_KEYS = Object.freeze([
   'checkpointSha256',
   'expiresAt',
   'placementGeneration',
+  'projectId',
+]);
+const TERMINAL_PROJECT_KEYS = Object.freeze([
+  'artifactByteCount',
+  'artifactSha256',
   'projectId',
 ]);
 const REPOSITORY_KEYS = Object.freeze([
@@ -416,6 +431,7 @@ function validateCatalog(
     || !Array.isArray(value.projects)
     || typeof value.repositoryFormatVersion !== 'number'
     || typeof value.restoreEpoch !== 'number'
+    || !Array.isArray(value.terminalProjects)
   ) fail('invalid-backup');
   const projects = Object.freeze(value.projects.map(project => {
     if (
@@ -437,6 +453,20 @@ function validateCatalog(
       projectId: project.projectId,
     });
   }));
+  const terminalProjects = Object.freeze(value.terminalProjects.map(item => {
+    if (
+      !plainRecord(item)
+      || !exactKeys(item, TERMINAL_PROJECT_KEYS)
+      || typeof item.artifactByteCount !== 'number'
+      || typeof item.artifactSha256 !== 'string'
+      || typeof item.projectId !== 'string'
+    ) fail('invalid-backup');
+    return Object.freeze({
+      artifactByteCount: item.artifactByteCount,
+      artifactSha256: item.artifactSha256,
+      projectId: item.projectId,
+    });
+  }));
   const catalog = Object.freeze({
     authorityId: value.authorityId,
     authorityVolumeIdentity: value.authorityVolumeIdentity,
@@ -449,6 +479,7 @@ function validateCatalog(
     projects,
     repositoryFormatVersion: value.repositoryFormatVersion,
     restoreEpoch: value.restoreEpoch,
+    terminalProjects,
   });
   if (
     !IDENTITY_PATTERN.test(catalog.authorityId)
@@ -468,7 +499,7 @@ function validateCatalog(
     || !Number.isSafeInteger(catalog.restoreEpoch)
     || catalog.restoreEpoch <= 0
     || catalog.restoreEpoch >= Number.MAX_SAFE_INTEGER
-    || catalog.projects.length === 0
+    || catalog.projects.length + catalog.terminalProjects.length === 0
   ) fail('invalid-backup');
   const projectIds = new Set<string>();
   const backupIds = new Set<string>();
@@ -491,9 +522,25 @@ function validateCatalog(
     backupIds.add(project.backupId);
     priorProjectId = project.projectId;
   }
+  priorProjectId = undefined;
+  for (const terminal of catalog.terminalProjects) {
+    if (
+      !isCollabProjectId(terminal.projectId)
+      || !Number.isSafeInteger(terminal.artifactByteCount)
+      || terminal.artifactByteCount <= 0
+      || terminal.artifactByteCount
+        > COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxCoordinationBytes
+      || !SHA256_PATTERN.test(terminal.artifactSha256)
+      || projectIds.has(terminal.projectId)
+      || (priorProjectId !== undefined && priorProjectId >= terminal.projectId)
+    ) fail('invalid-backup');
+    projectIds.add(terminal.projectId);
+    priorProjectId = terminal.projectId;
+  }
   return Object.freeze({
     ...catalog,
     projects,
+    terminalProjects,
   });
 }
 
@@ -650,6 +697,7 @@ function assertCatalogJournalCapacity(
     repositoryFormatVersion: catalog.repositoryFormatVersion,
     restoreEpoch: catalog.restoreEpoch + 1,
     schemaVersion: 1,
+    terminalProjects: catalog.terminalProjects,
     updatedAt: catalog.createdAt,
   });
   if (
@@ -661,6 +709,13 @@ function assertCatalogJournalCapacity(
 function sameProjects(
   left: readonly EnvironmentRestoreProject[],
   right: readonly EnvironmentRestoreProject[],
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function sameTerminalProjects(
+  left: readonly EnvironmentRestoreTerminalProject[],
+  right: readonly EnvironmentRestoreTerminalProject[],
 ): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
@@ -683,6 +738,7 @@ function exactJournal(
     || journal.repositoryFormatVersion !== catalog.repositoryFormatVersion
     || journal.restoreEpoch !== catalog.restoreEpoch + 1
     || !sameProjects(journal.projects, catalog.projects)
+    || !sameTerminalProjects(journal.terminalProjects, catalog.terminalProjects)
     || !timestamp(journal.createdAt)
     || !timestamp(journal.updatedAt)
   ) fail('state-conflict');
@@ -738,10 +794,13 @@ export function decodeEnvironmentRestoreJournal(
     'repositoryFormatVersion',
     'restoreEpoch',
     'schemaVersion',
+    'terminalProjects',
     'updatedAt',
   ];
   if (!exactKeys(value, expectedKeys)) fail('state-conflict');
-  if (!Array.isArray(value.projects)) fail('state-conflict');
+  if (!Array.isArray(value.projects) || !Array.isArray(value.terminalProjects)) {
+    fail('state-conflict');
+  }
   let catalog: EnvironmentRestoreCatalog;
   try {
     catalog = validateCatalog({
@@ -758,6 +817,7 @@ export function decodeEnvironmentRestoreJournal(
       restoreEpoch: typeof value.restoreEpoch === 'number'
         ? value.restoreEpoch - 1
         : Number.NaN,
+      terminalProjects: value.terminalProjects,
     }, {
       catalogId: typeof value.catalogId === 'string' ? value.catalogId : '',
       catalogSha256: typeof value.catalogSha256 === 'string'
@@ -822,6 +882,7 @@ export function decodeEnvironmentRestoreJournal(
     repositoryFormatVersion: catalog.repositoryFormatVersion,
     restoreEpoch: catalog.restoreEpoch + 1,
     schemaVersion: 1,
+    terminalProjects: catalog.terminalProjects,
     updatedAt: value.updatedAt,
   });
 }
@@ -855,6 +916,7 @@ export function encodeEnvironmentRestoreJournal(
     repositoryFormatVersion: canonical.repositoryFormatVersion,
     restoreEpoch: canonical.restoreEpoch,
     schemaVersion: canonical.schemaVersion,
+    terminalProjects: canonical.terminalProjects,
     updatedAt: canonical.updatedAt,
   })}\n`;
 }
@@ -1080,6 +1142,7 @@ export class EnvironmentRestoreCoordinator {
           repositoryFormatVersion: catalog.repositoryFormatVersion,
           restoreEpoch: catalog.restoreEpoch + 1,
           schemaVersion: 1,
+          terminalProjects: catalog.terminalProjects,
           updatedAt: now,
         }));
         inspected = Object.freeze({ journal, pair: 'absent' });
@@ -1238,7 +1301,7 @@ export class EnvironmentRestoreCoordinator {
       catalogSha256: journal.catalogSha256,
       completedAt: journal.updatedAt,
       operationId: journal.operationId,
-      projectCount: journal.projects.length,
+      projectCount: journal.projects.length + journal.terminalProjects.length,
       restoreEpoch: journal.restoreEpoch,
       state: 'completed',
     });
