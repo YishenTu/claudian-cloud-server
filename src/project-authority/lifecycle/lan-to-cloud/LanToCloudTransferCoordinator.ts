@@ -233,11 +233,14 @@ interface StoredSourceEvidence {
   readonly schemaVersion: 1;
 }
 
-interface ExactTransfer {
+interface StoredTransfer {
   readonly evidence: StoredSourceEvidence;
   readonly journal: ProjectLifecycleJournalRecord;
-  readonly proof: VerifiedLanToCloudSourceProof;
   readonly recovery: AuthorityTransferRecoveryRecord;
+}
+
+interface ExactTransfer extends StoredTransfer {
+  readonly proof: VerifiedLanToCloudSourceProof;
 }
 
 interface PendingClaimBatch {
@@ -501,15 +504,264 @@ async function settleBeforeCancellation<Result>(
   }
 }
 
-export class LanToCloudTransferCoordinator
+async function storedTransfer(
+  lease: PinnedProjectLease,
+  transferId: string,
+  signal?: AbortSignal,
+  authorizedPrincipalId?: string,
+): Promise<StoredTransfer> {
+  const [journal, recovery] = await lease.withProjectScope(async scope => (
+    Promise.all([
+      scope.portability.getLifecycleJournal(transferId),
+      scope.portability.getAuthorityTransferRecovery(transferId),
+    ])
+  ), signal ? { signal } : {});
+  if (
+    journal?.kind !== 'authority-transfer'
+    || journal.direction !== 'lan-to-cloud'
+    || recovery === undefined
+    || recovery.sourceAuthority.kind !== 'lan'
+    || recovery.targetAuthority.kind !== 'cloud'
+    || recovery.sourceHostMemberId === undefined
+    || recovery.targetHostMemberId !== undefined
+  ) return fail('recovery-required');
+  const evidence = decodeSourceEvidence(recovery.sourceProof);
+  if (
+    authorizedPrincipalId !== undefined
+    && evidence.principalId !== authorizedPrincipalId
+  ) return fail('authorization-denied');
+  return Object.freeze({ evidence, journal, recovery });
+}
+
+function checkpointAttempt(
+  exact: StoredTransfer,
+): PreparedProductionCheckpointAttempt {
+  return Object.freeze({
+    attemptKey: sha256(
+      `production-checkpoint\0${exact.journal.projectId}\0${exact.journal.operationId}`,
+    ),
+    expiresAt: exact.recovery.expiresAt,
+    operationId: exact.journal.operationId,
+    projectId: exact.journal.projectId,
+  });
+}
+
+function repositoryCheckpoint(
+  publication: InactiveRepositoryPublication,
+): ValidatedRepositoryCheckpoint {
+  return Object.freeze({
+    artifactKey: publication.artifactKey,
+    bundleByteCount: publication.bundleByteCount,
+    bundleInputDisposition: 'replayed',
+    bundleSha256: publication.bundleSha256,
+    markerSha256: publication.validationMarkerSha256,
+    objectFormat: publication.objectFormat,
+    operationId: publication.operationId,
+    projectId: publication.projectId,
+    refs: publication.refs,
+  });
+}
+
+function publicationFromRecovery(
+  exact: StoredTransfer,
+  repository: InactiveRepositoryPublicationPort,
+): InactiveRepositoryPublication {
+  const json = exact.recovery.inactivePublicationJson;
+  if (json === undefined) return fail('recovery-required');
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return fail('recovery-required');
+    }
+    const publication = parsed as InactiveRepositoryPublication;
+    if (!Array.isArray(publication.refs)) return fail('recovery-required');
+    const planned = repository.planInactive({
+      checkpoint: repositoryCheckpoint(publication),
+      placementGeneration: publication.placementGeneration,
+      repositoryStorageKey: publication.repositoryStorageKey,
+    });
+    if (
+      publication.projectId !== exact.journal.projectId
+      || publication.operationId !== exact.journal.operationId
+      || !isDeepStrictEqual(planned, publication)
+      || JSON.stringify(planned) !== json
+    ) return fail('recovery-required');
+    return planned;
+  } catch (error: unknown) {
+    if (error instanceof LanToCloudTransferCoordinatorError) throw error;
+    return fail('recovery-required');
+  }
+}
+
+async function validatedCheckpoint(
+  exact: StoredTransfer,
+  checkpoint: LanToCloudTransferCoordinatorOptions['checkpoint'],
+  repository: InactiveRepositoryPublicationPort,
+): Promise<ValidatedProjectCheckpoint> {
+  const input = {
+    attempt: checkpointAttempt(exact),
+    expectedProfile: 'authority-transfer',
+    expectedSourceAuthority: exact.recovery.sourceAuthority,
+    expectedTargetAuthority: exact.recovery.targetAuthority,
+  } as const;
+  let validated: ValidatedProjectCheckpoint;
+  if (exact.recovery.inactivePublicationJson === undefined) {
+    validated = await checkpoint.validateStaged(input);
+  } else {
+    const publication = publicationFromRecovery(exact, repository);
+    const repositoryState = repositoryCheckpoint(publication);
+    const verified = await repository.publishInactive({
+      checkpoint: repositoryState,
+      placementGeneration: publication.placementGeneration,
+      repositoryStorageKey: publication.repositoryStorageKey,
+    });
+    if (!isDeepStrictEqual(verified, publication)) {
+      return fail('recovery-required');
+    }
+    validated = await checkpoint.validateStagedWithRepository(
+      input,
+      repositoryState,
+    );
+  }
+  if (
+    validated.manifest.manifestSha256
+      !== exact.evidence.checkpointManifestSha256
+    || validated.manifest.projectId !== exact.journal.projectId
+    || validated.manifest.operationId !== exact.journal.operationId
+  ) return fail('invalid-checkpoint');
+  return validated;
+}
+
+function assertDurableRelinquishment(exact: StoredTransfer): void {
+  const proof = exact.recovery.relinquishmentProof;
+  if (
+    proof === undefined
+    || proof.projectId !== exact.journal.projectId
+    || proof.transferId !== exact.journal.operationId
+    || proof.sourceHostMemberId !== exact.recovery.sourceHostMemberId
+    || !isDeepStrictEqual(proof.sourceAuthority, exact.recovery.sourceAuthority)
+    || !isDeepStrictEqual(proof.targetAuthority, exact.recovery.targetAuthority)
+    || proof.checkpointSha256 !== exact.journal.checkpointSha256
+    || proof.batchRevision !== exact.journal.batchRevision
+    || proof.batchSha256 !== exact.journal.batchSha256
+  ) return fail('recovery-required');
+}
+
+async function advanceLifecycle(
+  clock: () => Date,
+  lease: PinnedProjectLease,
+  journal: ProjectLifecycleJournalRecord,
+  input: Readonly<{
+    readonly nextPhase: string;
+    readonly nextState?: 'active' | 'cancelled' | 'completed';
+    readonly scheduledAt: CollabIsoTimestamp;
+  }>,
+): Promise<void> {
+  await lease.withProjectScope(scope => scope.portability.advanceLifecycleJournal({
+    expectedPhase: journal.phase,
+    expectedState: journal.state,
+    nextPhase: input.nextPhase,
+    nextState: input.nextState ?? 'active',
+    operationId: journal.operationId,
+    scheduledAt: input.scheduledAt,
+    updatedAt: timestamp(clock, journal.updatedAt),
+  }));
+}
+
+export interface LanToCloudPostCutoverRecoveryOptions {
+  readonly activation: LanToCloudProjectActivationPort;
+  readonly checkpoint: LanToCloudTransferCoordinatorOptions['checkpoint'];
+  readonly clock?: () => Date;
+  readonly repository: InactiveRepositoryPublicationPort;
+}
+
+/**
+ * Recovers only the locally provable side of LAN-to-Cloud authority transfer.
+ * Before the relinquishment fence the source remains authoritative, so an
+ * offline maintenance process must wait for the external proof owner.
+ */
+export class LanToCloudPostCutoverRecovery
 implements ProjectLifecycleRecoveryOwner {
   readonly #activation: LanToCloudProjectActivationPort;
+  readonly #checkpoint: LanToCloudTransferCoordinatorOptions['checkpoint'];
+  readonly #clock: () => Date;
+  readonly #repository: InactiveRepositoryPublicationPort;
+
+  constructor(options: LanToCloudPostCutoverRecoveryOptions) {
+    this.#activation = options.activation;
+    this.#checkpoint = options.checkpoint;
+    this.#clock = options.clock ?? (() => new Date());
+    this.#repository = options.repository;
+  }
+
+  async recover(
+    input: RecoverProjectLifecycleInput,
+  ): Promise<ProjectLifecycleRecoveryOutcome> {
+    try {
+      if (
+        input.journal.kind !== 'authority-transfer'
+        || input.journal.direction !== 'lan-to-cloud'
+      ) return fail('recovery-required');
+      if (
+        input.journal.phase !== 'source-relinquished'
+        && input.journal.phase !== 'cloud-activated'
+        && input.journal.phase !== 'completed'
+      ) return 'waiting-for-external-proof';
+      let exact = await storedTransfer(
+        input.lease,
+        input.journal.operationId,
+      );
+      assertDurableRelinquishment(exact);
+      if (exact.journal.phase === 'source-relinquished') {
+        const checkpoint = await validatedCheckpoint(
+          exact,
+          this.#checkpoint,
+          this.#repository,
+        );
+        const publication = publicationFromRecovery(exact, this.#repository);
+        await this.#activation.activate({
+          activatedAt: timestamp(this.#clock, exact.journal.updatedAt),
+          checkpoint,
+          hostMemberId: exact.recovery.sourceHostMemberId as CollabMemberId,
+          hostPrincipalId: exact.evidence.principalId,
+          journal: exact.journal,
+          lease: input.lease,
+          publication,
+          receiptKeyId: exact.evidence.receiptKeyId,
+          recovery: exact.recovery,
+        });
+        exact = await storedTransfer(input.lease, input.journal.operationId);
+        assertDurableRelinquishment(exact);
+      }
+      if (exact.journal.phase === 'cloud-activated') {
+        await this.#checkpoint.discardAttempt(checkpointAttempt(exact));
+        await advanceLifecycle(this.#clock, input.lease, exact.journal, {
+          nextPhase: 'completed',
+          nextState: 'completed',
+          scheduledAt: exact.recovery.expiresAt,
+        });
+        return 'settled';
+      }
+      if (
+        exact.journal.phase !== 'completed'
+        || exact.journal.state !== 'completed'
+      ) return fail('recovery-required');
+      return 'settled';
+    } catch (error: unknown) {
+      dependency(error);
+    }
+  }
+}
+
+export class LanToCloudTransferCoordinator
+implements ProjectLifecycleRecoveryOwner {
   readonly #checkpoint: LanToCloudTransferCoordinatorOptions['checkpoint'];
   readonly #claimFactory: () => string;
   readonly #clock: () => Date;
   readonly #coordination: LanToCloudTransferCoordination;
   readonly #custodyReceiptIdFactory: () => string;
   readonly #pendingClaimBatches = new Map<string, PendingClaimBatch>();
+  readonly #postCutoverRecovery: LanToCloudPostCutoverRecovery;
   readonly #receiptIdFactory: () => string;
   readonly #receiptKeyId: string;
   readonly #receiptPublicKey: string;
@@ -533,7 +785,6 @@ implements ProjectLifecycleRecoveryOwner {
     ) {
       throw new TypeError('lan-to-cloud-transfer.options-invalid');
     }
-    this.#activation = options.activation;
     this.#checkpoint = options.checkpoint;
     this.#claimFactory = options.claimFactory ?? defaultClaim;
     this.#clock = options.clock ?? (() => new Date());
@@ -547,6 +798,12 @@ implements ProjectLifecycleRecoveryOwner {
     this.#receiptSigner = options.receiptSigner;
     this.#relinquishmentTrust = options.relinquishmentTrust;
     this.#repository = options.repository;
+    this.#postCutoverRecovery = new LanToCloudPostCutoverRecovery({
+      activation: options.activation,
+      checkpoint: options.checkpoint,
+      clock: this.#clock,
+      repository: options.repository,
+    });
     this.#repositoryStorageKeyFactory = options.repositoryStorageKeyFactory
       ?? defaultRepositoryStorageKey;
     this.#staging = options.staging;
@@ -1292,133 +1549,47 @@ implements ProjectLifecycleRecoveryOwner {
     signal?: AbortSignal,
     authorizedPrincipalId?: string,
   ): Promise<ExactTransfer> {
-    const [journal, recovery] = await lease.withProjectScope(async scope => (
-      Promise.all([
-        scope.portability.getLifecycleJournal(transferId),
-        scope.portability.getAuthorityTransferRecovery(transferId),
-      ])
-    ), signal ? { signal } : {});
-    if (
-      journal?.kind !== 'authority-transfer'
-      || journal.direction !== 'lan-to-cloud'
-      || recovery === undefined
-      || recovery.sourceAuthority.kind !== 'lan'
-      || recovery.targetAuthority.kind !== 'cloud'
-      || recovery.sourceHostMemberId === undefined
-      || recovery.targetHostMemberId !== undefined
-    ) return fail('recovery-required');
-    const evidence = decodeSourceEvidence(recovery.sourceProof);
-    if (
-      authorizedPrincipalId !== undefined
-      && evidence.principalId !== authorizedPrincipalId
-    ) return fail('authorization-denied');
+    const stored = await storedTransfer(
+      lease,
+      transferId,
+      signal,
+      authorizedPrincipalId,
+    );
     const proof = await settleBeforeCancellation(
       this.#relinquishmentTrust.verifySourceProof({
-        principalId: evidence.principalId,
-        proof: evidence.proof,
+        principalId: stored.evidence.principalId,
+        proof: stored.evidence.proof,
       }),
       signal,
     );
     if (!exactSourceProof(proof, {
-      checkpointManifestSha256: evidence.checkpointManifestSha256,
-      projectId: journal.projectId,
-      sourceAuthorityGeneration: recovery.sourceAuthority.generation,
-      sourceHostMemberId: recovery.sourceHostMemberId,
-      targetAuthorityGeneration: recovery.targetAuthority.generation,
-      targetUrl: recovery.targetUrl,
+      checkpointManifestSha256: stored.evidence.checkpointManifestSha256,
+      projectId: stored.journal.projectId,
+      sourceAuthorityGeneration: stored.recovery.sourceAuthority.generation,
+      sourceHostMemberId: stored.recovery.sourceHostMemberId as CollabMemberId,
+      targetAuthorityGeneration: stored.recovery.targetAuthority.generation,
+      targetUrl: stored.recovery.targetUrl,
       transferId,
     })) return fail('recovery-required');
-    return Object.freeze({ evidence, journal, proof, recovery });
+    return Object.freeze({ ...stored, proof });
   }
 
   #attempt(exact: ExactTransfer): PreparedProductionCheckpointAttempt {
-    return Object.freeze({
-      attemptKey: sha256(
-        `production-checkpoint\0${exact.journal.projectId}\0${exact.journal.operationId}`,
-      ),
-      expiresAt: exact.recovery.expiresAt,
-      operationId: exact.journal.operationId,
-      projectId: exact.journal.projectId,
-    });
+    return checkpointAttempt(exact);
   }
 
   async #validatedCheckpoint(exact: ExactTransfer): Promise<ValidatedProjectCheckpoint> {
-    const input = {
-      attempt: this.#attempt(exact),
-      expectedProfile: 'authority-transfer',
-      expectedSourceAuthority: exact.recovery.sourceAuthority,
-      expectedTargetAuthority: exact.recovery.targetAuthority,
-    } as const;
-    let checkpoint: ValidatedProjectCheckpoint;
-    if (exact.recovery.inactivePublicationJson === undefined) {
-      checkpoint = await this.#checkpoint.validateStaged(input);
-    } else {
-      const publication = this.#publicationFromRecovery(exact);
-      const repository = this.#repositoryCheckpoint(publication);
-      const verified = await this.#repository.publishInactive({
-        checkpoint: repository,
-        placementGeneration: publication.placementGeneration,
-        repositoryStorageKey: publication.repositoryStorageKey,
-      });
-      if (!isDeepStrictEqual(verified, publication)) {
-        return fail('recovery-required');
-      }
-      checkpoint = await this.#checkpoint.validateStagedWithRepository(
-        input,
-        repository,
-      );
-    }
-    if (
-      checkpoint.manifest.manifestSha256
-        !== exact.evidence.checkpointManifestSha256
-      || checkpoint.manifest.projectId !== exact.journal.projectId
-      || checkpoint.manifest.operationId !== exact.journal.operationId
-    ) return fail('invalid-checkpoint');
-    return checkpoint;
+    return validatedCheckpoint(exact, this.#checkpoint, this.#repository);
   }
 
   #repositoryCheckpoint(
     publication: InactiveRepositoryPublication,
   ): ValidatedRepositoryCheckpoint {
-    return Object.freeze({
-      artifactKey: publication.artifactKey,
-      bundleByteCount: publication.bundleByteCount,
-      bundleInputDisposition: 'replayed',
-      bundleSha256: publication.bundleSha256,
-      markerSha256: publication.validationMarkerSha256,
-      objectFormat: publication.objectFormat,
-      operationId: publication.operationId,
-      projectId: publication.projectId,
-      refs: publication.refs,
-    });
+    return repositoryCheckpoint(publication);
   }
 
   #publicationFromRecovery(exact: ExactTransfer): InactiveRepositoryPublication {
-    const json = exact.recovery.inactivePublicationJson;
-    if (json === undefined) return fail('recovery-required');
-    try {
-      const parsed: unknown = JSON.parse(json);
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        return fail('recovery-required');
-      }
-      const publication = parsed as InactiveRepositoryPublication;
-      if (!Array.isArray(publication.refs)) return fail('recovery-required');
-      const planned = this.#repository.planInactive({
-        checkpoint: this.#repositoryCheckpoint(publication),
-        placementGeneration: publication.placementGeneration,
-        repositoryStorageKey: publication.repositoryStorageKey,
-      });
-      if (
-        publication.projectId !== exact.journal.projectId
-        || publication.operationId !== exact.journal.operationId
-        || !isDeepStrictEqual(planned, publication)
-        || JSON.stringify(planned) !== json
-      ) return fail('recovery-required');
-      return planned;
-    } catch (error: unknown) {
-      if (error instanceof LanToCloudTransferCoordinatorError) throw error;
-      return fail('recovery-required');
-    }
+    return publicationFromRecovery(exact, this.#repository);
   }
 
   async #ensurePublicationPlan(
@@ -1503,36 +1674,12 @@ implements ProjectLifecycleRecoveryOwner {
     lease: PinnedProjectLease,
     transferId: string,
   ): Promise<void> {
-    let exact = await this.#exactTransfer(lease, transferId);
-    if (exact.journal.phase === 'source-relinquished') {
-      const checkpoint = await this.#validatedCheckpoint(exact);
-      const publication = this.#publicationFromRecovery(exact);
-      await this.#activation.activate({
-        activatedAt: timestamp(this.#clock, exact.journal.updatedAt),
-        checkpoint,
-        hostMemberId: exact.proof.sourceHostMemberId,
-        hostPrincipalId: exact.evidence.principalId,
-        journal: exact.journal,
-        lease,
-        publication,
-        receiptKeyId: exact.evidence.receiptKeyId,
-        recovery: exact.recovery,
-      });
-      exact = await this.#exactTransfer(lease, transferId);
-      if (exact.journal.phase !== 'cloud-activated') {
-        return fail('recovery-required');
-      }
-    }
-    if (exact.journal.phase === 'cloud-activated') {
-      await this.#checkpoint.discardAttempt(this.#attempt(exact));
-      await this.#advance(lease, exact.journal, {
-        nextPhase: 'completed',
-        nextState: 'completed',
-        scheduledAt: exact.recovery.expiresAt,
-      });
-      return;
-    }
-    if (exact.journal.phase !== 'completed') return fail('state-conflict');
+    const journal = await lease.withProjectScope(scope => (
+      scope.portability.getLifecycleJournal(transferId)
+    ));
+    if (journal === undefined) return fail('recovery-required');
+    const outcome = await this.#postCutoverRecovery.recover({ journal, lease });
+    if (outcome !== 'settled') return fail('recovery-required');
   }
 
   #assertRelinquishment(
@@ -1723,15 +1870,7 @@ implements ProjectLifecycleRecoveryOwner {
       readonly scheduledAt: CollabIsoTimestamp;
     }>,
   ): Promise<void> {
-    await lease.withProjectScope(scope => scope.portability.advanceLifecycleJournal({
-      expectedPhase: journal.phase,
-      expectedState: journal.state,
-      nextPhase: input.nextPhase,
-      nextState: input.nextState ?? 'active',
-      operationId: journal.operationId,
-      scheduledAt: input.scheduledAt,
-      updatedAt: timestamp(this.#clock, journal.updatedAt),
-    }));
+    await advanceLifecycle(this.#clock, lease, journal, input);
   }
 
   async #requireStatus(

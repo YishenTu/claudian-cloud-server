@@ -17,11 +17,17 @@ import { Client } from 'pg';
 
 import { PostgresCoordination } from '../../src/coordination/postgres/PostgresCoordination.js';
 import { PostgresMigrator } from '../../src/coordination/postgres/PostgresMigrator.js';
+import { createMaintenanceAuthorityTransferRecovery } from '../../src/composition/MaintenanceAuthorityTransferRecovery.js';
 import type {
   PinnedProjectLease,
   ProjectScope,
 } from '../../src/coordination/ProjectCoordination.js';
 import type { ValidatedProjectCheckpoint } from '../../src/project-authority/checkpoint/ProjectCheckpointCoordinator.js';
+import { ProjectRecoveryError } from '../../src/project-authority/admission/ProjectWriteAdmission.js';
+import {
+  ProjectLifecycleRecoveryDispatcher,
+  type ProjectLifecycleRecoveryOwner,
+} from '../../src/project-authority/lifecycle/ProjectLifecycleRecoveryDispatcher.js';
 import {
   LanToCloudTransferCoordinator,
   LanToCloudTransferCoordinatorError,
@@ -551,22 +557,25 @@ describe('LAN-to-Cloud cross-store recovery', () => {
       let now = Date.parse(CREATED_AT) - 1_000;
       const claimSequences = new Map<string, number>();
       const activation = new LanToCloudProjectActivation();
+      const checkpointPort = (transfer: TransferFixture) => ({
+        discardAttempt: (
+          attempt: ValidatedProjectCheckpoint['attempt'],
+        ) => importer.discardCheckpoint(attempt).then(() => undefined),
+        validateStaged: () => Promise.resolve(transfer.checkpoint),
+        validateStagedWithRepository: (
+          _input: unknown,
+          verifiedRepository: ValidatedProjectCheckpoint['repository'],
+        ) => Promise.resolve(Object.freeze({
+          ...transfer.checkpoint,
+          repository: verifiedRepository,
+        })),
+      });
       const createCoordinator = (
         transfer: TransferFixture,
         injected = false,
       ) => new LanToCloudTransferCoordinator({
         activation,
-        checkpoint: {
-          discardAttempt: attempt => importer.discardCheckpoint(attempt).then(() => undefined),
-          validateStaged: () => Promise.resolve(transfer.checkpoint),
-          validateStagedWithRepository: (
-            _input,
-            verifiedRepository,
-          ) => Promise.resolve(Object.freeze({
-            ...transfer.checkpoint,
-            repository: verifiedRepository,
-          })),
-        },
+        checkpoint: checkpointPort(transfer),
         claimFactory: () => {
           const sequence = (claimSequences.get(transfer.transferId) ?? 0) + 1;
           claimSequences.set(transfer.transferId, sequence);
@@ -596,6 +605,41 @@ describe('LAN-to-Cloud cross-store recovery', () => {
           })),
         },
       });
+      const maintenanceRecovery = (
+        transfer: TransferFixture,
+        injected = false,
+      ) => {
+        const unavailable: ProjectLifecycleRecoveryOwner = {
+          recover: () => Promise.reject(new Error('unexpected-recovery-owner')),
+        };
+        const exactCoordination = injected
+            ? new FaultInjectingCoordination(coordination, fault)
+            : coordination;
+        const authorityTransfer = createMaintenanceAuthorityTransferRecovery({
+          checkpoint: checkpointPort(transfer),
+          coordination: exactCoordination,
+          environmentIdentity: 'test-authority-volume',
+          repository,
+        });
+        const dispatcher = new ProjectLifecycleRecoveryDispatcher({
+          coordination: exactCoordination,
+          owners: {
+            authorityTransfer: authorityTransfer.owner,
+            backup: unavailable,
+            deletion: unavailable,
+            export: unavailable,
+            leave: unavailable,
+            retire: unavailable,
+          },
+        });
+        return Object.freeze({
+          close: async (): Promise<void> => {
+            dispatcher.close();
+            await authorityTransfer.close();
+          },
+          recoverAll: () => dispatcher.recoverAll(coordination),
+        });
+      };
       try {
         const activationTransfer = await importTransfer(
           root,
@@ -737,16 +781,42 @@ describe('LAN-to-Cloud cross-store recovery', () => {
         } finally {
           await failedActivationLease.close();
         }
-        let completedActivation;
+        fault.nextPhase = 'completed';
+        const failingMaintenanceRecovery = maintenanceRecovery(
+          activationTransfer,
+          true,
+        );
+        await assert.rejects(
+          failingMaintenanceRecovery.recoverAll(),
+          error => error instanceof ProjectRecoveryError
+            && error.code === 'dependency-failed',
+        );
+        await failingMaintenanceRecovery.close();
+        assert.equal(fault.nextPhase, undefined);
+        const interruptedMaintenanceLease = await coordination.acquireProjectLease(
+          activationTransfer.projectId,
+        );
         try {
-          completedActivation = await recoveryCoordinator.commitRelinquishment({
-            principalId: activationTransfer.principalId,
-            request: relinquishmentRequest,
-          });
-        } catch (error: unknown) {
-          throw new Error('LAN-to-Cloud activation replay failed', { cause: error });
+          assert.equal(await interruptedMaintenanceLease.withProjectScope(
+            scope => scope.portability.getLifecycleJournal(
+              activationTransfer.transferId,
+            ).then(journal => journal?.phase),
+          ), 'cloud-activated');
+        } finally {
+          await interruptedMaintenanceLease.close();
         }
-        assert.equal(completedActivation.phase, 'completed');
+        assert.equal(await importer.discardCheckpoint(
+          activationTransfer.checkpoint.attempt,
+        ), 'replayed');
+        const completedMaintenanceRecovery = maintenanceRecovery(activationTransfer);
+        await completedMaintenanceRecovery.recoverAll();
+        await completedMaintenanceRecovery.close();
+        assert.equal(
+          (await coordination.listRecoveryCandidates()).candidates.some(
+            candidate => candidate.operationId === activationTransfer.transferId,
+          ),
+          false,
+        );
         await access(join(
           repositoryRoot,
           Buffer.from(activationTransfer.projectId).toString('hex'),
@@ -764,6 +834,9 @@ describe('LAN-to-Cloud cross-store recovery', () => {
             hostBinding: await scope.portability.findProjectPrincipalBinding(
               activationTransfer.principalId,
             ),
+            journal: await scope.portability.getLifecycleJournal(
+              activationTransfer.transferId,
+            ),
             members: await scope.listMemberships(),
             offlineBinding: await scope.portability.findProjectPrincipalBinding(
               'principal:offline',
@@ -775,6 +848,9 @@ describe('LAN-to-Cloud cross-store recovery', () => {
               'request-imported',
               { limit: 10 },
             ),
+            status: await scope.portability.getAuthorityTransferStatus(
+              activationTransfer.transferId,
+            ),
             ticket: await scope.collaboration.tickets.find('ticket-imported'),
             ticketComments: await scope.collaboration.tickets.listComments(
               'ticket-imported',
@@ -784,6 +860,13 @@ describe('LAN-to-Cloud cross-store recovery', () => {
               .hasPendingResolve('ticket-imported'),
           }));
           assert.equal(activated.project?.authorityGeneration, 2);
+          assert.ok(activated.journal);
+          assert.equal(activated.journal.phase, 'completed');
+          assert.equal(activated.journal.state, 'completed');
+          assert.ok(activated.status);
+          assert.equal(activated.status.direction, 'lan-to-cloud');
+          assert.equal(activated.status.phase, 'completed');
+          assert.equal(activated.status.state, 'completed');
           assert.deepEqual(
             activated.members.map(member => member.memberId).sort(),
             [

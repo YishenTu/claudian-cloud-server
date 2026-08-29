@@ -143,6 +143,7 @@ restore_environment_file="${CLAUDIAN_DEPLOY_RESTORE_ENV_FILE:-}"
 restore_migration_environment_file="${CLAUDIAN_DEPLOY_RESTORE_MIGRATION_ENV_FILE:-}"
 restore_postgres_environment_file="${CLAUDIAN_DEPLOY_RESTORE_POSTGRES_ENV_FILE:-}"
 restore_postgres_port="${CLAUDIAN_DEPLOY_RESTORE_POSTGRES_PORT:-}"
+restore_ownership_id="${CLAUDIAN_DEPLOY_RESTORE_OWNERSHIP_ID:-}"
 compose_file='deploy/compose.yaml'
 dockerfile='deploy/Dockerfile'
 
@@ -171,7 +172,8 @@ command -v sync >/dev/null 2>&1 || fail 'durable-state-tool-unavailable'
       && "$restore_migration_environment_file" != "$migration_environment_file" \
       && "$restore_postgres_environment_file" != "$postgres_environment_file" \
       && "$restore_postgres_port" =~ ^[1-9][0-9]{0,4}$ \
-      && "$restore_postgres_port" != "$postgres_port" ]] || \
+      && "$restore_postgres_port" != "$postgres_port" \
+      && "$restore_ownership_id" =~ ^[0-9a-f]{64}$ ]] || \
   fail 'restore-target-required'
 
 git fetch --prune origin
@@ -222,6 +224,7 @@ restore_compose_for() {
   CLAUDIAN_CLOUD_IMAGE="$selected_image" \
   CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID="$operation_id" \
   CLAUDIAN_CLOUD_POSTGRES_PORT="$restore_postgres_port" \
+  CLAUDIAN_CLOUD_RESTORE_OWNERSHIP_ID="$restore_ownership_id" \
   CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED="${CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED:-true}" \
     "${compose[@]}" --project-name "$restore_compose_project" "$@"
 }
@@ -309,6 +312,7 @@ run_restore_maintenance() {
 
 reset_restore_target() {
   local selected_image="$1"
+  restore_target_is_owned_or_empty "$selected_image" || return 1
   restore_compose_for "$selected_image" down \
     --volumes --remove-orphans >/dev/null 2>&1 || return 1
   restore_compose_for "$selected_image" up \
@@ -321,8 +325,52 @@ reset_restore_target() {
 }
 
 discard_restore_target() {
+  restore_target_is_owned_or_empty "$1" || return 1
   restore_compose_for "$1" down \
     --volumes --remove-orphans >/dev/null 2>&1
+}
+
+restore_target_is_owned_or_empty() {
+  local selected_image="$1"
+  local owned_volume_count=0
+  local owner=''
+  local volume=''
+  local volume_inventory=''
+  volume_inventory="$(docker volume ls --format '{{.Name}}' 2>/dev/null)" || \
+    return 1
+  for volume in \
+    "${restore_compose_project}_cloud-authority" \
+    "${restore_compose_project}_postgres-data"; do
+    local observed_volume=''
+    local volume_present=0
+    while IFS= read -r observed_volume; do
+      if [[ "$observed_volume" == "$volume" ]]; then
+        volume_present=1
+        break
+      fi
+    done <<< "$volume_inventory"
+    if [[ $volume_present -eq 1 ]]; then
+      owner="$(docker volume inspect \
+        --format '{{ index .Labels "com.claudian.restore-owner" }}' \
+        "$volume" 2>/dev/null)" || return 1
+      [[ "$owner" == "$restore_ownership_id" ]] || return 1
+      owned_volume_count=$((owned_volume_count + 1))
+    fi
+  done
+  local containers=''
+  containers="$(restore_compose_for "$selected_image" \
+    ps --all --quiet 2>/dev/null)" || return 1
+  local container=''
+  if [[ -n "$containers" && $owned_volume_count -eq 0 ]]; then
+    return 1
+  fi
+  while IFS= read -r container; do
+    [[ -z "$container" ]] && continue
+    owner="$(docker inspect \
+      --format '{{ index .Config.Labels "com.claudian.restore-owner" }}' \
+      "$container" 2>/dev/null)" || return 1
+    [[ "$owner" == "$restore_ownership_id" ]] || return 1
+  done <<< "$containers"
 }
 
 sync_attempt_file() {
@@ -640,6 +688,14 @@ if ! compose_for "$previous_image" stop cloud-server; then
 fi
 
 if [[ "$attempt_phase" == 'forward-only' ]]; then
+  if start_image "$candidate_image" true; then
+    discard_attempt_state || fail 'deployment-attempt-state-settlement-failed'
+    printf 'deployment.ready revision=%s image=%s\n' \
+      "$revision" "$candidate_image"
+    exit 0
+  fi
+  compose_for "$candidate_image" stop cloud-server >/dev/null 2>&1 || \
+    fail 'forward-recovery-runtime-stop-failed'
   recovery_schema="$(read_current_schema "$candidate_image")" || \
     fail 'forward-recovery-schema-unknown'
   is_schema_version "$recovery_schema" || \

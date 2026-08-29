@@ -8,6 +8,71 @@ import {
 import type { CreateBackupExportInput } from '../../src/project-authority/checkpoint/BackupExportCoordinator.js';
 
 describe('EnvironmentBackupCommand', () => {
+  it('drains recovery before enumerating every active Project', async () => {
+    const events: string[] = [];
+    const command = new EnvironmentBackupCommand({
+      backup: {
+        create: input => {
+          events.push(`backup:${input.projectId}`);
+          return Promise.resolve(Object.freeze({
+            checkpointSha256: input.projectId === 'project-a'
+              ? 'a'.repeat(64)
+              : 'b'.repeat(64),
+            createdAt: '2026-08-29T00:00:00.000Z',
+            expiresAt: input.expiresAt,
+            operationId: input.operationId,
+            profile: 'backup' as const,
+            projectId: input.projectId,
+            state: 'published' as const,
+          }));
+        },
+      },
+      catalog: { publish: () => Promise.resolve('published') },
+      metadata: {
+        authorityId: 'authority-a',
+        authorityVolumeIdentity: 'volume-a',
+        coordinationSchemaVersion: 9,
+        repositoryFormatVersion: 1,
+        restoreEpoch: 1,
+        serverBuild: 'development',
+      },
+      projects: {
+        list: () => {
+          events.push('list');
+          assert.deepEqual(events, ['recover', 'list']);
+          return Promise.resolve({
+            nextCursor: undefined,
+            projectIds: ['project-a', 'project-relinquished'],
+          });
+        },
+        readFacts: projectId => Promise.resolve({
+          authorityGeneration: projectId === 'project-a' ? 1 : 2,
+          placementGeneration: 1,
+        }),
+      },
+      recovery: {
+        recoverAll: () => {
+          events.push('recover');
+          return Promise.resolve();
+        },
+      },
+      terminalRecords: { verify: () => assert.fail('unexpected terminal records') },
+    });
+
+    const result = await command.run({
+      catalogId: 'catalog-after-recovery',
+      signal: new AbortController().signal,
+    });
+
+    assert.equal(result.projectCount, 2);
+    assert.deepEqual(events, [
+      'recover',
+      'list',
+      'backup:project-a',
+      'backup:project-relinquished',
+    ]);
+  });
+
   it('publishes retained continuity for a terminal-only Project', async () => {
     const projectId = '11111111-1111-4111-8111-111111111111';
     const records = Object.freeze([Object.freeze({
@@ -55,6 +120,7 @@ describe('EnvironmentBackupCommand', () => {
         readFacts: () => assert.fail('unexpected facts'),
         readTerminalRecords: () => Promise.resolve(records as never),
       },
+      recovery: { recoverAll: () => Promise.resolve() },
       terminalRecords: {
         verify: value => {
           terminalVerified = true;
@@ -142,6 +208,7 @@ describe('EnvironmentBackupCommand', () => {
           return Promise.resolve(facts);
         },
       },
+      recovery: { recoverAll: () => Promise.resolve() },
       terminalRecords: { verify: () => assert.fail('unexpected terminal records') },
     });
 
@@ -173,6 +240,69 @@ describe('EnvironmentBackupCommand', () => {
     );
   });
 
+  it('rejects a Project that becomes terminal after its active checkpoint', async () => {
+    const projectId = '11111111-1111-4111-8111-111111111111';
+    let catalogPublished = false;
+    const command = new EnvironmentBackupCommand({
+      backup: {
+        create: input => Promise.resolve(Object.freeze({
+          checkpointSha256: 'a'.repeat(64),
+          createdAt: '2026-08-29T00:00:00.000Z',
+          expiresAt: input.expiresAt,
+          operationId: input.operationId,
+          profile: 'backup' as const,
+          projectId: input.projectId,
+          state: 'published' as const,
+        })),
+      },
+      catalog: {
+        publish: () => {
+          catalogPublished = true;
+          return Promise.resolve('published');
+        },
+        publishTerminalProject: () => assert.fail('unexpected terminal publication'),
+      },
+      metadata: {
+        authorityId: 'authority-a',
+        authorityVolumeIdentity: 'volume-a',
+        coordinationSchemaVersion: 10,
+        repositoryFormatVersion: 1,
+        restoreEpoch: 1,
+        serverBuild: 'development',
+      },
+      projects: {
+        list: () => Promise.resolve({
+          nextCursor: undefined,
+          projectIds: [projectId],
+        }),
+        listTerminal: () => Promise.resolve({
+          nextCursor: undefined,
+          projectIds: [projectId],
+        }),
+        readFacts: () => Promise.resolve({
+          authorityGeneration: 1,
+          placementGeneration: 1,
+        }),
+        readTerminalRecords: () => assert.fail('unexpected terminal read'),
+      },
+      recovery: { recoverAll: () => Promise.resolve() },
+      terminalRecords: { verify: () => assert.fail('unexpected terminal verify') },
+    });
+
+    await assert.rejects(
+      command.run({
+        catalogId: 'catalog-classification-drift',
+        signal: new AbortController().signal,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof EnvironmentBackupCommandError);
+        assert.equal(error.code, 'state-conflict');
+        return true;
+      },
+    );
+    assert.equal(catalogPublished, false);
+  });
+
   it('rejects an empty authority and pre-aborted operation', async () => {
     const command = new EnvironmentBackupCommand({
       backup: { create: () => assert.fail('unexpected backup') },
@@ -189,6 +319,7 @@ describe('EnvironmentBackupCommand', () => {
         list: () => Promise.resolve({ nextCursor: undefined, projectIds: [] }),
         readFacts: () => assert.fail('unexpected facts'),
       },
+      recovery: { recoverAll: () => Promise.resolve() },
       terminalRecords: { verify: () => assert.fail('unexpected terminal records') },
     });
     await assert.rejects(

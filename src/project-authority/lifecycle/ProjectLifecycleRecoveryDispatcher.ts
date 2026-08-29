@@ -8,6 +8,7 @@ import {
 
 import type {
   RecoveryCandidate,
+  RecoveryCandidateCatalog,
 } from '../../coordination/DevelopmentBootstrapPersistence.js';
 import type {
   ProjectLifecycleJournalRecord,
@@ -192,11 +193,36 @@ implements ProjectLifecycleRecoveryPort {
     return this.#drainProject(projectId, true);
   }
 
+  async recoverAll(catalog: RecoveryCandidateCatalog): Promise<void> {
+    let after;
+    for (;;) {
+      if (this.#isClosed()) fail('closed');
+      let page;
+      try {
+        page = await catalog.listRecoveryCandidates(
+          after === undefined ? undefined : { after },
+        );
+      } catch (error: unknown) {
+        if (error instanceof ProjectRecoveryError) throw error;
+        return fail('dependency-failed');
+      }
+      for (const candidate of page.candidates) {
+        if (this.#isClosed()) fail('closed');
+        await this.#recoverCandidate(snapshotCandidate(candidate), true);
+      }
+      if (page.nextCursor === undefined) return;
+      after = page.nextCursor;
+    }
+  }
+
   close(): void {
     this.#closed = true;
   }
 
-  async #recoverCandidate(snapshot: ExactCandidate): Promise<void> {
+  async #recoverCandidate(
+    snapshot: ExactCandidate,
+    rejectWaiting = false,
+  ): Promise<void> {
     const observed = await this.#withProjectLease(snapshot.projectId, async lease => {
       const journal = await lease.withProjectScope(scope => (
         scope.portability.getLifecycleJournal(snapshot.operationId)
@@ -206,7 +232,10 @@ implements ProjectLifecycleRecoveryPort {
       return journal;
     });
     const recovered = await this.#recoverObserved(observed);
-    if (recovered.outcome === 'waiting-for-external-proof') return;
+    if (recovered.outcome === 'waiting-for-external-proof') {
+      if (rejectWaiting) fail('recovery-required');
+      return;
+    }
     await this.#drainProject(snapshot.projectId, false, recovered.journal);
   }
 

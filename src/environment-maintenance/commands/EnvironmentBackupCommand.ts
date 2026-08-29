@@ -7,6 +7,7 @@ import {
 } from '@claudian-collab/protocol';
 import type { TerminalProjectContinuityRecord } from '../../coordination/ProjectCheckpointPersistence.js';
 
+import { ProjectRecoveryError } from '../../project-authority/admission/ProjectWriteAdmission.js';
 import {
   BackupExportCoordinatorError,
   type BackupExportCoordinator,
@@ -81,6 +82,9 @@ export interface EnvironmentBackupCommandOptions {
   readonly catalog: EnvironmentBackupCatalogPublicationPort;
   readonly metadata: BackupExportMetadata;
   readonly projects: EnvironmentBackupProjectCatalogPort;
+  readonly recovery: Readonly<{
+    recoverAll(): Promise<void>;
+  }>;
   readonly terminalRecords: Readonly<{
     verify(records: readonly TerminalProjectContinuityRecord[]): Promise<void>;
   }>;
@@ -129,6 +133,10 @@ function mapError(error: unknown, signal: AbortSignal): never {
       || error.code === 'invalid-checkpoint'
     )
   ) return fail('state-conflict');
+  if (
+    error instanceof ProjectRecoveryError
+    && error.code === 'recovery-required'
+  ) return fail('state-conflict');
   return fail('dependency-failed');
 }
 
@@ -137,6 +145,7 @@ export class EnvironmentBackupCommand {
   readonly #catalog: EnvironmentBackupCommandOptions['catalog'];
   readonly #metadata: BackupExportMetadata;
   readonly #projects: EnvironmentBackupCommandOptions['projects'];
+  readonly #recovery: EnvironmentBackupCommandOptions['recovery'];
   readonly #terminalRecords: EnvironmentBackupCommandOptions['terminalRecords'];
 
   constructor(options: EnvironmentBackupCommandOptions) {
@@ -144,6 +153,7 @@ export class EnvironmentBackupCommand {
     this.#catalog = options.catalog;
     this.#metadata = Object.freeze({ ...options.metadata });
     this.#projects = options.projects;
+    this.#recovery = options.recovery;
     this.#terminalRecords = options.terminalRecords;
   }
 
@@ -154,6 +164,8 @@ export class EnvironmentBackupCommand {
     try {
       active(input.signal);
       if (!isCollabOpaqueId(input.catalogId)) return fail('state-conflict');
+      await this.#recovery.recoverAll();
+      active(input.signal);
       let createdAt: string | undefined;
       const seen = new Set<string>();
       const projects: CollabProjectId[] = [];
@@ -231,7 +243,8 @@ export class EnvironmentBackupCommand {
             !isCollabProjectId(projectId)
             || (previous !== undefined && previous >= projectId)
           ) return fail('state-conflict');
-          if (!seen.has(projectId)) terminalProjects.push(projectId);
+          if (seen.has(projectId)) return fail('state-conflict');
+          terminalProjects.push(projectId);
           previous = projectId;
         }
         if (page.nextCursor === undefined) break;

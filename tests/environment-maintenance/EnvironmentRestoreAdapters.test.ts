@@ -28,6 +28,7 @@ import { EnvironmentRestoreCoordinationAdapter } from '../../src/environment-mai
 import { EnvironmentRestoreContinuityVerifier } from '../../src/environment-maintenance/restore/EnvironmentRestoreContinuityVerifier.js';
 import { EnvironmentRestoreRepositoryAdapter } from '../../src/environment-maintenance/restore/EnvironmentRestoreRepositoryAdapter.js';
 import { FileEnvironmentBackupCatalogSource } from '../../src/environment-maintenance/restore/FileEnvironmentBackupCatalogSource.js';
+import { EnvironmentBackupCatalogVerifierError } from '../../src/environment-maintenance/restore/EnvironmentBackupCatalog.js';
 import { createTerminalProjectContinuityArtifact } from '../../src/environment-maintenance/restore/TerminalProjectContinuityArtifact.js';
 import {
   PublishedEnvironmentBackupSource,
@@ -200,7 +201,10 @@ function project(checkpointSha256: string): EnvironmentRestoreProject {
   });
 }
 
-function publishedSource(includeCheckpoint = true) {
+function publishedSource(options: Readonly<{
+  readonly failReservation?: boolean;
+  readonly failVerification?: boolean;
+}> = {}) {
   const exactManifest = manifest();
   const manifestBytes = Buffer.from(
     encodeCollabProjectBackupCheckpointManifestCanonicalJson(exactManifest),
@@ -253,19 +257,35 @@ function publishedSource(includeCheckpoint = true) {
   const repositoryCapture: RepositoryCheckpointCapturePort = {
     capture: () => Promise.reject(new Error('not-used')),
     discardCapture: () => Promise.resolve('replayed'),
-    discardCaptureOperation: () => Promise.resolve('replayed'),
+    discardCaptureOperation: () => {
+      events.push('checkpoint-released');
+      return Promise.resolve('replayed');
+    },
     inventoryRefs: () => Promise.resolve(exactManifest.refs),
     readCapture: () => Promise.reject(new Error('not-used')),
-    reserveCaptureOperation: projectId => Promise.resolve(Object.freeze({
-      close: () => Promise.resolve(),
-      projectId,
-    })),
+    reserveCaptureOperation: projectId => {
+      if (options.failReservation === true) {
+        events.push('reservation-failed');
+        return Promise.reject(new Error('reservation-failed'));
+      }
+      return Promise.resolve(Object.freeze({
+        close: () => {
+          events.push('reservation-closed');
+          return Promise.resolve();
+        },
+        projectId,
+      }));
+    },
     verifyArtifact: async (_reservation, input) => {
       const chunks: Buffer[] = [];
       for await (const chunk of input.body) chunks.push(Buffer.from(chunk));
       const bytes = Buffer.concat(chunks);
       assert.equal(bytes.length, input.expectedByteCount);
       assert.equal(sha256(bytes), input.expectedSha256);
+      if (options.failVerification === true) {
+        events.push('checkpoint-verification-failed');
+        throw new Error('verification-failed');
+      }
       events.push('checkpoint-verified');
       return Object.freeze({
         artifactKey: 'f'.repeat(64),
@@ -295,7 +315,7 @@ function publishedSource(includeCheckpoint = true) {
   });
   const source = new PublishedEnvironmentBackupSource({
     catalog: { readCatalog: () => Promise.resolve({}) },
-    ...(includeCheckpoint ? { checkpoint } : {}),
+    checkpoint,
     publication,
   });
   return Object.freeze({ exactManifest, events, source });
@@ -319,8 +339,22 @@ function catalog(exactProject: EnvironmentRestoreProject): EnvironmentRestoreCat
 }
 
 describe('production environment restore adapters', () => {
+  it('requires the common repository verifier before reading a Project backup', () => {
+    assert.throws(
+      () => new PublishedEnvironmentBackupSource({
+        catalog: { readCatalog: () => Promise.resolve({}) },
+        checkpoint: undefined as never,
+        publication: {
+          inspectAttempt: () => assert.fail('unexpected attempt inspection'),
+          readArtifact: () => assert.fail('unexpected artifact read'),
+        },
+      }),
+      /published-environment-backup-source\.options-invalid/u,
+    );
+  });
+
   it('verifies a self-contained backup before the clean target database exists', async () => {
-    const { exactManifest, source } = publishedSource(false);
+    const { exactManifest, events, source } = publishedSource();
     const exactProject = project(exactManifest.manifestSha256);
     const backup = await source.readProjectBackup({
       project: exactProject,
@@ -328,6 +362,44 @@ describe('production environment restore adapters', () => {
     });
     assert.equal(backup.manifest.projectId, PROJECT_ID);
     assert.deepEqual(backup.records, backupRecords());
+    assert.deepEqual(events, [
+      'checkpoint-verified',
+      'checkpoint-released',
+      'reservation-closed',
+    ]);
+  });
+
+  it('releases exact verification scratch after repository verification fails', async () => {
+    const { exactManifest, events, source } = publishedSource({
+      failVerification: true,
+    });
+    await assert.rejects(
+      source.readProjectBackup({
+        project: project(exactManifest.manifestSha256),
+        signal: new AbortController().signal,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof EnvironmentBackupCatalogVerifierError);
+        assert.equal(error.code, 'dependency-failed');
+        return true;
+      },
+    );
+    assert.deepEqual(events, [
+      'checkpoint-verification-failed',
+      'checkpoint-released',
+      'reservation-closed',
+    ]);
+  });
+
+  it('does not release verification scratch without owning its reservation', async () => {
+    const { exactManifest, events, source } = publishedSource({
+      failReservation: true,
+    });
+    await assert.rejects(source.readProjectBackup({
+      project: project(exactManifest.manifestSha256),
+      signal: new AbortController().signal,
+    }));
+    assert.deepEqual(events, ['reservation-failed']);
   });
 
   it('imports and verifies terminal continuity without a Project repository', async () => {
@@ -412,6 +484,12 @@ describe('production environment restore adapters', () => {
       catalog: {
         readCatalog: () => assert.fail('unexpected catalog read'),
         readTerminalArtifact: () => Promise.resolve(artifact.json),
+      },
+      checkpoint: {
+        readPublishedOutboundRecords: () => assert.fail('unexpected record read'),
+        releaseOutboundOperation: () => assert.fail('unexpected release'),
+        reserveOutbound: () => assert.fail('unexpected reservation'),
+        verifyOutboundOperation: () => assert.fail('unexpected verification'),
       },
       publication: {
         inspectAttempt: () => assert.fail('unexpected attempt inspection'),
@@ -499,7 +577,14 @@ describe('production environment restore adapters', () => {
       signal: new AbortController().signal,
     });
     assert.deepEqual(Buffer.concat(repository), REPOSITORY_BYTES);
-    assert.deepEqual(events, ['checkpoint-verified', 'checkpoint-verified']);
+    assert.deepEqual(events, [
+      'checkpoint-verified',
+      'checkpoint-released',
+      'reservation-closed',
+      'checkpoint-verified',
+      'checkpoint-released',
+      'reservation-closed',
+    ]);
   });
 
   it('routes canonical records and repository bytes through owning storage ports', async () => {

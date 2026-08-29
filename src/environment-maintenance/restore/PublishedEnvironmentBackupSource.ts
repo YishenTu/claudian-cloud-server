@@ -74,9 +74,10 @@ export interface EnvironmentTerminalProjectBackupSource {
 
 export interface PublishedEnvironmentBackupSourceOptions {
   readonly catalog: EnvironmentBackupCatalogDocumentSource;
-  readonly checkpoint?: Pick<
+  readonly checkpoint: Pick<
     ProjectCheckpointCoordinator,
     | 'readPublishedOutboundRecords'
+    | 'releaseOutboundOperation'
     | 'reserveOutbound'
     | 'verifyOutboundOperation'
   >;
@@ -159,18 +160,21 @@ implements
   readonly #keyReferences: PublishedEnvironmentBackupSourceOptions['keyReferences'];
 
   constructor(options: PublishedEnvironmentBackupSourceOptions) {
+    const checkpoint = (options as Partial<
+      PublishedEnvironmentBackupSourceOptions
+    >).checkpoint;
     if (
       typeof options.catalog.readCatalog !== 'function'
-      || (options.checkpoint !== undefined && (
-        typeof options.checkpoint.readPublishedOutboundRecords !== 'function'
-        || typeof options.checkpoint.reserveOutbound !== 'function'
-        || typeof options.checkpoint.verifyOutboundOperation !== 'function'
-      ))
+      || checkpoint === undefined
+      || typeof checkpoint.readPublishedOutboundRecords !== 'function'
+      || typeof checkpoint.releaseOutboundOperation !== 'function'
+      || typeof checkpoint.reserveOutbound !== 'function'
+      || typeof checkpoint.verifyOutboundOperation !== 'function'
       || typeof options.publication.inspectAttempt !== 'function'
       || typeof options.publication.readArtifact !== 'function'
     ) throw new TypeError('published-environment-backup-source.options-invalid');
     this.#catalog = options.catalog;
-    this.#checkpoint = options.checkpoint;
+    this.#checkpoint = checkpoint;
     this.#publication = options.publication;
     this.#keyReferences = options.keyReferences;
   }
@@ -265,23 +269,21 @@ implements
     });
     let reservation;
     try {
-      if (this.#checkpoint !== undefined) {
-        reservation = await this.#checkpoint.reserveOutbound(
-          input.project.projectId,
-          input.signal,
-        );
-        await this.#checkpoint.verifyOutboundOperation({
-          expectedCheckpointSha256: input.project.checkpointSha256,
-          expectedProfile: 'backup',
-          expectedSourceAuthority: Object.freeze({
-            generation: input.project.authorityGeneration,
-            kind: 'cloud',
-          }),
-          expiresAt: input.project.expiresAt,
-          operationId: input.project.backupId,
-          projectId: input.project.projectId,
-        }, reservation, input.signal);
-      }
+      reservation = await this.#checkpoint.reserveOutbound(
+        input.project.projectId,
+        input.signal,
+      );
+      await this.#checkpoint.verifyOutboundOperation({
+        expectedCheckpointSha256: input.project.checkpointSha256,
+        expectedProfile: 'backup',
+        expectedSourceAuthority: Object.freeze({
+          generation: input.project.authorityGeneration,
+          kind: 'cloud',
+        }),
+        expiresAt: input.project.expiresAt,
+        operationId: input.project.backupId,
+        projectId: input.project.projectId,
+      }, reservation, input.signal);
       const inspected = await this.#publication.inspectAttempt(
         attempt,
         input.signal,
@@ -347,16 +349,14 @@ implements
         coordinationNdjson,
       );
       await this.#keyReferences?.verify(records);
-      if (this.#checkpoint !== undefined && reservation !== undefined) {
-        const catalogRecords = await this.#checkpoint.readPublishedOutboundRecords({
-          expectedProfile: 'backup',
-          expiresAt: input.project.expiresAt,
-          operationId: input.project.backupId,
-          projectId: input.project.projectId,
-        }, reservation, input.signal) as readonly CollabProjectBackupRecord[];
-        if (JSON.stringify(catalogRecords) !== JSON.stringify(records)) {
-          return invalid();
-        }
+      const catalogRecords = await this.#checkpoint.readPublishedOutboundRecords({
+        expectedProfile: 'backup',
+        expiresAt: input.project.expiresAt,
+        operationId: input.project.backupId,
+        projectId: input.project.projectId,
+      }, reservation, input.signal) as readonly CollabProjectBackupRecord[];
+      if (JSON.stringify(catalogRecords) !== JSON.stringify(records)) {
+        return invalid();
       }
       return Object.freeze({
         manifest,
@@ -379,7 +379,27 @@ implements
       if (error instanceof EnvironmentBackupCatalogVerifierError) throw error;
       return mapCheckpointError(error, input.signal);
     } finally {
-      await reservation?.close();
+      let cleanupFailure: unknown;
+      if (reservation !== undefined) {
+        try {
+          await this.#checkpoint.releaseOutboundOperation({
+            expiresAt: input.project.expiresAt,
+            operationId: input.project.backupId,
+            profile: 'backup',
+            projectId: input.project.projectId,
+          });
+        } catch (error: unknown) {
+          cleanupFailure = error;
+        }
+        try {
+          await reservation.close();
+        } catch (error: unknown) {
+          cleanupFailure ??= error;
+        }
+      }
+      if (cleanupFailure !== undefined) {
+        mapCheckpointError(cleanupFailure, input.signal);
+      }
     }
   }
 

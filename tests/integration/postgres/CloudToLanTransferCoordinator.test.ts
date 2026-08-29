@@ -183,6 +183,7 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
         checkpoint: {
           capture: input => Promise.resolve(Object.freeze({
             checkpointSha256: CHECKPOINT_SHA,
+            expiresAt: input.expiresAt,
             operationId: input.operationId,
             projectId: input.projectId,
           })),

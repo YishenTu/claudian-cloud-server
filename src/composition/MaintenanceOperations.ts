@@ -50,12 +50,10 @@ import { FileEnvironmentRestoreState } from '../environment-maintenance/restore/
 import { PublishedEnvironmentBackupSource } from '../environment-maintenance/restore/PublishedEnvironmentBackupSource.js';
 import { BackupExportCoordinator } from '../project-authority/checkpoint/BackupExportCoordinator.js';
 import { CloudBackupExportCheckpointSource } from '../project-authority/checkpoint/CloudBackupExportCheckpointSource.js';
-import { ProjectRecoveryError } from '../project-authority/admission/ProjectWriteAdmission.js';
 import { ActiveClaimCustodyKeyReferenceGate } from '../project-authority/lifecycle/ActiveClaimCustodyKeyReferenceGate.js';
 import { ActiveRepositoryIntegrityGate } from '../project-authority/lifecycle/ActiveRepositoryIntegrityGate.js';
 import {
   ProjectLifecycleRecoveryDispatcher,
-  type ProjectLifecycleRecoveryOwner,
 } from '../project-authority/lifecycle/ProjectLifecycleRecoveryDispatcher.js';
 import { XChaCha20ClaimCustody } from '../project-authority/lifecycle/cloud-to-lan/XChaCha20ClaimCustody.js';
 import { DeletionCoordinator } from '../project-authority/lifecycle/delete/DeletionCoordinator.js';
@@ -67,6 +65,7 @@ import {
   createMaintenanceCheckpointRuntime,
   type MaintenanceCheckpointRuntime,
 } from './MaintenanceCheckpointRuntime.js';
+import { createMaintenanceAuthorityTransferRecovery } from './MaintenanceAuthorityTransferRecovery.js';
 
 export interface MaintenanceOperations {
   backup(signal: AbortSignal): Promise<void>;
@@ -95,6 +94,7 @@ function environmentRestoreOwners(
   });
   const source = new PublishedEnvironmentBackupSource({
     catalog,
+    checkpoint: runtime.checkpoint,
     publication: runtime.backupPublication,
     keyReferences: keyReferenceVerifier(keyring),
   });
@@ -151,13 +151,6 @@ interface BackupExportOwners {
   readonly leave: LeaveCoordinator;
   readonly retire: RetireCoordinator;
   close(): Promise<void>;
-}
-
-class UnsupportedAuthorityTransferRecovery
-implements ProjectLifecycleRecoveryOwner {
-  recover(): Promise<never> {
-    return Promise.reject(new ProjectRecoveryError('recovery-required'));
-  }
 }
 
 function authorityRoot(config: ServerConfig): string {
@@ -246,10 +239,16 @@ function backupExportOwners(
     coordination: runtime.coordination,
     repository: runtime.repository,
   });
+  const authorityTransfer = createMaintenanceAuthorityTransferRecovery({
+    checkpoint: runtime.checkpoint,
+    coordination: runtime.coordination,
+    environmentIdentity: backupMetadata.authorityVolumeIdentity,
+    repository: runtime.repository,
+  });
   const dispatcher = new ProjectLifecycleRecoveryDispatcher({
     coordination: runtime.coordination,
     owners: {
-      authorityTransfer: new UnsupportedAuthorityTransferRecovery(),
+      authorityTransfer: authorityTransfer.owner,
       backup,
       deletion,
       export: exportProject,
@@ -272,6 +271,7 @@ function backupExportOwners(
       retire.close();
       const results = await Promise.allSettled([
         backup.close(),
+        authorityTransfer.close(),
         exportProject.close(),
       ]);
       if (results.some(result => result.status === 'rejected')) {
@@ -344,6 +344,9 @@ class Operations implements MaintenanceOperations {
             coordination: runtime.coordination,
             ...(terminalCatalog === undefined ? {} : { terminalCatalog }),
           }),
+          recovery: {
+            recoverAll: () => owners.dispatcher.recoverAll(runtime.coordination),
+          },
           terminalRecords: keyReferenceVerifier(keyring),
         }).run({ catalogId: input.operationId, signal });
       } finally {

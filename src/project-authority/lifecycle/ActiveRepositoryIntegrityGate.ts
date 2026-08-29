@@ -53,14 +53,14 @@ function samePlacement(
 function expectedMemberRefs(
   memberships: readonly ProjectMembershipRecord[],
 ): readonly ExpectedRepositoryRef[] {
+  const active = memberships.filter(membership => membership.status === 'active');
   if (
-    memberships.length !== 2
-    || memberships.some(membership => membership.status !== 'active')
-    || memberships.every(membership => membership.role !== 'manager')
+    active.length === 0
+    || active.every(membership => membership.role !== 'manager')
   ) {
     throw new Error('active-repository-integrity.invalid-authority-state');
   }
-  return memberships.map(membership => Object.freeze({
+  return active.map(membership => Object.freeze({
     name: collabMemberRef(membership.memberId),
   }));
 }

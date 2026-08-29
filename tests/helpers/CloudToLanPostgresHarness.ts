@@ -318,10 +318,12 @@ export function cloudToLanCoordinator(input: Readonly<{
   const checkpoint = input.durableRoot === undefined
     ? {
       capture: (request: Readonly<{
+        readonly expiresAt: string;
         readonly operationId: string;
         readonly projectId: string;
       }>) => Promise.resolve(Object.freeze({
         checkpointSha256: CLOUD_TO_LAN_CHECKPOINT_SHA,
+        expiresAt: request.expiresAt,
         operationId: request.operationId,
         projectId: request.projectId,
       })),
@@ -329,6 +331,7 @@ export function cloudToLanCoordinator(input: Readonly<{
     }
     : {
       capture: async (request: Readonly<{
+        readonly expiresAt: string;
         readonly operationId: string;
         readonly projectId: string;
       }>) => {
@@ -359,6 +362,7 @@ export function cloudToLanCoordinator(input: Readonly<{
         await git(repository, ['bundle', 'verify', bundle]);
         return Object.freeze({
           checkpointSha256: sha256(await readFile(bundle)),
+          expiresAt: request.expiresAt,
           operationId: request.operationId,
           projectId: request.projectId,
         });

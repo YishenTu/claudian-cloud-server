@@ -96,6 +96,57 @@ if [[ "\${CLAUDIAN_CLOUD_POSTGRES_PORT:-}" == "55432" ]]; then
   schema_state_file="$FAKE_SCHEMA_STATE_FILE.restore"
 fi
 printf 'image=%s|operation=%s|%s\n' "\${CLAUDIAN_CLOUD_IMAGE:-}" "\${CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID:-}" "$*" >> "$FAKE_DOCKER_LOG"
+if [[ "$1" == "volume" && "$2" == "ls" ]]; then
+  if [[ "\${FAKE_RESTORE_VOLUME_LIST_FAIL:-0}" == "1" ]]; then
+    exit 33
+  fi
+  if [[ "\${FAKE_RESTORE_TARGET_COLLISION:-0}" == "1" \
+      || -f "$FAKE_RESTORE_OWNERSHIP_STATE_FILE" ]]; then
+    printf '%s\n' \
+      claudian-cloud-restore-test_cloud-authority \
+      claudian-cloud-restore-test_postgres-data
+  fi
+  exit 0
+fi
+if [[ "$1" == "volume" && "$2" == "inspect" ]]; then
+  if [[ "\${FAKE_RESTORE_VOLUME_INSPECT_FAIL:-0}" == "1" ]]; then
+    exit 34
+  fi
+  if [[ "\${FAKE_RESTORE_TARGET_COLLISION:-0}" == "1" ]]; then
+    if [[ "$*" == *"--format"* ]]; then
+      printf '%s\n' foreign-owner
+    fi
+    exit 0
+  fi
+  if [[ -f "$FAKE_RESTORE_OWNERSHIP_STATE_FILE" ]]; then
+    if [[ "$*" == *"--format"* ]]; then
+      sed -n '1p' "$FAKE_RESTORE_OWNERSHIP_STATE_FILE"
+    fi
+    exit 0
+  fi
+  exit 1
+fi
+if [[ "$1" == "inspect" && "$*" == *"com.claudian.restore-owner"* ]]; then
+  if [[ "\${FAKE_RESTORE_CONTAINER_COLLISION:-0}" == "1" ]]; then
+    printf '%s\n' foreign-owner
+    exit 0
+  fi
+  if [[ -f "$FAKE_RESTORE_OWNERSHIP_STATE_FILE" ]]; then
+    sed -n '1p' "$FAKE_RESTORE_OWNERSHIP_STATE_FILE"
+    exit 0
+  fi
+  exit 1
+fi
+if [[ "$1" == "compose" \
+    && "$*" == *"--project-name claudian-cloud-restore-test"* \
+    && "$*" == *" ps --all --quiet"* \
+    && "$*" != *" ps --all --quiet cloud-server"* ]]; then
+  if [[ "\${FAKE_RESTORE_TARGET_COLLISION:-0}" == "1" \
+      || "\${FAKE_RESTORE_CONTAINER_COLLISION:-0}" == "1" ]]; then
+    printf '%s\n' foreign-restore-container
+  fi
+  exit 0
+fi
 if [[ "$1" == "compose" && "$*" == *" ps --all --quiet cloud-server"* ]]; then
   printf '%s\n' existing-container
   exit 0
@@ -215,6 +266,23 @@ if [[ "$1" == "compose" && "$*" == *" run --rm cloud-verify-authority"* ]]; then
   fi
   exit 0
 fi
+if [[ "$1" == "compose" && "$*" == *" stop cloud-server"* \
+    && "\${FAKE_CANDIDATE_STOP_FAIL:-0}" == "1" \
+    && "\${CLAUDIAN_CLOUD_IMAGE:-}" != "${previousImage}" ]]; then
+  exit 32
+fi
+if [[ "$1" == "compose" \
+    && "$*" == *"--project-name claudian-cloud-restore-test down --volumes"* ]]; then
+  rm -f -- "$FAKE_RESTORE_OWNERSHIP_STATE_FILE"
+  exit 0
+fi
+if [[ "$1" == "compose" \
+    && "$*" == *"--project-name claudian-cloud-restore-test up "* \
+    && "$*" == *" postgres" ]]; then
+  printf '%s\n' "\${CLAUDIAN_CLOUD_RESTORE_OWNERSHIP_ID:-}" > \
+    "$FAKE_RESTORE_OWNERSHIP_STATE_FILE"
+  exit 0
+fi
 if [[ "$1" == "compose" && "$*" == *"--project-name claudian-cloud-server up "* && "\${FAKE_DEPLOY_FAIL_NEW:-0}" == "1" && "\${CLAUDIAN_CLOUD_IMAGE:-}" != "${previousImage}" ]]; then
   exit 17
 fi
@@ -313,6 +381,7 @@ function deploymentEnvironment(
     CLAUDIAN_DEPLOY_RESTORE_ENV_FILE: fixture.restoreEnvironmentFile,
     CLAUDIAN_DEPLOY_RESTORE_MIGRATION_ENV_FILE:
       fixture.restoreMigrationEnvironmentFile,
+    CLAUDIAN_DEPLOY_RESTORE_OWNERSHIP_ID: 'd'.repeat(64),
     CLAUDIAN_DEPLOY_RESTORE_POSTGRES_ENV_FILE:
       fixture.restorePostgresEnvironmentFile,
     CLAUDIAN_DEPLOY_RESTORE_POSTGRES_PORT: '55432',
@@ -320,6 +389,7 @@ function deploymentEnvironment(
     FAKE_DURABILITY_LOG: fixture.durabilityLog,
     FAKE_DURABILITY_COUNT_FILE: `${fixture.durabilityLog}.count`,
     FAKE_ATTEMPT_STATE_FILE: fixture.attemptStateFile,
+    FAKE_RESTORE_OWNERSHIP_STATE_FILE: `${fixture.schemaStateFile}.restore-owner`,
     FAKE_SCHEMA_STATE_FILE: fixture.schemaStateFile,
     PATH: `${fixture.fakeBinaryDirectory}:${process.env.PATH ?? ''}`,
     ...extraEnvironment,
@@ -438,6 +508,78 @@ describe('deployment', () => {
     } finally {
       await writeFile(`${pauseFile}.release`, '').catch(() => undefined);
       await firstDeployment?.catch(() => undefined);
+      await rm(fixture.root, { force: true, recursive: true });
+    }
+  });
+
+  it('rejects an unowned populated restore Compose target before volume deletion', async () => {
+    const fixture = await createFixture();
+    try {
+      const result = runDeployment(fixture, {
+        FAKE_RESTORE_TARGET_COLLISION: '1',
+      });
+
+      assert.equal(result.status, 1);
+      assert.match(
+        result.stderr,
+        /deployment\.error: backup-restore-target-provision-failed/u,
+      );
+      assert.match(result.stderr, /deployment\.rolled-back/u);
+      expectRollback(await readFile(fixture.dockerLog, 'utf8'));
+      assert.doesNotMatch(
+        await readFile(fixture.dockerLog, 'utf8'),
+        /--project-name claudian-cloud-restore-test down --volumes/u,
+      );
+    } finally {
+      await rm(fixture.root, { force: true, recursive: true });
+    }
+  });
+
+  it('rejects a foreign orphan even when an expected restore volume is owned', async () => {
+    const fixture = await createFixture();
+    try {
+      await writeFile(`${fixture.schemaStateFile}.restore-owner`, 'd'.repeat(64));
+      const result = runDeployment(fixture, {
+        FAKE_RESTORE_CONTAINER_COLLISION: '1',
+      });
+
+      assert.equal(result.status, 1);
+      assert.match(
+        result.stderr,
+        /deployment\.error: backup-restore-target-provision-failed/u,
+      );
+      assert.match(result.stderr, /deployment\.rolled-back/u);
+      expectRollback(await readFile(fixture.dockerLog, 'utf8'));
+      assert.doesNotMatch(
+        await readFile(fixture.dockerLog, 'utf8'),
+        /--project-name claudian-cloud-restore-test down --volumes/u,
+      );
+    } finally {
+      await rm(fixture.root, { force: true, recursive: true });
+    }
+  });
+
+  it('fails closed and rolls back when an existing volume cannot be inspected', async () => {
+    const fixture = await createFixture();
+    try {
+      await writeFile(`${fixture.schemaStateFile}.restore-owner`, 'd'.repeat(64));
+      const result = runDeployment(fixture, {
+        FAKE_RESTORE_VOLUME_INSPECT_FAIL: '1',
+      });
+
+      assert.equal(result.status, 1);
+      assert.match(
+        result.stderr,
+        /deployment\.error: backup-restore-target-provision-failed/u,
+      );
+      assert.match(result.stderr, /deployment\.rolled-back/u);
+      const dockerLog = await readFile(fixture.dockerLog, 'utf8');
+      expectRollback(dockerLog);
+      assert.doesNotMatch(
+        dockerLog,
+        /--project-name claudian-cloud-restore-test down --volumes/u,
+      );
+    } finally {
       await rm(fixture.root, { force: true, recursive: true });
     }
   });
@@ -790,6 +932,75 @@ exit 29
       assert.equal(
         dockerLog.match(/ run --rm cloud-restore\n/g)?.length ?? 0,
         0,
+      );
+    } finally {
+      await rm(fixture.root, { force: true, recursive: true });
+    }
+  });
+
+  it('restarts the fixed-forward candidate before attempting a recovery backup', async () => {
+    const fixture = await createFixture();
+    try {
+      const failed = runDeployment(fixture, {
+        FAKE_DEPLOY_FAIL_NEW: '1',
+        FAKE_SCHEMA_BEFORE: '8',
+      });
+      assert.notEqual(failed.status, 0);
+      assert.match(
+        await readFile(fixture.attemptStateFile, 'utf8'),
+        /^forward-only /,
+      );
+      const backupCountBefore = (
+        await readFile(fixture.dockerLog, 'utf8')
+      ).match(/ run --rm cloud-backup\n/g)?.length ?? 0;
+
+      const recovered = runDeployment(fixture, {
+        FAKE_BACKUP_FAIL: '1',
+        FAKE_SCHEMA_BEFORE: '10',
+      });
+
+      assert.equal(recovered.status, 0, recovered.stderr);
+      const dockerLog = await readFile(fixture.dockerLog, 'utf8');
+      assert.equal(
+        dockerLog.match(/ run --rm cloud-backup\n/g)?.length ?? 0,
+        backupCountBefore,
+      );
+      assert.equal(
+        await readFile(fixture.attemptStateFile, 'utf8').catch(() => ''),
+        '',
+      );
+    } finally {
+      await rm(fixture.root, { force: true, recursive: true });
+    }
+  });
+
+  it('aborts fixed-forward recovery when candidate quiescence is unproven', async () => {
+    const fixture = await createFixture();
+    try {
+      const failed = runDeployment(fixture, {
+        FAKE_DEPLOY_FAIL_NEW: '1',
+        FAKE_SCHEMA_BEFORE: '8',
+      });
+      assert.notEqual(failed.status, 0);
+      const backupCountBefore = (
+        await readFile(fixture.dockerLog, 'utf8')
+      ).match(/ run --rm cloud-backup\n/g)?.length ?? 0;
+
+      const recovered = runDeployment(fixture, {
+        FAKE_CANDIDATE_STOP_FAIL: '1',
+        FAKE_DEPLOY_FAIL_NEW: '1',
+        FAKE_SCHEMA_BEFORE: '10',
+      });
+
+      assert.equal(recovered.status, 1);
+      assert.match(
+        recovered.stderr,
+        /deployment\.error: forward-recovery-runtime-stop-failed/u,
+      );
+      const dockerLog = await readFile(fixture.dockerLog, 'utf8');
+      assert.equal(
+        dockerLog.match(/ run --rm cloud-backup\n/g)?.length ?? 0,
+        backupCountBefore,
       );
     } finally {
       await rm(fixture.root, { force: true, recursive: true });

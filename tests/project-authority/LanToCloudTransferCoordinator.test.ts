@@ -46,6 +46,7 @@ import {
   type ValidatedProjectCheckpoint,
 } from '../../src/project-authority/checkpoint/ProjectCheckpointCoordinator.js';
 import {
+  LanToCloudPostCutoverRecovery,
   LanToCloudTransferCoordinator,
   LanToCloudTransferCoordinatorError,
   type ActivateLanToCloudProjectInput,
@@ -706,6 +707,7 @@ interface Fixture {
     readonly verifySourceProofCalls: () => number;
   }>;
   readonly loseCheckpoint: () => void;
+  readonly postCutoverRecovery: LanToCloudPostCutoverRecovery;
 }
 
 function beginInput(test: Fixture) {
@@ -756,24 +758,31 @@ function fixture(includeOfflineMember = true): Fixture {
       return sourceProof;
     },
   };
+  const checkpointPort = {
+    discardAttempt: async () => {
+      await staging.discardAttempt();
+    },
+    validateStaged: () => checkpointAvailable
+      ? Promise.resolve(validated)
+      : Promise.reject(new ProjectCheckpointCoordinatorError('invalid-checkpoint')),
+    validateStagedWithRepository: (_input: unknown, repositoryCheckpoint: ValidatedProjectCheckpoint['repository']) => (
+      checkpointAvailable
+        ? Promise.resolve(Object.freeze({
+            ...validated,
+            repository: repositoryCheckpoint,
+          }))
+        : Promise.reject(new ProjectCheckpointCoordinatorError('invalid-checkpoint'))
+    ),
+  };
+  const postCutoverRecovery = new LanToCloudPostCutoverRecovery({
+    activation,
+    checkpoint: checkpointPort,
+    clock: () => new Date(now += 1_000),
+    repository,
+  });
   const restart = () => new LanToCloudTransferCoordinator({
       activation,
-      checkpoint: {
-        discardAttempt: async () => {
-          await staging.discardAttempt();
-        },
-        validateStaged: () => checkpointAvailable
-          ? Promise.resolve(validated)
-          : Promise.reject(new ProjectCheckpointCoordinatorError('invalid-checkpoint')),
-        validateStagedWithRepository: (_input, repositoryCheckpoint) => (
-          checkpointAvailable
-            ? Promise.resolve(Object.freeze({
-                ...validated,
-                repository: repositoryCheckpoint,
-              }))
-            : Promise.reject(new ProjectCheckpointCoordinatorError('invalid-checkpoint'))
-        ),
-      },
+      checkpoint: checkpointPort,
       claimFactory: () => Buffer.from(`claim-${String(claimSequence += 1)}`).toString('base64url'),
       clock: () => new Date(now += 1_000),
       coordination,
@@ -799,6 +808,7 @@ function fixture(includeOfflineMember = true): Fixture {
     coordinator,
     expire,
     loseCheckpoint,
+    postCutoverRecovery,
     repository,
     restart,
     signer,
@@ -1239,9 +1249,28 @@ describe('LanToCloudTransferCoordinator', () => {
     }), 'state-conflict');
     const journal = test.coordination.portability.journal;
     assert.ok(journal);
-    await test.coordinator.recover({ journal, lease: test.coordination.lease() });
+    const trustCalls = test.trust.verifySourceProofCalls();
+    await test.trust.blockSourceProof();
+    await test.postCutoverRecovery.recover({
+      journal,
+      lease: test.coordination.lease(),
+    });
     assert.equal(test.coordination.portability.journal.phase, 'completed');
     assert.equal(test.activation.calls, 2);
+    assert.equal(test.trust.verifySourceProofCalls(), trustCalls);
+  });
+
+  it('leaves pre-cutover recovery waiting without consulting source trust', async () => {
+    const test = fixture();
+    await beginAndValidate(test);
+    const journal = test.coordination.portability.journal;
+    assert.ok(journal);
+    const trustCalls = test.trust.verifySourceProofCalls();
+    assert.equal(await test.postCutoverRecovery.recover({
+      journal,
+      lease: test.coordination.lease(),
+    }), 'waiting-for-external-proof');
+    assert.equal(test.trust.verifySourceProofCalls(), trustCalls);
   });
 
   it('invalidates claims and removes attempt-owned state before cutover', async () => {
@@ -1616,9 +1645,15 @@ describe('LanToCloudTransferCoordinator', () => {
     test.loseCheckpoint();
     const journal = test.coordination.portability.journal;
     assert.ok(journal);
-    await test.restart().recover({ journal, lease: test.coordination.lease() });
+    const trustCalls = test.trust.verifySourceProofCalls();
+    await test.trust.blockSourceProof();
+    await test.postCutoverRecovery.recover({
+      journal,
+      lease: test.coordination.lease(),
+    });
     assert.equal(test.coordination.portability.journal.phase, 'completed');
     assert.equal(test.staging.discardCalls, 2);
+    assert.equal(test.trust.verifySourceProofCalls(), trustCalls);
   });
 
   it('rejects a new transfer before cutover when the target Project already exists', async () => {

@@ -95,6 +95,7 @@ export interface CloudToLanTransferCoordination {
 
 export interface CapturedCloudToLanCheckpoint {
   readonly checkpointSha256: string;
+  readonly expiresAt: CollabIsoTimestamp;
   readonly operationId: string;
   readonly projectId: CollabProjectId;
 }
@@ -1853,6 +1854,7 @@ implements ProjectLifecycleRecoveryOwner {
     if (exact.journal.checkpointSha256 === undefined) return fail('recovery-required');
     return Object.freeze({
       checkpointSha256: exact.journal.checkpointSha256,
+      expiresAt: defaultAuthorityTransferExpiresAt(exact.recovery.createdAt),
       operationId: exact.journal.operationId,
       projectId: exact.journal.projectId,
     });
