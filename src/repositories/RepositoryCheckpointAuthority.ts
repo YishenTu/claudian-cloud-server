@@ -1218,6 +1218,7 @@ InactiveRepositoryPublicationPort,
 ExactPersonalRefPort,
 ExactRepositoryRemovalPort {
   readonly #activeCaptures = new Set<string>();
+  readonly #captureAncestryTails = new Map<string, Promise<void>>();
   readonly #activeExactRepositoryReservations = new Set<
     ExactRepositoryReservationState
   >();
@@ -1685,11 +1686,51 @@ ExactRepositoryRemovalPort {
   }
 
   async #removeEmptyCaptureAncestry(paths: CapturePaths): Promise<void> {
-    if (await removeEmptyPrivateDirectory(paths.profile)) {
-      await this.#syncDirectory(paths.project);
-    }
-    if (await removeEmptyPrivateDirectory(paths.project)) {
+    await this.#withCaptureAncestry(paths.projectId, async () => {
+      if (await removeEmptyPrivateDirectory(paths.profile)) {
+        await this.#syncDirectory(paths.project);
+      }
+      if (await removeEmptyPrivateDirectory(paths.project)) {
+        await this.#syncDirectory(this.#operationRoot);
+      }
+    });
+  }
+
+  async #ensureCaptureAncestry(
+    paths: CapturePaths,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    return this.#withCaptureAncestry(paths.projectId, async () => {
+      assertNotAborted(signal);
+      await ensureDirectory(paths.project);
       await this.#syncDirectory(this.#operationRoot);
+      await ensureDirectory(paths.profile);
+      await this.#syncDirectory(paths.project);
+      const operationCreated = await ensureDirectory(paths.operation);
+      await this.#syncDirectory(paths.profile);
+      return operationCreated;
+    });
+  }
+
+  async #withCaptureAncestry<Result>(
+    projectId: string,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    const previous = this.#captureAncestryTails.get(projectId)
+      ?? Promise.resolve();
+    let release: (() => void) | undefined;
+    const tail = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    this.#captureAncestryTails.set(projectId, tail);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release?.();
+      if (this.#captureAncestryTails.get(projectId) === tail) {
+        this.#captureAncestryTails.delete(projectId);
+      }
     }
   }
 
@@ -2214,12 +2255,7 @@ ExactRepositoryRemovalPort {
         input.placement.projectId,
         input.operationId,
       );
-      await ensureDirectory(paths.project);
-      await this.#syncDirectory(this.#operationRoot);
-      await ensureDirectory(paths.profile);
-      await this.#syncDirectory(paths.project);
-      const operationCreated = await ensureDirectory(paths.operation);
-      await this.#syncDirectory(paths.profile);
+      const operationCreated = await this.#ensureCaptureAncestry(paths, signal);
       await this.#ensureCaptureOwner(paths, signal, operationCreated);
       const replay = await this.#readReplay(paths, input, objectFormat, signal);
       if (replay !== undefined) {
@@ -2335,12 +2371,7 @@ ExactRepositoryRemovalPort {
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
       await assertPrivateDirectory(this.#operationRoot);
-      await ensureDirectory(paths.project);
-      await this.#syncDirectory(this.#operationRoot);
-      await ensureDirectory(paths.profile);
-      await this.#syncDirectory(paths.project);
-      const operationCreated = await ensureDirectory(paths.operation);
-      await this.#syncDirectory(paths.profile);
+      const operationCreated = await this.#ensureCaptureAncestry(paths, signal);
       await this.#ensureCaptureOwner(paths, signal, operationCreated);
       await removeOwnedFile(paths.verificationBundlePart);
       await removeOwnedFile(paths.verificationBundle);

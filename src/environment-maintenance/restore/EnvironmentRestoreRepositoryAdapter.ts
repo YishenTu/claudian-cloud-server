@@ -99,6 +99,7 @@ function samePublication(
     && left.projectId === right.projectId
     && left.publicationMarkerSha256 === right.publicationMarkerSha256
     && left.repositoryStorageKey === right.repositoryStorageKey
+    && (left as { readonly status: unknown }).status === right.status
     && left.storageNodeId === right.storageNodeId
     && left.validationMarkerSha256 === right.validationMarkerSha256
     && sameRefs(left.refs, right.refs);
