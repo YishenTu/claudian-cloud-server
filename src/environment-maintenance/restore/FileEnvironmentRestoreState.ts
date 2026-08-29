@@ -37,7 +37,7 @@ const MARKER_FILE = '.authority-volume-id';
 const REMOVAL_FILE = '.environment-restore-removal.json';
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
-const VOLUME_ID_PATTERN = /^[0-9a-f]{32}\n$/u;
+const VOLUME_ID_PATTERN = /^[0-9a-f]{32}\n?$/u;
 
 function fail(): never {
   throw new EnvironmentRestoreCoordinatorError('recovery-required');

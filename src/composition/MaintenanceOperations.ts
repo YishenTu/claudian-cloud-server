@@ -71,6 +71,7 @@ export interface MaintenanceOperations {
   backup(signal: AbortSignal): Promise<void>;
   exportProject(signal: AbortSignal): Promise<void>;
   reconcileExports(signal: AbortSignal): Promise<void>;
+  recoverProjects(signal: AbortSignal): Promise<void>;
   recoverRestore(signal: AbortSignal): Promise<void>;
   restore(signal: AbortSignal): Promise<void>;
   resumeDelete(signal: AbortSignal): Promise<void>;
@@ -398,6 +399,23 @@ class Operations implements MaintenanceOperations {
         await new ExportDeliveryExpiryCommand({
           coordinator: owners.exportProject,
         }).run(signal);
+      } finally {
+        await owners.close();
+      }
+    });
+  }
+
+  async recoverProjects(_signal: AbortSignal): Promise<void> {
+    const keyring = await loadClaimCustodyKeyring();
+    await withRuntime(this.#source, async (runtime, config) => {
+      const { schemaVersion } = await runtime.verifyActiveAuthority();
+      const owners = backupExportOwners(
+        runtime,
+        await metadata(config, schemaVersion),
+        keyring,
+      );
+      try {
+        await owners.dispatcher.recoverAll(runtime.coordination);
       } finally {
         await owners.close();
       }

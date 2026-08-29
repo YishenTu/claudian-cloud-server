@@ -378,6 +378,26 @@ describe('FileEnvironmentRestoreState', () => {
     }
   });
 
+  it('recognizes an original bootstrap authority marker without a newline', async () => {
+    const authorityRoot = await mkdtemp(join(tmpdir(), 'cloud-restore-state-'));
+    try {
+      await writeFile(
+        join(authorityRoot, '.authority-volume-id'),
+        TARGET_VOLUME_ID,
+        { mode: 0o600 },
+      );
+      assert.deepEqual(
+        await new FileEnvironmentRestoreState({ authorityRoot }).inspect(),
+        {
+          journal: undefined,
+          pair: { authorityVolumeId: TARGET_VOLUME_ID },
+        },
+      );
+    } finally {
+      await rm(authorityRoot, { force: true, recursive: true });
+    }
+  });
+
   it('rejects a journal part that changes immutable restore identity', async () => {
     const authorityRoot = await mkdtemp(join(tmpdir(), 'cloud-restore-state-'));
     try {

@@ -95,6 +95,8 @@ describe('MaintenanceCommandConfig', () => {
       CLAUDIAN_CLOUD_POSTGRES_MIGRATION_URL:
         'postgresql://migration:secret@127.0.0.1/cloud',
       CLAUDIAN_CLOUD_PORT: '8788',
+      CLAUDIAN_CLOUD_PROJECT_RECOVERY_REQUIRED: 'true',
+      CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED: 'true',
     }), {
       CLAUDIAN_CLOUD_BIND_HOST: '127.0.0.1',
       CLAUDIAN_CLOUD_PORT: '8788',

@@ -29,7 +29,7 @@ function run(
   });
 }
 
-describe('compiled maintenance entry', () => {
+describe('maintenance source entry', () => {
   it('routes the migration target probe without constructing the server', () => {
     const result = run(['maintenance', 'migration', 'target']);
 

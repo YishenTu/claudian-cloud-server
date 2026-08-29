@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -35,9 +35,12 @@ interface RenderedCompose {
 }
 
 interface CompositionFixture {
+  readonly backupArtifactRoot: string;
   readonly bootstrapEnvironmentFile: string;
   readonly environment: NodeJS.ProcessEnv;
+  readonly exportArtifactRoot: string;
   readonly image: string;
+  readonly keyringFile: string;
   readonly migrationEnvironmentFile: string;
   readonly postgresEnvironmentFile: string;
   readonly postgresPort: number;
@@ -52,10 +55,14 @@ const repositoryRoot = resolve(import.meta.dirname, '../..');
 const composeFile = resolve(repositoryRoot, 'deploy/compose.yaml');
 const postgresImage = 'postgres@sha256:7d2695c3aa88e792e8b3b233e7e4adb296a20412c6c0ca361e3edaaacfada108';
 const runPersistentComposition = process.env.CLAUDIAN_TEST_PERSISTENT_COMPOSE === '1';
+const testServerBuild = 'd'.repeat(40);
 
 function composeEnvironment(options: {
+  readonly backupArtifactRoot?: string;
   readonly bootstrapEnvironmentFile: string;
+  readonly exportArtifactRoot?: string;
   readonly image?: string;
+  readonly keyringFile?: string;
   readonly migrationEnvironmentFile: string;
   readonly postgresEnvironmentFile: string;
   readonly postgresPort: number;
@@ -64,7 +71,16 @@ function composeEnvironment(options: {
   return {
     ...process.env,
     CLAUDIAN_CLOUD_BOOTSTRAP_ENV_FILE: options.bootstrapEnvironmentFile,
+    ...(options.backupArtifactRoot === undefined ? {} : {
+      CLAUDIAN_CLOUD_BACKUP_ARTIFACT_ROOT: options.backupArtifactRoot,
+    }),
+    ...(options.keyringFile === undefined ? {} : {
+      CLAUDIAN_CLOUD_CLAIM_CUSTODY_KEYRING_FILE: options.keyringFile,
+    }),
     CLAUDIAN_CLOUD_ENV_FILE: options.runtimeEnvironmentFile,
+    ...(options.exportArtifactRoot === undefined ? {} : {
+      CLAUDIAN_CLOUD_EXPORT_ARTIFACT_ROOT: options.exportArtifactRoot,
+    }),
     CLAUDIAN_CLOUD_MIGRATION_ENV_FILE: options.migrationEnvironmentFile,
     CLAUDIAN_CLOUD_POSTGRES_ENV_FILE: options.postgresEnvironmentFile,
     CLAUDIAN_CLOUD_POSTGRES_PORT: String(options.postgresPort),
@@ -154,10 +170,14 @@ async function createFixture(): Promise<CompositionFixture> {
   while (runtimePort === postgresPort) runtimePort = await availablePort();
 
   const postgresEnvironmentFile = join(root, 'postgres.env');
+  const backupArtifactRoot = join(root, 'backup-artifacts');
   const bootstrapEnvironmentFile = join(root, 'bootstrap.env');
   const migrationEnvironmentFile = join(root, 'migration.env');
+  const keyringFile = join(root, 'claim-custody-keyring.json');
+  const exportArtifactRoot = join(root, 'export-artifacts');
   const wrongRoleMigrationEnvironmentFile = join(root, 'migration-wrong-role.env');
   const runtimeEnvironmentFile = join(root, 'server.env');
+  const receiptKeys = generateKeyPairSync('ed25519');
   const migrationUrl = databaseUrl(
     'claudian_cloud_migration',
     migrationPassword,
@@ -172,6 +192,8 @@ async function createFixture(): Promise<CompositionFixture> {
   );
 
   await Promise.all([
+    mkdir(backupArtifactRoot, { mode: 0o700 }),
+    mkdir(exportArtifactRoot, { mode: 0o700 }),
     writeFile(postgresEnvironmentFile, [
       'POSTGRES_USER=claudian_cloud_bootstrap',
       `POSTGRES_PASSWORD=${bootstrapPassword}`,
@@ -206,20 +228,48 @@ async function createFixture(): Promise<CompositionFixture> {
       'CLAUDIAN_CLOUD_STORAGE_NODE_ID=persistent-test-node',
       '',
     ].join('\n'), { mode: 0o600 }),
+    writeFile(keyringFile, JSON.stringify({
+      activeEncryptionKeyId: 'persistent-encryption-key',
+      activeReceiptKeyId: 'persistent-receipt-key',
+      encryptionKeys: [{
+        key: Buffer.alloc(32, 7).toString('base64url'),
+        keyId: 'persistent-encryption-key',
+        keyVersion: 1,
+      }],
+      receiptKeys: [{
+        keyId: 'persistent-receipt-key',
+        keyVersion: 1,
+        privateKey: receiptKeys.privateKey.export({
+          format: 'der',
+          type: 'pkcs8',
+        }).toString('base64url'),
+        publicKey: receiptKeys.publicKey.export({
+          format: 'der',
+          type: 'spki',
+        }).toString('base64url'),
+      }],
+      schemaVersion: 1,
+    }), { mode: 0o400 }),
   ]);
 
   const image = `claudian-cloud-server:persistent-${token}`;
   return {
     bootstrapEnvironmentFile,
     environment: composeEnvironment({
+      backupArtifactRoot,
       bootstrapEnvironmentFile,
+      exportArtifactRoot,
       image,
+      keyringFile,
       migrationEnvironmentFile,
       postgresEnvironmentFile,
       postgresPort,
       runtimeEnvironmentFile,
     }),
+    backupArtifactRoot,
+    exportArtifactRoot,
     image,
+    keyringFile,
     migrationEnvironmentFile,
     postgresEnvironmentFile,
     postgresPort,
@@ -378,7 +428,7 @@ describe('persistent local Compose model', () => {
       assert.equal(runtime.network_mode, 'host');
       assert.equal(runtime.ports, undefined);
       assert.deepEqual(runtime.depends_on, {
-        'cloud-restore-recovery': {
+        'cloud-project-recovery': {
           condition: 'service_completed_successfully',
           required: true,
         },
@@ -389,6 +439,13 @@ describe('persistent local Compose model', () => {
         volumeMount(runtime, '/var/lib/claudian-cloud').source,
         'cloud-authority',
       );
+      const projectRecovery = service(model, 'cloud-project-recovery');
+      assert.deepEqual(projectRecovery.depends_on, {
+        'cloud-restore-recovery': {
+          condition: 'service_completed_successfully',
+          required: true,
+        },
+      });
       assert.equal(runtime.environment?.PGPASSWORD, undefined);
       assert.equal(
         runtime.environment?.CLAUDIAN_CLOUD_POSTGRES_MIGRATION_PASSWORD,
@@ -419,6 +476,8 @@ describe('persistent local Compose model', () => {
         'docker',
         [
           'build',
+          '--build-arg',
+          `CLAUDIAN_SERVER_BUILD=${testServerBuild}`,
           '--file',
           resolve(repositoryRoot, 'deploy/Dockerfile'),
           '--tag',
@@ -434,6 +493,71 @@ describe('persistent local Compose model', () => {
         },
       );
       imageBuilt = true;
+      execFileSync(
+        'docker',
+        [
+          'run',
+          '--rm',
+          '--user',
+          '0:0',
+          '--mount',
+          `type=bind,source=${fixture.keyringFile},target=/keyring`,
+          fixture.image,
+          '/bin/chown',
+          '10001:10001',
+          '/keyring',
+        ],
+        {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      assert.equal(
+        execFileSync(
+          'docker',
+          [
+            'run',
+            '--rm',
+            '--user',
+            '10001:10001',
+            '--mount',
+            `type=bind,source=${fixture.keyringFile},target=/keyring,readonly`,
+            fixture.image,
+            '/usr/bin/stat',
+            '--format=%u:%g:%a:%F',
+            '/keyring',
+          ],
+          {
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
+        ).trim(),
+        '10001:10001:400:regular file',
+      );
+      for (const artifactRoot of [
+        fixture.backupArtifactRoot,
+        fixture.exportArtifactRoot,
+      ]) {
+        execFileSync(
+          'docker',
+          [
+            'run',
+            '--rm',
+            '--user',
+            '0:0',
+            '--mount',
+            `type=bind,source=${artifactRoot},target=/artifacts`,
+            fixture.image,
+            '/bin/chown',
+            '10001:10001',
+            '/artifacts',
+          ],
+          {
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
+        );
+      }
 
       runCompose(fixture, ['up', '--detach', '--wait', 'postgres']);
       const interruptedAuthorityId = randomBytes(16).toString('hex');
@@ -462,7 +586,6 @@ describe('persistent local Compose model', () => {
         '--rm',
         'cloud-bootstrap',
       ]);
-
       runComposeExpectingFailure(fixture, [
         'run',
         '--rm',
@@ -501,6 +624,12 @@ describe('persistent local Compose model', () => {
         '--rm',
         'cloud-bootstrap',
       ]);
+      runCompose(fixture, [
+        'run',
+        '--rm',
+        '--no-deps',
+        'cloud-project-recovery',
+      ]);
 
       const markerBeforeRestart = runCompose(fixture, [
         'run',
@@ -515,7 +644,11 @@ describe('persistent local Compose model', () => {
       assert.match(markerBeforeRestart, /^[0-9a-f]{32}$/);
       assert.equal(markerBeforeRestart, interruptedAuthorityId);
 
-      runCompose(fixture, ['up', '--detach', '--no-deps', '--wait', 'cloud-server']);
+      try {
+        runCompose(fixture, ['up', '--detach', '--no-deps', '--wait', 'cloud-server']);
+      } catch {
+        assert.fail(runCompose(fixture, ['logs', '--no-color', 'cloud-server']));
+      }
       const ready = await fetch(
         `http://127.0.0.1:${String(fixture.runtimePort)}/readyz`,
       );

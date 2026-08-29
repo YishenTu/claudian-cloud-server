@@ -156,6 +156,7 @@ describe('maintenance Compose configuration', () => {
       'cloud-verify-backup',
       'cloud-restore',
       'cloud-restore-recovery',
+      'cloud-project-recovery',
       'cloud-verify-authority',
     ]) assert.equal(hasKeyring(service(model, name)), true, name);
 
@@ -188,6 +189,7 @@ describe('maintenance Compose configuration', () => {
     for (const name of [
       'cloud-bootstrap',
       'cloud-export-project',
+      'cloud-project-recovery',
       'cloud-reconcile-exports',
       'cloud-resume-delete',
       'cloud-server',
@@ -250,6 +252,24 @@ describe('maintenance Compose configuration', () => {
       exportArtifacts,
       false,
     ), true);
+    assert.equal(mount(
+      service(model, 'cloud-project-recovery'),
+      '/operator/backups/artifacts',
+      backupArtifacts,
+      false,
+    ), true);
+    assert.equal(mount(
+      service(model, 'cloud-project-recovery'),
+      '/operator/exports/artifacts',
+      exportArtifacts,
+      false,
+    ), true);
+    assert.equal(
+      service(model, 'cloud-project-recovery').volumes?.some(
+        candidate => candidate.target === backupCatalogs,
+      ) ?? false,
+      false,
+    );
     for (const name of [
       'cloud-migration',
       'cloud-resume-delete',
@@ -300,9 +320,23 @@ describe('maintenance Compose configuration', () => {
     );
     assert.equal(recovery.read_only, true);
     assert.equal(recovery.restart, 'no');
+    const projectRecovery = service(model, 'cloud-project-recovery');
+    assert.deepEqual(projectRecovery.entrypoint?.slice(0, 2), ['/bin/sh', '-ec']);
+    assert.match(
+      projectRecovery.entrypoint[2] ?? '',
+      /exec node dist\/main\.js maintenance recover-projects/u,
+    );
+    assert.equal(projectRecovery.profiles, undefined);
+    assert.equal(projectRecovery.user, '10001:10001');
+    assert.equal(projectRecovery.read_only, true);
+    assert.equal(projectRecovery.restart, 'no');
+    assert.equal(
+      projectRecovery.depends_on?.['cloud-restore-recovery']?.condition,
+      'service_completed_successfully',
+    );
     assert.equal(
       service(model, 'cloud-server')
-        .depends_on?.['cloud-restore-recovery']?.condition,
+        .depends_on?.['cloud-project-recovery']?.condition,
       'service_completed_successfully',
     );
   });

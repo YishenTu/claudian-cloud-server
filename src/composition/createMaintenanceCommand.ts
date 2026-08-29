@@ -57,6 +57,7 @@ export function createMaintenanceCommand(
     'export-project': operationHandler(signal => operations.exportProject(signal)),
     migration,
     'reconcile-exports': operationHandler(signal => operations.reconcileExports(signal)),
+    'recover-projects': operationHandler(signal => operations.recoverProjects(signal)),
     'recover-restore': operationHandler(signal => operations.recoverRestore(signal)),
     'restore': operationHandler(signal => operations.restore(signal)),
     'resume-delete': operationHandler(signal => operations.resumeDelete(signal)),
