@@ -232,6 +232,31 @@ services:
         read_only: true
       - *keyring-mount
 
+  cloud-project-recovery:
+    <<: [*cloud-image, *one-shot-security]
+    network_mode: host
+    user: "10001:10001"
+    env_file:
+      - path: ${CLAUDIAN_CLOUD_ENV_FILE:-/etc/claudian-cloud-server/server.env}
+        required: true
+    environment:
+      CLAUDIAN_CLOUD_PROJECT_RECOVERY_REQUIRED: ${CLAUDIAN_CLOUD_PROJECT_RECOVERY_REQUIRED:-true}
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - >-
+        if [ "$${CLAUDIAN_CLOUD_PROJECT_RECOVERY_REQUIRED}" != "true" ];
+        then exit 0; fi;
+        exec node dist/main.js maintenance recover-projects
+    depends_on:
+      cloud-restore-recovery:
+        condition: service_completed_successfully
+    volumes:
+      - cloud-authority:/var/lib/claudian-cloud
+      - *backup-artifact-mount
+      - *export-artifact-mount
+      - *keyring-mount
+
   cloud-export-project:
     <<: [*cloud-image, *one-shot-security]
     profiles:
@@ -327,7 +352,7 @@ services:
     environment:
       NODE_ENV: production
     depends_on:
-      cloud-restore-recovery:
+      cloud-project-recovery:
         condition: service_completed_successfully
     volumes:
       - cloud-authority:/var/lib/claudian-cloud

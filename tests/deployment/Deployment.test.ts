@@ -212,8 +212,23 @@ if [[ "$1" == "compose" && "$*" == *" run --rm cloud-migration"* && "$*" != *" p
   printf '10\n' > "$schema_state_file"
   exit 0
 fi
+if [[ "$1" == "compose" && "$*" == *" run --rm cloud-backup"* \
+    && "\${FAKE_BACKUP_FAIL_ONCE:-0}" == "1" \
+    && ! -f "$FAKE_SCHEMA_STATE_FILE.backup-failed-once" ]]; then
+  : > "$FAKE_SCHEMA_STATE_FILE.backup-failed-once"
+  exit 20
+fi
 if [[ "$1" == "compose" && "$*" == *" run --rm cloud-backup"* && "\${FAKE_BACKUP_FAIL:-0}" == "1" ]]; then
   exit 20
+fi
+if [[ "$1" == "compose" && "$*" == *" run --rm --no-deps cloud-project-recovery"* \
+    && "\${FAKE_PROJECT_RECOVERY_FAIL:-0}" == "1" ]]; then
+  exit 35
+fi
+if [[ "$1" == "compose" && "$*" == *" run --rm --no-deps cloud-project-recovery"* \
+    && "\${FAKE_PREVIOUS_PROJECT_RECOVERY_UNAVAILABLE:-0}" == "1" \
+    && "\${CLAUDIAN_CLOUD_IMAGE:-}" == "${previousImage}" ]]; then
+  exit 36
 fi
 if [[ "$1" == "compose" && "$*" == *" run --rm cloud-backup"* \
     && "\${FAKE_PREVIOUS_BACKUP_UNAVAILABLE:-0}" == "1" \
@@ -722,6 +737,9 @@ exit 29
       const recoverRestore = dockerLog.lastIndexOf(
         ' run --rm cloud-restore-recovery',
       );
+      const recoverProjects = dockerLog.lastIndexOf(
+        ' run --rm --no-deps cloud-project-recovery',
+      );
       assert.equal(
         stop < backup
           && stop < schemaProbe
@@ -732,7 +750,8 @@ exit 29
           && preflight < migrate
           && migrate < verifyAuthority
           && verifyAuthority < recoverRestore
-          && recoverRestore < start,
+          && recoverRestore < recoverProjects
+          && recoverProjects < start,
         true,
       );
       assert.match(
@@ -772,6 +791,119 @@ exit 29
         dockerLog,
         new RegExp(`image=${previousImage}\\|operation=[0-9a-f]{64}\\|compose .* run --rm cloud-backup`),
       );
+    } finally {
+      await rm(fixture.root, { force: true, recursive: true });
+    }
+  });
+
+  it('recovers a failed backup journal before reopening the predecessor', async () => {
+    const fixture = await createFixture();
+    try {
+      const result = runDeployment(fixture, { FAKE_BACKUP_FAIL: '1' });
+
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /deployment\.error: backup-failed/u);
+      const dockerLog = await readFile(fixture.dockerLog, 'utf8');
+      const backup = dockerLog.indexOf(' run --rm cloud-backup');
+      const recovery = dockerLog.indexOf(
+        ' run --rm --no-deps cloud-project-recovery',
+      );
+      const rollback = dockerLog.lastIndexOf(
+        `image=${previousImage}`,
+      );
+      assert.equal(backup >= 0 && backup < recovery && recovery < rollback, true);
+    } finally {
+      await rm(fixture.root, { force: true, recursive: true });
+    }
+  });
+
+  it('keeps writes closed when failed-backup recovery cannot settle', async () => {
+    const fixture = await createFixture();
+    try {
+      const result = runDeployment(fixture, {
+        FAKE_BACKUP_FAIL: '1',
+        FAKE_PROJECT_RECOVERY_FAIL: '1',
+      });
+
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /deployment\.error: backup-recovery-failed/u);
+      const dockerLog = await readFile(fixture.dockerLog, 'utf8');
+      assert.match(
+        dockerLog,
+        / run --rm --no-deps cloud-project-recovery/u,
+      );
+      assert.doesNotMatch(
+        dockerLog,
+        new RegExp(`image=${previousImage}\\|operation=[0-9a-f]{64}\\|compose .* up `),
+      );
+      assert.match(
+        await readFile(fixture.attemptStateFile, 'utf8'),
+        /^backup-active /,
+      );
+    } finally {
+      await rm(fixture.root, { force: true, recursive: true });
+    }
+  });
+
+  it('replays an old-image backup when its dedicated recovery entry is unavailable', async () => {
+    const fixture = await createFixture();
+    try {
+      const result = runDeployment(fixture, {
+        FAKE_BACKUP_FAIL_ONCE: '1',
+        FAKE_CANDIDATE_SUPPORTS_BEFORE: '0',
+        FAKE_PREVIOUS_PROJECT_RECOVERY_UNAVAILABLE: '1',
+        FAKE_SCHEMA_BEFORE: '8',
+      });
+
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /deployment\.error: backup-failed/u);
+      assert.match(result.stderr, /deployment\.rolled-back/u);
+      const dockerLog = await readFile(fixture.dockerLog, 'utf8');
+      assert.equal(
+        dockerLog.match(new RegExp(
+          `image=${previousImage}\\|operation=[0-9a-f]{64}\\|compose .* run --rm cloud-backup`,
+          'gu',
+        ))?.length,
+        2,
+      );
+      const firstBackup = dockerLog.indexOf(' run --rm cloud-backup');
+      const recovery = dockerLog.indexOf(
+        ' run --rm --no-deps cloud-project-recovery',
+      );
+      const replay = dockerLog.indexOf(' run --rm cloud-backup', firstBackup + 1);
+      const rollback = dockerLog.lastIndexOf(`image=${previousImage}`);
+      assert.equal(
+        firstBackup < recovery && recovery < replay && replay < rollback,
+        true,
+      );
+    } finally {
+      await rm(fixture.root, { force: true, recursive: true });
+    }
+  });
+
+  it('recovers a failed fixed-forward backup before compatible rollback', async () => {
+    const fixture = await createFixture();
+    try {
+      const first = runDeployment(fixture, {
+        FAKE_DEPLOY_FAIL_NEW: '1',
+        FAKE_SCHEMA_BEFORE: '8',
+      });
+      assert.notEqual(first.status, 0);
+      const second = runDeployment(fixture, {
+        FAKE_BACKUP_FAIL: '1',
+        FAKE_DEPLOY_FAIL_NEW: '1',
+        FAKE_SCHEMA_BEFORE: '10',
+      });
+
+      assert.equal(second.status, 1);
+      assert.match(second.stderr, /deployment\.error: backup-failed/u);
+      const dockerLog = await readFile(fixture.dockerLog, 'utf8');
+      const backup = dockerLog.lastIndexOf(' run --rm cloud-backup');
+      const recovery = dockerLog.lastIndexOf(
+        ' run --rm --no-deps cloud-project-recovery',
+      );
+      const rollback = dockerLog.lastIndexOf(`image=${previousImage}`);
+      assert.equal(backup >= 0 && backup < recovery && recovery < rollback, true);
     } finally {
       await rm(fixture.root, { force: true, recursive: true });
     }

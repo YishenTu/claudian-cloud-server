@@ -235,10 +235,14 @@ start_image() {
   if [[ "$recovery_required" == 'true' ]]; then
     CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED=true \
       compose_for "$selected_image" run --rm cloud-restore-recovery || return 1
+    CLAUDIAN_CLOUD_PROJECT_RECOVERY_REQUIRED=true \
+      compose_for "$selected_image" run --rm --no-deps \
+      cloud-project-recovery || return 1
   elif [[ "$recovery_required" != 'false' ]]; then
     return 1
   fi
-  CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED="$recovery_required" \
+  CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED=false \
+    CLAUDIAN_CLOUD_PROJECT_RECOVERY_REQUIRED=false \
     compose_for "$selected_image" up \
     --detach \
     --no-build \
@@ -252,10 +256,14 @@ start_restored_image() {
   if [[ "$recovery_required" == 'true' ]]; then
     CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED=true \
       restore_compose_for "$selected_image" run --rm cloud-restore-recovery || return 1
+    CLAUDIAN_CLOUD_PROJECT_RECOVERY_REQUIRED=true \
+      restore_compose_for "$selected_image" run --rm --no-deps \
+      cloud-project-recovery || return 1
   elif [[ "$recovery_required" != 'false' ]]; then
     return 1
   fi
-  CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED="$recovery_required" \
+  CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED=false \
+    CLAUDIAN_CLOUD_PROJECT_RECOVERY_REQUIRED=false \
     restore_compose_for "$selected_image" up \
     --detach \
     --no-build \
@@ -297,6 +305,14 @@ run_maintenance() {
   local selected_image="$1"
   shift
   compose_for "$selected_image" run --rm "$@"
+}
+
+recover_failed_backup() {
+  local selected_image="$1"
+  if run_maintenance "$selected_image" --no-deps cloud-project-recovery; then
+    return 0
+  fi
+  run_maintenance "$selected_image" cloud-backup
 }
 
 read_restored_schema() {
@@ -721,6 +737,8 @@ if [[ "$attempt_phase" == 'forward-only' ]]; then
     'pending' || \
     fail 'deployment-attempt-state-settlement-failed'
   if ! run_maintenance "$selected_backup_image" cloud-backup; then
+    recover_failed_backup "$selected_backup_image" || \
+      fail 'forward-recovery-backup-recovery-failed'
     if [[ $previous_supports_recovery -eq 1 ]]; then
       rollback_to_compatible_previous 'backup-failed' "$recovery_schema"
     fi
@@ -793,6 +811,8 @@ elif [[ "$attempt_phase" == 'backup-active' ]]; then
       rollback_before_advancement 'backup-schema-unsupported'
     fi
     if ! run_maintenance "$selected_backup_image" cloud-backup; then
+      recover_failed_backup "$selected_backup_image" || \
+        fail 'backup-recovery-failed'
       rollback_before_advancement 'backup-failed'
     fi
     if ! reset_restore_target "$selected_backup_image"; then

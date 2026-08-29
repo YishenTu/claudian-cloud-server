@@ -3,6 +3,7 @@ export const MAINTENANCE_COMMANDS = Object.freeze([
   'verify-backup',
   'restore',
   'recover-restore',
+  'recover-projects',
   'export-project',
   'reconcile-exports',
   'resume-delete',

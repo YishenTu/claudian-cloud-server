@@ -115,10 +115,14 @@ async function verifyRuntimeImage(): Promise<void> {
   const token = randomBytes(8).toString('hex');
   const containerName = `claudian-runtime-${token}`;
   const volumeName = `claudian-runtime-repositories-${token}`;
+  const backupVolumeName = `claudian-runtime-backups-${token}`;
+  const exportVolumeName = `claudian-runtime-exports-${token}`;
   const keyringVolumeName = `claudian-runtime-keyring-${token}`;
   const environmentFile = join(temporaryRoot, 'server.env');
   const keyringFile = join(temporaryRoot, 'keyring.json');
   let child: ReturnType<typeof spawn> | undefined;
+  let backupVolumeCreated = false;
+  let exportVolumeCreated = false;
   let keyringVolumeCreated = false;
   let volumeCreated = false;
 
@@ -163,6 +167,10 @@ async function verifyRuntimeImage(): Promise<void> {
 
     await docker(['volume', 'create', volumeName]);
     volumeCreated = true;
+    await docker(['volume', 'create', backupVolumeName]);
+    backupVolumeCreated = true;
+    await docker(['volume', 'create', exportVolumeName]);
+    exportVolumeCreated = true;
     await docker(['volume', 'create', keyringVolumeName]);
     keyringVolumeCreated = true;
     await docker([
@@ -195,6 +203,51 @@ async function verifyRuntimeImage(): Promise<void> {
       'runtime-image-bootstrap',
       database.authorityVolumeId,
     ]);
+    await docker([
+      'run',
+      '--rm',
+      '--user',
+      '0:0',
+      '--mount',
+      `source=${backupVolumeName},target=/var/lib/claudian-cloud-backups/artifacts`,
+      '--mount',
+      `source=${exportVolumeName},target=/var/lib/claudian-cloud-exports/artifacts`,
+      '--entrypoint',
+      '/bin/sh',
+      IMAGE,
+      '-c',
+      'chown 10001:10001 /var/lib/claudian-cloud-backups/artifacts /var/lib/claudian-cloud-exports/artifacts && chmod 0700 /var/lib/claudian-cloud-backups/artifacts /var/lib/claudian-cloud-exports/artifacts',
+    ]);
+    assert.equal(await docker([
+      'run',
+      '--rm',
+      '--network',
+      'host',
+      '--read-only',
+      '--cap-drop',
+      'ALL',
+      '--security-opt',
+      'no-new-privileges:true',
+      '--user',
+      '10001:10001',
+      '--tmpfs',
+      '/tmp:rw,noexec,nosuid,nodev,size=64m',
+      '--env-file',
+      environmentFile,
+      '--mount',
+      `source=${volumeName},target=/var/lib/claudian-cloud`,
+      '--mount',
+      `source=${backupVolumeName},target=/var/lib/claudian-cloud-backups/artifacts`,
+      '--mount',
+      `source=${exportVolumeName},target=/var/lib/claudian-cloud-exports/artifacts`,
+      '--mount',
+      `source=${keyringVolumeName},target=/run/secrets,readonly`,
+      IMAGE,
+      'node',
+      'dist/main.js',
+      'maintenance',
+      'recover-projects',
+    ]), '');
 
     child = spawn('docker', [
       'run',
@@ -271,6 +324,20 @@ async function verifyRuntimeImage(): Promise<void> {
     if (volumeCreated) {
       try {
         await docker(['volume', 'rm', '--force', volumeName]);
+      } catch {
+        // The final generic failure remains sanitized below.
+      }
+    }
+    if (backupVolumeCreated) {
+      try {
+        await docker(['volume', 'rm', '--force', backupVolumeName]);
+      } catch {
+        // The final generic failure remains sanitized below.
+      }
+    }
+    if (exportVolumeCreated) {
+      try {
+        await docker(['volume', 'rm', '--force', exportVolumeName]);
       } catch {
         // The final generic failure remains sanitized below.
       }
