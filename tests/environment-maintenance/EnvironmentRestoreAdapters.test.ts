@@ -619,12 +619,12 @@ describe('production environment restore adapters', () => {
             operationId: input.checkpoint.operationId,
             placementGeneration: input.placementGeneration,
             projectId: input.checkpoint.projectId,
-            publicationMarkerSha256: 'd'.repeat(64),
             refs: input.checkpoint.refs,
             repositoryStorageKey: input.repositoryStorageKey,
             status: 'inactive',
             storageNodeId: 'restore-node',
             validationMarkerSha256: input.checkpoint.markerSha256,
+            publicationMarkerSha256: 'd'.repeat(64),
           });
           return Promise.resolve(publication);
         },
