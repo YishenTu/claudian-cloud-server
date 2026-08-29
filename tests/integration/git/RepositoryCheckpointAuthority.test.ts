@@ -8,6 +8,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   symlink,
   truncate,
@@ -1289,6 +1290,80 @@ exec '${GIT}' "$@"
     } finally {
       await syncFailureAuthority?.close();
       await captureAuthority?.close();
+      await authority.close();
+      await admission.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it('removes empty capture ancestry after exact operation cleanup', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'claudian-checkpoint-cleanup-'));
+    const repositoryRoot = join(root, 'repositories');
+    const operationRoot = join(root, 'checkpoint-operations');
+    const work = join(root, 'work');
+    const bundle = join(root, 'repository.bundle');
+    const projectId = 'project-cleanup';
+    const operationId = 'operation-cleanup';
+    const admission = new ResourceAdmission({
+      maxChildren: 2,
+      maxChildrenPerProject: 1,
+      queueMax: 2,
+      queueMaxPerProject: 1,
+      queueTimeoutMs: 1_000,
+    });
+    const authority = new RepositoryCheckpointAuthority({
+      ...REPOSITORY_VALIDATION_LIMITS,
+      gitExecutable: GIT,
+      maximumBundleBytes: 2 * 1024 * 1024,
+      operationRoot,
+      operationTimeoutMs: 5_000,
+      outputMaxBytes: 64 * 1024,
+      placementValidator: new CurrentPlacement(),
+      repositoryRoot,
+      resourceAdmission: admission,
+      storageNodeId: 'node-a',
+    });
+    try {
+      await Promise.all([mkdir(repositoryRoot), mkdir(operationRoot)]);
+      await git(root, ['init', '--initial-branch=main', work]);
+      await git(work, ['config', 'user.email', 'test@example.invalid']);
+      await git(work, ['config', 'user.name', 'Test User']);
+      await writeFile(join(work, 'note.md'), '# cleanup\n');
+      await git(work, ['add', 'note.md']);
+      await git(work, ['commit', '-m', 'fixture']);
+      const oid = await git(work, ['rev-parse', 'HEAD']);
+      await git(work, ['branch', 'members/member-a']);
+      await git(work, [
+        'bundle',
+        'create',
+        bundle,
+        'refs/heads/main',
+        'refs/heads/members/member-a',
+      ]);
+      const bytes = await readFile(bundle);
+      const reservation = await authority.reserveCaptureOperation(projectId);
+      try {
+        await authority.verifyArtifact(reservation, {
+          body: createReadStream(bundle),
+          expectedByteCount: bytes.length,
+          expectedSha256: createHash('sha256').update(bytes).digest('hex'),
+          objectFormat: 'sha1',
+          operationId,
+          projectId,
+          refs: Object.freeze([
+            Object.freeze({ name: 'refs/heads/main', oid }),
+            Object.freeze({ name: 'refs/heads/members/member-a', oid }),
+          ]),
+        });
+      } finally {
+        await reservation.close();
+      }
+      assert.equal(await authority.discardCaptureOperation({
+        operationId,
+        projectId,
+      }), 'removed');
+      assert.deepEqual(await readdir(operationRoot), []);
+    } finally {
       await authority.close();
       await admission.close();
       await rm(root, { force: true, recursive: true });

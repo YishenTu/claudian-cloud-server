@@ -9,6 +9,7 @@ import {
   readFile,
   rename,
   rm,
+  rmdir,
 } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, normalize, parse } from 'node:path';
 import { getuid } from 'node:process';
@@ -968,6 +969,27 @@ async function directoryExists(path: string): Promise<boolean> {
   }
 }
 
+async function removeEmptyPrivateDirectory(path: string): Promise<boolean> {
+  if (!await directoryExists(path)) return false;
+  await assertPrivateDirectory(path);
+  try {
+    await rmdir(path);
+    return true;
+  } catch (error: unknown) {
+    if (
+      typeof error === 'object'
+      && error !== null
+      && 'code' in error
+      && (
+        error.code === 'ENOENT'
+        || error.code === 'ENOTEMPTY'
+        || error.code === 'EEXIST'
+      )
+    ) return false;
+    fail('storage-unavailable');
+  }
+}
+
 async function inspectPublicationLocations(
   paths: PublicationPaths,
 ): Promise<{
@@ -1602,14 +1624,14 @@ ExactRepositoryRemovalPort {
       return 'replayed';
     }
     if (!await directoryExists(paths.profile)) {
-      await this.#syncDirectory(paths.project);
+      await this.#removeEmptyCaptureAncestry(paths);
       return 'replayed';
     }
     const cleanup = captureOperationCleanupFact(
       input.projectId,
       input.operationId,
     );
-    return this.#removeDurableTree({
+    const result = await this.#removeDurableTree({
       assertTargetOwned: async () => {
         await assertPrivateDirectory(paths.project);
         await assertPrivateDirectory(paths.profile);
@@ -1622,6 +1644,8 @@ ExactRepositoryRemovalPort {
       signal,
       targetPath: paths.operation,
     });
+    await this.#removeEmptyCaptureAncestry(paths);
+    return result;
   }
 
   async #discardCapture(
@@ -1641,14 +1665,14 @@ ExactRepositoryRemovalPort {
       return 'replayed';
     }
     if (!await directoryExists(paths.profile)) {
-      await this.#syncDirectory(paths.project);
+      await this.#removeEmptyCaptureAncestry(paths);
       return 'replayed';
     }
     const cleanup = captureOperationCleanupFact(
       capture.projectId,
       capture.operationId,
     );
-    return this.#removeDurableTree({
+    const result = await this.#removeDurableTree({
       assertTargetOwned: () => this.#assertStoredCapture(paths, capture, signal),
       cleanupKey: cleanup.cleanupKey,
       markerJson: cleanup.markerJson,
@@ -1656,6 +1680,17 @@ ExactRepositoryRemovalPort {
       signal,
       targetPath: paths.operation,
     });
+    await this.#removeEmptyCaptureAncestry(paths);
+    return result;
+  }
+
+  async #removeEmptyCaptureAncestry(paths: CapturePaths): Promise<void> {
+    if (await removeEmptyPrivateDirectory(paths.profile)) {
+      await this.#syncDirectory(paths.project);
+    }
+    if (await removeEmptyPrivateDirectory(paths.project)) {
+      await this.#syncDirectory(this.#operationRoot);
+    }
   }
 
   publishInactive(
