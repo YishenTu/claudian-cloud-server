@@ -1,6 +1,11 @@
 import { once } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
+import {
+  parseOptionalContentLength,
+  requestHeaderValues,
+} from '../httpRequestHeaders.js';
+
 export class GitSmartHttpRouteFailure extends Error {
   readonly status: number;
 
@@ -11,43 +16,21 @@ export class GitSmartHttpRouteFailure extends Error {
   }
 }
 
-export function headerValues(
-  request: IncomingMessage,
-  expectedName: string,
-): readonly string[] {
-  const values: string[] = [];
-  for (let index = 0; index < request.rawHeaders.length; index += 2) {
-    const name = request.rawHeaders[index];
-    const value = request.rawHeaders[index + 1];
-    if (name?.toLocaleLowerCase('en-US') === expectedName && value !== undefined) {
-      values.push(value);
-    }
-  }
-  return values;
-}
+export { requestHeaderValues as headerValues };
 
 export function optionalContentLength(
   request: IncomingMessage,
 ): number | undefined {
-  const values = headerValues(request, 'content-length');
-  if (values.length === 0) return undefined;
-  const value = values[0];
-  if (
-    values.length !== 1
-    || value === undefined
-    || !/^(?:0|[1-9][0-9]*)$/u.test(value)
-  ) {
-    throw new GitSmartHttpRouteFailure(400);
-  }
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) throw new GitSmartHttpRouteFailure(400);
-  return parsed;
+  return parseOptionalContentLength(
+    request,
+    () => new GitSmartHttpRouteFailure(400),
+  );
 }
 
 export function gitProtocol(
   request: IncomingMessage,
 ): 'version=1' | 'version=2' | undefined {
-  const values = headerValues(request, 'git-protocol');
+  const values = requestHeaderValues(request, 'git-protocol');
   if (values.length === 0) return undefined;
   if (
     values.length !== 1

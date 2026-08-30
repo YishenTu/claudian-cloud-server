@@ -83,3 +83,13 @@ export function assertRepositoryPlacementLease(
 ): void {
   createRepositoryPlacementLease(placement);
 }
+
+export function sameRepositoryPlacement(
+  left: RepositoryPlacementLease,
+  right: RepositoryPlacementLease,
+): boolean {
+  return left.generation === right.generation
+    && left.projectId === right.projectId
+    && left.repositoryStorageKey === right.repositoryStorageKey
+    && left.storageNodeId === right.storageNodeId;
+}

@@ -14,8 +14,15 @@ import type {
 } from '../../coordination/ProjectCoordination.js';
 import { CoordinationError } from '../../coordination/CoordinationError.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import {
+  sameRepositoryPlacement,
+  type RepositoryPlacementLease,
+} from '../../repositories/RepositoryPlacement.js';
 import { resolvePrincipalMember } from './resolvePrincipalMember.js';
-import type { RepositoryPlacementLease } from '../../repositories/RepositoryPlacement.js';
+import {
+  OperationDrain,
+  OperationDrainClosedError,
+} from '../OperationDrain.js';
 
 export type ProjectWriteAdmissionErrorCode =
   | 'authorization-denied'
@@ -113,23 +120,10 @@ function fail(code: ProjectWriteAdmissionErrorCode): never {
   throw new ProjectWriteAdmissionError(code);
 }
 
-function samePlacement(
-  left: RepositoryPlacementLease,
-  right: RepositoryPlacementLease,
-): boolean {
-  return left.generation === right.generation
-    && left.projectId === right.projectId
-    && left.repositoryStorageKey === right.repositoryStorageKey
-    && left.storageNodeId === right.storageNodeId;
-}
-
 export class ProjectWriteAdmission {
-  readonly #controllers = new Set<AbortController>();
   readonly #coordination: ProjectWriteAdmissionCoordination;
+  readonly #operations = new OperationDrain();
   readonly #recovery: ProjectRecoveryPort;
-  readonly #running = new Set<Promise<void>>();
-  #closePromise: Promise<void> | undefined;
-  #closed = false;
 
   constructor(options: ProjectWriteAdmissionOptions) {
     this.#coordination = options.coordination;
@@ -167,17 +161,8 @@ export class ProjectWriteAdmission {
     options: AcquireProjectLeaseOptions,
     operation: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
-    if (this.#closed) {
-      return Promise.reject(new ProjectWriteAdmissionError('closed'));
-    }
-    const controller = new AbortController();
-    const onAbort = (): void => controller.abort();
-    options.signal?.addEventListener('abort', onAbort, { once: true });
-    if (options.signal?.aborted === true) controller.abort();
-    this.#controllers.add(controller);
-    const running = Promise.resolve().then(
-      () => operation(controller.signal),
-    ).catch((error: unknown) => {
+    return this.#operations.run(options, operation).catch((error: unknown) => {
+      if (error instanceof OperationDrainClosedError) return fail('closed');
       if (!(error instanceof CoordinationError)) throw error;
       if (error.code === 'cancelled') return fail('cancelled');
       if (error.code === 'closed') return fail('closed');
@@ -189,23 +174,10 @@ export class ProjectWriteAdmission {
       ) return fail('state-conflict');
       return fail('dependency-failed');
     });
-    const tracked = running.then(() => undefined, () => undefined);
-    this.#running.add(tracked);
-    void tracked.finally(() => {
-      options.signal?.removeEventListener('abort', onAbort);
-      this.#controllers.delete(controller);
-      this.#running.delete(tracked);
-    });
-    return running;
   }
 
   close(): Promise<void> {
-    if (this.#closePromise === undefined) {
-      this.#closed = true;
-      for (const controller of this.#controllers) controller.abort();
-      this.#closePromise = Promise.allSettled([...this.#running]).then(() => undefined);
-    }
-    return this.#closePromise;
+    return this.#operations.close();
   }
 
   async #run<T>(
@@ -296,7 +268,7 @@ export class ProjectWriteAdmission {
   }
 
   #assertAvailable(signal: AbortSignal): void {
-    if (this.#closed) fail('closed');
+    if (this.#operations.closed) fail('closed');
     if (signal.aborted) fail('cancelled');
   }
 
@@ -312,7 +284,7 @@ export class ProjectWriteAdmission {
         recovery,
         new Promise<never>((_resolve, reject) => {
           abortListener = () => reject(new ProjectWriteAdmissionError(
-            this.#closed ? 'closed' : 'cancelled',
+            this.#operations.closed ? 'closed' : 'cancelled',
           ));
           signal.addEventListener('abort', abortListener, { once: true });
           if (signal.aborted) abortListener();
@@ -394,7 +366,7 @@ export class ProjectWriteAdmission {
       || current.memberId !== expected.memberId
       || current.membershipRevision !== expected.membershipRevision
       || current.role !== expected.role
-      || !samePlacement(current.placement, expected.placement)
+      || !sameRepositoryPlacement(current.placement, expected.placement)
     ) {
       return fail('state-conflict');
     }

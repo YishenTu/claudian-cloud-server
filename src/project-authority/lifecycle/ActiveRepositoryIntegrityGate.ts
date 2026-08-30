@@ -13,7 +13,10 @@ import type {
   ExpectedRepositoryRef,
   RepositoryIntegrityResult,
 } from '../../repositories/GitRepositoryAuthority.js';
-import type { RepositoryPlacementLease } from '../../repositories/RepositoryPlacement.js';
+import {
+  sameRepositoryPlacement,
+  type RepositoryPlacementLease,
+} from '../../repositories/RepositoryPlacement.js';
 
 export interface ActiveRepositoryIntegrityCoordination {
   acquireProjectLease(projectId: CollabProjectId): Promise<PinnedProjectLease>;
@@ -38,16 +41,6 @@ export interface ActiveRepositoryIntegrityGateOptions {
   readonly cleanupReceivePackState?: boolean;
   readonly coordination: ActiveRepositoryIntegrityCoordination;
   readonly repository: ActiveRepositoryIntegrityRepository;
-}
-
-function samePlacement(
-  left: RepositoryPlacementLease,
-  right: RepositoryPlacementLease,
-): boolean {
-  return left.generation === right.generation
-    && left.projectId === right.projectId
-    && left.repositoryStorageKey === right.repositoryStorageKey
-    && left.storageNodeId === right.storageNodeId;
 }
 
 function expectedMemberRefs(
@@ -110,7 +103,7 @@ export class ActiveRepositoryIntegrityGate {
         if (
           project?.serviceState !== 'active'
           || placement === undefined
-          || !samePlacement(placement, catalogPlacement)
+          || !sameRepositoryPlacement(placement, catalogPlacement)
         ) {
           throw new Error('active-repository-integrity.invalid-authority-state');
         }

@@ -29,6 +29,10 @@ import {
   type DevelopmentPrincipalAdapter,
 } from '../request-context/DevelopmentPrincipalAdapter.js';
 import type { IngressPrincipal } from '../request-context/IngressPrincipal.js';
+import {
+  parseOptionalContentLength,
+  requestHeaderValues,
+} from './httpRequestHeaders.js';
 
 export interface DevelopmentBootstrapRequestHandler {
   activateDevelopmentBootstrap(
@@ -95,46 +99,25 @@ function protocolFailure(field: string): RouteFailure {
   }));
 }
 
-function headerValues(request: IncomingMessage, expectedName: string): readonly string[] {
-  const values: string[] = [];
-  for (let index = 0; index < request.rawHeaders.length; index += 2) {
-    const name = request.rawHeaders[index];
-    const value = request.rawHeaders[index + 1];
-    if (name?.toLocaleLowerCase('en-US') === expectedName && value !== undefined) {
-      values.push(value);
-    }
-  }
-  return values;
-}
-
 function optionalContentLength(request: IncomingMessage): number | undefined {
-  const values = headerValues(request, 'content-length');
-  if (values.length === 0) return undefined;
-  const value = values[0];
-  if (
-    values.length !== 1
-    || value === undefined
-    || !/^(?:0|[1-9][0-9]*)$/u.test(value)
-  ) {
-    throw protocolFailure('content-length');
-  }
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) throw protocolFailure('content-length');
-  return parsed;
+  return parseOptionalContentLength(
+    request,
+    () => protocolFailure('content-length'),
+  );
 }
 
 async function readJsonBody(
   request: IncomingMessage,
   maximumBytes: number,
 ): Promise<unknown> {
-  const contentTypes = headerValues(request, 'content-type');
+  const contentTypes = requestHeaderValues(request, 'content-type');
   if (
     contentTypes.length !== 1
     || !/^application\/json(?:;\s*charset=utf-8)?$/iu.test(contentTypes[0] ?? '')
   ) {
     throw protocolFailure('content-type');
   }
-  const encodings = headerValues(request, 'content-encoding');
+  const encodings = requestHeaderValues(request, 'content-encoding');
   if (encodings.length > 1 || (encodings[0] !== undefined && encodings[0] !== 'identity')) {
     throw protocolFailure('content-encoding');
   }
@@ -257,7 +240,7 @@ export class DevelopmentBootstrapRoutes {
     let principal: IngressPrincipal;
     try {
       principal = this.#principalAdapter.bind({
-        headerValues: headerValues(request, 'x-claudian-development-actor'),
+        headerValues: requestHeaderValues(request, 'x-claudian-development-actor'),
         localAddress: request.socket.localAddress,
         remoteAddress: request.socket.remoteAddress,
       });
@@ -282,8 +265,8 @@ export class DevelopmentBootstrapRoutes {
 
     if (operation === 'putDevelopmentBootstrapGitBundle') {
       if (attemptId === undefined) throw protocolFailure('attemptId');
-      const contentTypes = headerValues(request, 'content-type');
-      const encodings = headerValues(request, 'content-encoding');
+      const contentTypes = requestHeaderValues(request, 'content-type');
+      const encodings = requestHeaderValues(request, 'content-encoding');
       if (
         contentTypes.length !== 1
         || contentTypes[0] !== 'application/x-git-bundle'

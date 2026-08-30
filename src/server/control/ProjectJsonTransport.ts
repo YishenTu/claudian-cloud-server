@@ -17,6 +17,10 @@ import {
   type RequestPrincipalBindingOptions,
   type TrustedProjectPrincipalBinding,
 } from '../../request-context/RequestPrincipalBinding.js';
+import {
+  parseOptionalContentLength,
+  requestHeaderValues,
+} from '../httpRequestHeaders.js';
 
 export type { TrustedProjectPrincipalBinding };
 
@@ -52,32 +56,11 @@ export function projectProtocolFailure(field: string): ProjectJsonRouteFailure {
   }));
 }
 
-function headerValues(request: IncomingMessage, expectedName: string): readonly string[] {
-  const values: string[] = [];
-  for (let index = 0; index < request.rawHeaders.length; index += 2) {
-    const name = request.rawHeaders[index];
-    const value = request.rawHeaders[index + 1];
-    if (name?.toLocaleLowerCase('en-US') === expectedName && value !== undefined) {
-      values.push(value);
-    }
-  }
-  return values;
-}
-
 function optionalContentLength(request: IncomingMessage): number | undefined {
-  const values = headerValues(request, 'content-length');
-  if (values.length === 0) return undefined;
-  const value = values[0];
-  if (
-    values.length !== 1
-    || value === undefined
-    || !/^(?:0|[1-9][0-9]*)$/u.test(value)
-  ) {
-    throw projectProtocolFailure('content-length');
-  }
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) throw projectProtocolFailure('content-length');
-  return parsed;
+  return parseOptionalContentLength(
+    request,
+    () => projectProtocolFailure('content-length'),
+  );
 }
 
 async function nextRequestChunk(
@@ -137,14 +120,14 @@ async function readJsonBody(
   maximumBytes: number,
   signal: AbortSignal,
 ): Promise<unknown> {
-  const contentTypes = headerValues(request, 'content-type');
+  const contentTypes = requestHeaderValues(request, 'content-type');
   if (
     contentTypes.length !== 1
     || !/^application\/json(?:;\s*charset=utf-8)?$/iu.test(contentTypes[0] ?? '')
   ) {
     throw projectProtocolFailure('content-type');
   }
-  const encodings = headerValues(request, 'content-encoding');
+  const encodings = requestHeaderValues(request, 'content-encoding');
   if (encodings.length > 1 || (encodings[0] !== undefined && encodings[0] !== 'identity')) {
     throw projectProtocolFailure('content-encoding');
   }
