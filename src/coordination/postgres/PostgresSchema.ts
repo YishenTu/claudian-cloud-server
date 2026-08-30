@@ -17,7 +17,7 @@ export const PROJECT_READ_EVENTS_SCHEMA = Object.freeze({
 });
 
 export const COLLABORATION_SCHEMA = Object.freeze({
-  checksum: '13ee2c7de2b189fb502a6610bff250f9de9133a82d79c153658251cf7f5a5780',
+  checksum: '805b760962abb27c085e97b977cf443c5febbfb3cd1fc3024f9f94e157dc7c40',
   name: 'collaboration',
   version: 4,
 });
@@ -35,7 +35,7 @@ export const PORTABILITY_LIFECYCLE_SCHEMA = Object.freeze({
 });
 
 export const LAN_TO_CLOUD_TRANSFER_SCHEMA = Object.freeze({
-  checksum: 'd49bf1335d3410cdd95ff2b928f21264eb6212e7db9baea6561d118038d06a95',
+  checksum: '432a787b07efbee791ea62b583334860f48343689c5b67e9ae101aa1927322b7',
   name: 'lan-to-cloud-transfer',
   version: 7,
 });
@@ -47,19 +47,19 @@ export const CLOUD_TO_LAN_TRANSFER_SCHEMA = Object.freeze({
 });
 
 export const TERMINAL_PROJECT_LIFECYCLE_SCHEMA = Object.freeze({
-  checksum: 'f5a9541802d114f0959b2e62c9a884cba938c99926fe9547063d95a457a6d284',
+  checksum: 'cc494cde24e15af6b3c171a12d0754fb82d7c1cd301744eebb744bcadce79711',
   name: 'terminal-project-lifecycle',
   version: 9,
 });
 
 export const TERMINAL_CONTINUITY_CATALOG_SCHEMA = Object.freeze({
-  checksum: '696e518fbdf82efd12f6276650862e86f0eed5da66013de4ba924cd2a005fe3f',
+  checksum: '5be7f9a48ab505d9a950c310605d696abc8b11b9435018cd72f41769a2b917f1',
   name: 'terminal-continuity-catalog',
   version: 10,
 });
 
 export const CLOUD_PROJECT_MEMBERSHIP_SCHEMA = Object.freeze({
-  checksum: 'bbe549d51b6f5c5f23994b57959548cefc5a6cc741e1d0f61680fdcfb933ca1d',
+  checksum: '1d745589d66d8636537be28a7b3e9e987d0996e5cac98f68cf7fae703a6e9b9a',
   name: 'cloud-project-membership',
   version: 11,
 });

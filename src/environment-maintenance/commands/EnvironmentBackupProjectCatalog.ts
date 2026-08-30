@@ -11,17 +11,6 @@ import type {
 import type { EnvironmentBackupProjectCatalogPort } from './EnvironmentBackupCommand.js';
 import type { TerminalProjectContinuityRecord } from '../../coordination/ProjectCheckpointPersistence.js';
 
-interface TerminalProjectContinuityCatalog {
-  list(input: Readonly<{
-    readonly after?: CollabProjectId;
-    readonly limit: number;
-    readonly signal: AbortSignal;
-  }>): Promise<Readonly<{
-    readonly nextCursor: CollabProjectId | undefined;
-    readonly projectIds: readonly CollabProjectId[];
-  }>>;
-}
-
 export interface EnvironmentBackupProjectCatalogOptions {
   readonly coordination: Readonly<{
     acquireProjectLease(
@@ -40,7 +29,6 @@ export interface EnvironmentBackupProjectCatalogOptions {
       readonly projectIds: readonly CollabProjectId[];
     }>>;
   }>;
-  readonly terminalCatalog?: TerminalProjectContinuityCatalog;
 }
 
 function fail(): never {
@@ -58,11 +46,9 @@ async function close(lease: PinnedProjectLease | undefined): Promise<void> {
 export class EnvironmentBackupProjectCatalog
 implements EnvironmentBackupProjectCatalogPort {
   readonly #coordination: EnvironmentBackupProjectCatalogOptions['coordination'];
-  readonly #terminalCatalog: TerminalProjectContinuityCatalog | undefined;
 
   constructor(options: EnvironmentBackupProjectCatalogOptions) {
     this.#coordination = options.coordination;
-    this.#terminalCatalog = options.terminalCatalog;
   }
 
   async list(input: Readonly<{
@@ -109,13 +95,7 @@ implements EnvironmentBackupProjectCatalogPort {
     readonly nextCursor: CollabProjectId | undefined;
     readonly projectIds: readonly CollabProjectId[];
   }>> {
-    if (this.#terminalCatalog !== undefined) {
-      return this.#terminalCatalog.list({
-        ...(input.after === undefined ? {} : { after: input.after }),
-        limit: 100,
-        signal: input.signal,
-      });
-    }
+    if (input.signal.aborted) return fail();
     return this.#coordination.listTerminalProjectContinuity({
       ...(input.after === undefined ? {} : { after: input.after }),
       limit: 100,

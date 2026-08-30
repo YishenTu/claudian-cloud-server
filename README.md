@@ -39,7 +39,7 @@ docker compose -f deploy/compose.yaml up --detach --no-deps --wait cloud-server
 
 The runtime never receives bootstrap or migration credentials and never applies schema. PostgreSQL and the Cloud application remain reachable only on their configured loopback ports.
 
-For later updates, run the deployment script from the clean checkout. By default, it deploys the latest `origin/main`, verifies service health, and rolls back an unhealthy replacement.
+For later current-schema code updates, run the deployment script from the clean checkout. By default, it deploys the latest `origin/main`, stops the running server, verifies the candidate against the unchanged authority, durably fences recovery to that exact revision and image, completes restore and Project recovery, and then opens the candidate. A verification failure before the fence reopens the unchanged previous image. After the fence, a failed or interrupted run resumes only the recorded candidate; the script never attempts a schema upgrade or rollback.
 
 ```bash
 export CLAUDIAN_DEPLOY_ENV_FILE=/etc/claudian-cloud-server/server.env

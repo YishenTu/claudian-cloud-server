@@ -187,7 +187,7 @@ describe('Collaboration persistence', () => {
              ) AS "canUpdate"`,
         );
         assert.deepEqual(privileges.rows, [{
-          canDelete: false,
+          canDelete: true,
           canInsert: true,
           canSelect: true,
           canUpdate: false,

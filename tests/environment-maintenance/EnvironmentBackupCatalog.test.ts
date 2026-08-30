@@ -98,15 +98,12 @@ describe('EnvironmentBackupCatalogVerifier', () => {
     ]);
   });
 
-  it('accepts only backup schemas inside the offline maintenance interval', async () => {
+  it('accepts only the exact configured backup schema', async () => {
     const accepted = document(9);
     const rejected = document(8);
     let sourceDocument = accepted;
     const verifier = new EnvironmentBackupCatalogVerifier({
-      coordinationSchemaCompatibility: {
-        maximumVersion: 10,
-        minimumVersion: 9,
-      },
+      coordinationSchemaVersion: 9,
       repositoryFormatVersion: 1,
       serverBuild: 'cloud-build-a',
       source: {

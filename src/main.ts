@@ -23,8 +23,7 @@ async function runMaintenance(arguments_: readonly string[]): Promise<void> {
       source: process.env,
       write: writeStandardOutput,
     });
-    const result = await runtime.run(arguments_, controller.signal);
-    process.exitCode = result === 'unsupported' ? 2 : 0;
+    await runtime.run(arguments_, controller.signal);
   } finally {
     process.removeListener('SIGINT', abort);
     process.removeListener('SIGTERM', abort);

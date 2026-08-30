@@ -42,16 +42,6 @@ export interface ActiveClaimCustodyKeyReferenceGateOptions {
   readonly verifier: Readonly<{
     verify(records: readonly unknown[]): Promise<void>;
   }>;
-  readonly terminalCatalog?: Readonly<{
-    list(input: Readonly<{
-      readonly after?: CollabProjectId;
-      readonly limit: number;
-      readonly signal: AbortSignal;
-    }>): Promise<Readonly<{
-      readonly nextCursor: CollabProjectId | undefined;
-      readonly projectIds: readonly CollabProjectId[];
-    }>>;
-  }>;
 }
 
 function fail(): never {
@@ -76,14 +66,11 @@ function samePlacement(
 export class ActiveClaimCustodyKeyReferenceGate {
   readonly #coordination: ActiveClaimCustodyKeyReferenceGateOptions['coordination'];
   readonly #metadata: ActiveClaimCustodyKeyReferenceGateOptions['metadata'];
-  readonly #terminalCatalog:
-    ActiveClaimCustodyKeyReferenceGateOptions['terminalCatalog'];
   readonly #verifier: ActiveClaimCustodyKeyReferenceGateOptions['verifier'];
 
   constructor(options: ActiveClaimCustodyKeyReferenceGateOptions) {
     this.#coordination = options.coordination;
     this.#metadata = options.metadata;
-    this.#terminalCatalog = options.terminalCatalog;
     this.#verifier = options.verifier;
   }
 
@@ -108,19 +95,10 @@ export class ActiveClaimCustodyKeyReferenceGate {
       after = undefined;
       do {
         assertActive(signal);
-        const page: Readonly<{
-          readonly nextCursor: CollabProjectId | undefined;
-          readonly projectIds: readonly CollabProjectId[];
-        }> = this.#terminalCatalog === undefined
-          ? await this.#coordination.listTerminalProjectContinuity({
-              ...(after === undefined ? {} : { after }),
-              limit: 100,
-            })
-          : await this.#terminalCatalog.list({
-              ...(after === undefined ? {} : { after }),
-              limit: 100,
-              signal,
-            });
+        const page = await this.#coordination.listTerminalProjectContinuity({
+          ...(after === undefined ? {} : { after }),
+          limit: 100,
+        });
         for (const projectId of page.projectIds) {
           if (!activeProjects.has(projectId)) {
             await this.#verifyTerminalProject(projectId, signal);

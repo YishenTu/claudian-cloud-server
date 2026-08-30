@@ -27,6 +27,7 @@
 - Project lifecycle recovery and clean-environment restore have separate authorities. Project journals use the canonical Project write lane and recovery catalog; environment restore uses one private environment journal while runtime readiness remains closed.
 - Operator access never authorizes Project deletion. Maintenance may resume only an exact deletion journal created by a Project-authorized Retire or authority handoff.
 - Backups are not considered complete until restoration and repository integrity have been verified.
+- Cloud has no deployed legacy database or backup baseline. Database setup initializes only an empty environment at the current schema, runtime and maintenance accept only that exact schema, and old schema prefixes are never upgraded in place.
 
 ## Development constraints
 

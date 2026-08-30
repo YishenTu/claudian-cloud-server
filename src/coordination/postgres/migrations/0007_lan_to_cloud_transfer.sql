@@ -22,16 +22,6 @@ ALTER TABLE claudian_cloud.project_memberships
   ADD COLUMN activated_at timestamptz,
   ADD COLUMN revoked_at timestamptz;
 
-UPDATE claudian_cloud.project_memberships
-   SET activated_at = CASE
-         WHEN status = 'pending' THEN NULL
-         ELSE updated_at
-       END,
-       revoked_at = CASE
-         WHEN status = 'revoked' THEN updated_at
-         ELSE NULL
-       END;
-
 ALTER TABLE claudian_cloud.project_memberships
   ADD CONSTRAINT project_memberships_lifecycle_timestamps
     CHECK (

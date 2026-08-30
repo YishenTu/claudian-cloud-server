@@ -310,11 +310,11 @@ describe('Project checkpoint persistence', () => {
           [PROJECT_ID, 'f'.repeat(64), CREATED_AT, invitationExpiresAt],
         );
         await client.query(
-          `INSERT INTO claudian_cloud.project_membership_idempotency_results (
-             project_id, actor_member_id, operation, idempotency_key,
-             request_fingerprint, result_json, created_at
+          `INSERT INTO claudian_cloud.idempotency_results (
+             project_id, member_id, operation, idempotency_key,
+             request_fingerprint, response_json, created_at
            ) VALUES ($1, 'member-manager', 'createManagerResponsibilityOffer',
-                     'offer-key', $2, $3, $4)`,
+                     'offer-key', $2, $3::jsonb, $4)`,
           [
             PROJECT_ID,
             'f'.repeat(64),

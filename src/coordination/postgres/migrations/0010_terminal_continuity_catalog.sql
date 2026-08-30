@@ -9,19 +9,6 @@ CREATE TABLE claudian_cloud.project_terminal_continuity_catalog (
     CHECK (project_id ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
 );
 
-ALTER TABLE claudian_cloud.project_tombstones
-  NO FORCE ROW LEVEL SECURITY;
-
-INSERT INTO claudian_cloud.project_terminal_continuity_catalog (
-  project_id,
-  retired_at
-)
-SELECT project_id, retired_at
-  FROM claudian_cloud.project_tombstones;
-
-ALTER TABLE claudian_cloud.project_tombstones
-  FORCE ROW LEVEL SECURITY;
-
 CREATE FUNCTION claudian_cloud.register_project_terminal_continuity()
 RETURNS trigger
 LANGUAGE plpgsql

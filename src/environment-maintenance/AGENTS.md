@@ -16,7 +16,7 @@
 - Restore validates the entire backup catalog, every retained claim-custody key reference, and every live protected transfer-claim, invitation, and claim-override envelope before creating target state. Private keys come only from the deployment-owned keyring mount and never enter the backup.
 - An environment backup contains active Project checkpoints plus a separate canonical continuity artifact for each terminal-only Project. Verification and restore preserve both sets without synthesizing active Project state or repository placement, and operator-reported Project counts include both sets.
 - Before enumerating active or terminal Projects, environment backup strictly drains the canonical lifecycle recovery catalog. A candidate still waiting for external proof, an unsupported recovery kind, or any recovery failure aborts the whole backup; enumeration never silently omits a post-relinquishment Project that has not yet activated its placement.
-- At the immediate predecessor schema, backup obtains terminal Project IDs through the narrow migration-role bridge, then reads and verifies every continuity record through the ordinary runtime Project scope. The bridge is not a second record reader and is unavailable at the current schema.
+- Backup, authority verification, and restore accept only the current coordination schema. Backup and authority verification enumerate active and terminal Projects through ordinary runtime credentials; only clean restore receives the migration credential needed to create an empty current-schema target.
 
 ## Verification
 

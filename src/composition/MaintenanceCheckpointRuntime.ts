@@ -7,7 +7,6 @@ import {
   BACKUP_ARTIFACT_ROOT,
   EXPORT_ARTIFACT_ROOT,
 } from '../config/MaintenanceCommandConfig.js';
-import { MAINTENANCE_POSTGRES_SCHEMA_COMPATIBILITY } from '../config/PostgresSchemaCompatibility.js';
 import type { ServerConfig } from '../config/ServerConfig.js';
 import { PostgresCoordination } from '../coordination/postgres/PostgresCoordination.js';
 import { ProductionCheckpointStaging } from '../onboarding/production/ProductionCheckpointStaging.js';
@@ -203,9 +202,7 @@ class Runtime implements MaintenanceCheckpointRuntime {
     readonly authorityVolumeId: string;
     readonly schemaVersion: number;
   }>> {
-    const schemaVersion = await this.coordination.verifySchemaCompatibility(
-      MAINTENANCE_POSTGRES_SCHEMA_COMPATIBILITY,
-    );
+    const schemaVersion = await this.coordination.verifySchemaCompatibility();
     const authorityVolumeId = await this.#authorityPair.verify();
     return Object.freeze({ authorityVolumeId, schemaVersion });
   }

@@ -105,7 +105,7 @@ interface ManagerResponsibilityOfferRow {
 
 interface MembershipAdministrationReplayRow {
   readonly request_fingerprint: string;
-  readonly result_json: string;
+  readonly response_json: unknown;
 }
 
 interface ProjectMemberRow {
@@ -1512,8 +1512,8 @@ export class PostgresProjectMembershipPersistence
     await this.#expireAndScrub(input.revokedAt);
     const replays = await this.#query<{ readonly request_fingerprint: string }>(
       `SELECT request_fingerprint
-         FROM claudian_cloud.project_membership_idempotency_results
-        WHERE project_id = $1 AND actor_member_id = $2
+         FROM claudian_cloud.idempotency_results
+        WHERE project_id = $1 AND member_id = $2
           AND operation = 'revokeProjectInvitation' AND idempotency_key = $3`,
       [this.#projectId, input.actorMemberId, input.idempotencyKey],
     );
@@ -1556,10 +1556,10 @@ export class PostgresProjectMembershipPersistence
     );
     if (rows.length !== 1) return { status: 'stale-invitation' as const };
     await this.#query(
-      `INSERT INTO claudian_cloud.project_membership_idempotency_results (
-         project_id, actor_member_id, operation, idempotency_key,
-         request_fingerprint, result_json, created_at
-       ) VALUES ($1, $2, 'revokeProjectInvitation', $3, $4, $5, $6)`,
+      `INSERT INTO claudian_cloud.idempotency_results (
+         project_id, member_id, operation, idempotency_key,
+         request_fingerprint, response_json, created_at
+       ) VALUES ($1, $2, 'revokeProjectInvitation', $3, $4, $5::jsonb, $6)`,
       [
         this.#projectId,
         input.actorMemberId,
@@ -2732,9 +2732,9 @@ export class PostgresProjectMembershipPersistence
     | undefined
   > {
     const rows = await this.#query<MembershipAdministrationReplayRow>(
-      `SELECT request_fingerprint, result_json
-         FROM claudian_cloud.project_membership_idempotency_results
-        WHERE project_id = $1 AND actor_member_id = $2
+      `SELECT request_fingerprint, response_json
+         FROM claudian_cloud.idempotency_results
+        WHERE project_id = $1 AND member_id = $2
           AND operation = $3 AND idempotency_key = $4`,
       [this.#projectId, actorMemberId, operation, idempotencyKey],
     );
@@ -2745,7 +2745,7 @@ export class PostgresProjectMembershipPersistence
     if (row !== undefined) {
       try {
         return {
-          response: decode(JSON.parse(row.result_json) as unknown),
+          response: decode(row.response_json),
           status: 'replayed' as const,
         };
       } catch {
@@ -2771,10 +2771,10 @@ export class PostgresProjectMembershipPersistence
     createdAt: string,
   ): Promise<void> {
     const rows = await this.#query<{ readonly idempotency_key: string }>(
-      `INSERT INTO claudian_cloud.project_membership_idempotency_results (
-         project_id, actor_member_id, operation, idempotency_key,
-         request_fingerprint, result_json, created_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO claudian_cloud.idempotency_results (
+         project_id, member_id, operation, idempotency_key,
+         request_fingerprint, response_json, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
        RETURNING idempotency_key`,
       [
         this.#projectId,
@@ -2817,11 +2817,11 @@ export class PostgresProjectMembershipPersistence
               + ($2::bigint * interval '1 millisecond') <= $3
           FOR UPDATE
        ), due_results AS MATERIALIZED (
-         SELECT result.project_id, result.actor_member_id,
+         SELECT result.project_id, result.member_id AS actor_member_id,
                 result.operation, result.idempotency_key,
                 result.request_fingerprint, offer.offer_id,
                 offer.compacted_at
-           FROM claudian_cloud.project_membership_idempotency_results AS result
+           FROM claudian_cloud.idempotency_results AS result
            JOIN due_offers AS offer
              ON result.project_id = offer.project_id
             AND (
@@ -2832,16 +2832,16 @@ export class PostgresProjectMembershipPersistence
                   'declineManagerResponsibility',
                   'cancelManagerResponsibilityOffer'
                 )
-                AND result.result_json::jsonb #>> '{offer,offerId}' = offer.offer_id
+                AND result.response_json #>> '{offer,offerId}' = offer.offer_id
               )
               OR (
                 result.operation = 'promoteManager'
-                AND result.actor_member_id = offer.source_manager_member_id
+                AND result.member_id = offer.source_manager_member_id
                 AND result.created_at = offer.compacted_at
                   - ($2::bigint * interval '1 millisecond')
-                AND result.result_json::jsonb ->> 'promotedMemberId'
+                AND result.response_json ->> 'promotedMemberId'
                   = offer.target_member_id
-                AND (result.result_json::jsonb ->> 'offerRevision')::bigint
+                AND (result.response_json ->> 'offerRevision')::bigint
                   = offer.revision
               )
             )
@@ -2870,10 +2870,10 @@ export class PostgresProjectMembershipPersistence
            DO NOTHING
          RETURNING project_id, actor_member_id, operation, idempotency_key
        ), deleted_results AS (
-         DELETE FROM claudian_cloud.project_membership_idempotency_results AS result
+         DELETE FROM claudian_cloud.idempotency_results AS result
           USING due_results, inserted
           WHERE result.project_id = due_results.project_id
-            AND result.actor_member_id = due_results.actor_member_id
+            AND result.member_id = due_results.actor_member_id
             AND result.operation = due_results.operation
             AND result.idempotency_key = due_results.idempotency_key
             AND inserted.project_id = due_results.project_id

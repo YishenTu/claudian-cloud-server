@@ -1,26 +1,5 @@
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1
-      FROM claudian_cloud.leave_former_principal_replays
-  ) OR EXISTS (
-    SELECT 1
-      FROM claudian_cloud.project_lifecycle_journals
-     WHERE kind = 'leave'
-  ) THEN
-    RAISE EXCEPTION USING
-      ERRCODE = '55000',
-      MESSAGE = 'legacy Leave lifecycle state requires operator recovery';
-  END IF;
-END;
-$$;
-
 ALTER TABLE claudian_cloud.project_memberships
   ADD COLUMN left_at timestamptz;
-
-UPDATE claudian_cloud.project_memberships
-   SET left_at = updated_at
- WHERE status = 'left';
 
 ALTER TABLE claudian_cloud.project_memberships
   DROP CONSTRAINT project_memberships_lifecycle_timestamps,

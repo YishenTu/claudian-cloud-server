@@ -1330,12 +1330,12 @@ function minimumBackupRecords() {
 }
 
 describe('PostgresEnvironmentRestorePersistence', () => {
-  it('creates a clean restore target at the immediate predecessor schema', async () => {
+  it('rejects an old backup schema before creating restore state', async () => {
     await withPostgresTestDatabase(async database => {
       const persistence = new PostgresEnvironmentRestorePersistence({
         connectionString: database.migrationUrl,
       });
-      await persistence.createDatabase({
+      await assert.rejects(persistence.createDatabase({
         authorityId: SOURCE_METADATA.authorityId,
         authorityVolumeId: database.authorityVolumeId,
         authorityVolumeIdentity: TARGET_VOLUME_IDENTITY,
@@ -1343,24 +1343,19 @@ describe('PostgresEnvironmentRestorePersistence', () => {
         operationId: 'restore-previous-schema',
         restoreEpoch: SOURCE_METADATA.restoreEpoch + 1,
         signal: new AbortController().signal,
-      });
+      }));
 
       const client = new Client({ connectionString: database.migrationUrl });
       try {
         await client.connect();
-        const version = await client.query<{ readonly version: number }>(
-          `SELECT version
-             FROM claudian_cloud.schema_migrations
-            ORDER BY version DESC
-            LIMIT 1`,
+        const schemas = await client.query<{
+          readonly canonical: string | null;
+          readonly restore: string | null;
+        }>(
+          `SELECT to_regnamespace('claudian_cloud')::text AS canonical,
+                  to_regnamespace('claudian_cloud_restore')::text AS restore`,
         );
-        const membershipCatalog = await client.query<{ readonly relation: string | null }>(
-          `SELECT to_regclass(
-             'claudian_cloud.project_invitations'
-           )::text AS relation`,
-        );
-        assert.deepEqual(version.rows, [{ version: CURRENT_POSTGRES_SCHEMA_VERSION - 1 }]);
-        assert.deepEqual(membershipCatalog.rows, [{ relation: null }]);
+        assert.deepEqual(schemas.rows, [{ canonical: null, restore: null }]);
       } finally {
         await client.end();
       }

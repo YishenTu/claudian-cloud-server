@@ -173,11 +173,9 @@ describe('maintenance Compose configuration', () => {
   it('exposes the migration credential only to offline schema owners', () => {
     const model = render();
     for (const name of [
-      'cloud-backup',
       'cloud-migration',
       'cloud-restore',
       'cloud-restore-recovery',
-      'cloud-verify-authority',
       'cloud-verify-backup',
     ]) {
       assert.ok(
@@ -188,11 +186,13 @@ describe('maintenance Compose configuration', () => {
     }
     for (const name of [
       'cloud-bootstrap',
+      'cloud-backup',
       'cloud-export-project',
       'cloud-project-recovery',
       'cloud-reconcile-exports',
       'cloud-resume-delete',
       'cloud-server',
+      'cloud-verify-authority',
       'postgres',
     ]) {
       assert.equal(
