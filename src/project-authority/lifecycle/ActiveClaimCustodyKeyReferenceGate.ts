@@ -7,7 +7,10 @@ import type {
   ActiveRepositoryPlacementPage,
   PinnedProjectLease,
 } from '../../coordination/ProjectCoordination.js';
-import type { RepositoryPlacementLease } from '../../repositories/RepositoryPlacement.js';
+import {
+  sameRepositoryPlacement,
+  type RepositoryPlacementLease,
+} from '../../repositories/RepositoryPlacement.js';
 
 export interface ActiveClaimCustodyKeyReferenceMetadata {
   readonly authorityId: string;
@@ -50,16 +53,6 @@ function fail(): never {
 
 function assertActive(signal: AbortSignal): void {
   if (signal.aborted) fail();
-}
-
-function samePlacement(
-  left: RepositoryPlacementLease,
-  right: RepositoryPlacementLease,
-): boolean {
-  return left.generation === right.generation
-    && left.projectId === right.projectId
-    && left.repositoryStorageKey === right.repositoryStorageKey
-    && left.storageNodeId === right.storageNodeId;
 }
 
 /** Holds readiness closed until every live protected-key reference is retained. */
@@ -136,7 +129,7 @@ export class ActiveClaimCustodyKeyReferenceGate {
         if (
           project?.serviceState !== 'active'
           || placement === undefined
-          || !samePlacement(placement, expectedPlacement)
+          || !sameRepositoryPlacement(placement, expectedPlacement)
         ) return fail();
         return await scope.checkpoint.readProjectCheckpointRecords({
           maximumCoordinationBytes:

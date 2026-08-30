@@ -20,8 +20,15 @@ import type {
 } from '../../coordination/ProjectCoordination.js';
 import type { CollaborationSnapshot } from '../../coordination/CollaborationPersistence.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import {
+  sameRepositoryPlacement,
+  type RepositoryPlacementLease,
+} from '../../repositories/RepositoryPlacement.js';
 import { resolvePrincipalMember } from '../admission/resolvePrincipalMember.js';
-import type { RepositoryPlacementLease } from '../../repositories/RepositoryPlacement.js';
+import {
+  OperationDrain,
+  OperationDrainClosedError,
+} from '../OperationDrain.js';
 
 export type ProjectReadAuthorityErrorCode =
   | 'authorization-denied'
@@ -144,16 +151,6 @@ function fail(code: ProjectReadAuthorityErrorCode): never {
   throw new ProjectReadAuthorityError(code);
 }
 
-function samePlacement(
-  left: RepositoryPlacementLease,
-  right: RepositoryPlacementLease,
-): boolean {
-  return left.generation === right.generation
-    && left.projectId === right.projectId
-    && left.repositoryStorageKey === right.repositoryStorageKey
-    && left.storageNodeId === right.storageNodeId;
-}
-
 function sameAdmission(left: AdmissionFacts, right: AdmissionFacts): boolean {
   return left.expectedMainOid === right.expectedMainOid
     && left.memberId === right.memberId
@@ -170,7 +167,7 @@ function sameAdmission(left: AdmissionFacts, right: AdmissionFacts): boolean {
         && member.revision === other.revision
         && member.role === other.role;
     })
-    && samePlacement(left.placement, right.placement);
+    && sameRepositoryPlacement(left.placement, right.placement);
 }
 
 function sameSnapshotFacts(left: SnapshotFacts, right: SnapshotFacts): boolean {
@@ -209,12 +206,9 @@ function snapshotMember(
 }
 
 export class ProjectReadAuthority {
-  readonly #controllers = new Set<AbortController>();
   readonly #coordination: ProjectReadAuthorityCoordination;
+  readonly #operations = new OperationDrain();
   readonly #repository: ProjectReadRepository;
-  readonly #running = new Set<Promise<void>>();
-  #closePromise: Promise<void> | undefined;
-  #closed = false;
 
   constructor(options: ProjectReadAuthorityOptions) {
     this.#coordination = options.coordination;
@@ -222,12 +216,7 @@ export class ProjectReadAuthority {
   }
 
   close(): Promise<void> {
-    if (this.#closePromise === undefined) {
-      this.#closed = true;
-      for (const controller of this.#controllers) controller.abort();
-      this.#closePromise = Promise.allSettled([...this.#running]).then(() => undefined);
-    }
-    return this.#closePromise;
+    return this.#operations.close();
   }
 
   getProjectEvents(
@@ -301,7 +290,7 @@ export class ProjectReadAuthority {
   }
 
   #assertAvailable(signal: AbortSignal | undefined): void {
-    if (this.#closed) fail('closed');
+    if (this.#operations.closed) fail('closed');
     if (signal?.aborted === true) fail('cancelled');
   }
 
@@ -544,20 +533,12 @@ export class ProjectReadAuthority {
     externalSignal: AbortSignal | undefined,
     operation: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
-    if (this.#closed) return Promise.reject(new ProjectReadAuthorityError('closed'));
-    const controller = new AbortController();
-    const onAbort = (): void => controller.abort();
-    externalSignal?.addEventListener('abort', onAbort, { once: true });
-    if (externalSignal?.aborted === true) controller.abort();
-    this.#controllers.add(controller);
-    const result = Promise.resolve().then(() => operation(controller.signal));
-    const cleanup = (): void => {
-      externalSignal?.removeEventListener('abort', onAbort);
-      this.#controllers.delete(controller);
-    };
-    const tracked = result.then(() => undefined, () => undefined).finally(cleanup);
-    this.#running.add(tracked);
-    void tracked.finally(() => this.#running.delete(tracked));
-    return result;
+    return this.#operations.run(
+      externalSignal === undefined ? {} : { signal: externalSignal },
+      operation,
+    ).catch((error: unknown) => {
+      if (error instanceof OperationDrainClosedError) fail('closed');
+      throw error;
+    });
   }
 }

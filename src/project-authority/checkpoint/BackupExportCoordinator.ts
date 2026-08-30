@@ -26,7 +26,10 @@ import type {
 import type {
   ProjectCheckpointSnapshotMetadata,
 } from '../../coordination/ProjectCheckpointPersistence.js';
-import type { RepositoryPlacementLease } from '../../repositories/RepositoryPlacement.js';
+import {
+  sameRepositoryPlacement,
+  type RepositoryPlacementLease,
+} from '../../repositories/RepositoryPlacement.js';
 import {
   ProjectRecoveryError,
   type ProjectRecoveryPort,
@@ -404,16 +407,6 @@ function exactJournal(
       && journal.scheduledAt !== expected.expiresAt
     )
   ) fail('state-conflict');
-}
-
-function samePlacement(
-  left: RepositoryPlacementLease,
-  right: RepositoryPlacementLease,
-): boolean {
-  return left.generation === right.generation
-    && left.projectId === right.projectId
-    && left.repositoryStorageKey === right.repositoryStorageKey
-    && left.storageNodeId === right.storageNodeId;
 }
 
 export class BackupExportCoordinator implements ProjectLifecycleRecoveryOwner {
@@ -1605,7 +1598,7 @@ export class BackupExportCoordinator implements ProjectLifecycleRecoveryOwner {
       || project.authorityGeneration !== journal.expectedAuthorityGeneration
       || project.authorityStateRevision !== context.project.authorityStateRevision
       || placement === undefined
-      || !samePlacement(placement, context.placement)
+      || !sameRepositoryPlacement(placement, context.placement)
     ) fail('state-conflict');
     return project;
   }

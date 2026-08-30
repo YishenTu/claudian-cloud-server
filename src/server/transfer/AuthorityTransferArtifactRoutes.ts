@@ -16,6 +16,10 @@ import {
   RequestPrincipalBindingError,
   type RequestPrincipalBindingOptions,
 } from '../../request-context/RequestPrincipalBinding.js';
+import {
+  parseOptionalContentLength,
+  requestHeaderValues,
+} from '../httpRequestHeaders.js';
 
 export interface AuthorityTransferArtifactUpload {
   readonly artifact: CollabCloudAuthorityTransferArtifact;
@@ -76,28 +80,11 @@ function quotaFailure(limit: number): ArtifactRouteFailure {
   }));
 }
 
-function headerValues(request: IncomingMessage, expectedName: string): readonly string[] {
-  const values: string[] = [];
-  for (let index = 0; index < request.rawHeaders.length; index += 2) {
-    const name = request.rawHeaders[index];
-    const value = request.rawHeaders[index + 1];
-    if (name?.toLowerCase() === expectedName && value !== undefined) values.push(value);
-  }
-  return values;
-}
-
 function optionalContentLength(request: IncomingMessage): number | undefined {
-  const values = headerValues(request, 'content-length');
-  if (values.length === 0) return undefined;
-  const value = values[0];
-  if (
-    values.length !== 1
-    || value === undefined
-    || !/^(?:0|[1-9][0-9]*)$/u.test(value)
-  ) throw protocolFailure('content-length');
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) throw protocolFailure('content-length');
-  return parsed;
+  return parseOptionalContentLength(
+    request,
+    () => protocolFailure('content-length'),
+  );
 }
 
 function statusForError(error: CollabError): number {
@@ -309,11 +296,11 @@ export class AuthorityTransferArtifactRoutes {
     principalId: string,
     signal: AbortSignal,
   ): Promise<void> {
-    const contentTypes = headerValues(request, 'content-type');
+    const contentTypes = requestHeaderValues(request, 'content-type');
     if (contentTypes.length !== 1 || contentTypes[0] !== 'application/octet-stream') {
       throw protocolFailure('content-type');
     }
-    const encodings = headerValues(request, 'content-encoding');
+    const encodings = requestHeaderValues(request, 'content-encoding');
     if (encodings.length > 1 || (encodings[0] !== undefined && encodings[0] !== 'identity')) {
       throw protocolFailure('content-encoding');
     }

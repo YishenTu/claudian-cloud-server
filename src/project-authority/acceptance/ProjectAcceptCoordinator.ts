@@ -24,6 +24,10 @@ import type {
 } from '../../coordination/ProjectCoordination.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
 import {
+  OperationDrain,
+  OperationDrainClosedError,
+} from '../OperationDrain.js';
+import {
   ProjectWriteAdmission,
   ProjectWriteAdmissionError,
   type ProjectRecoveryPort,
@@ -298,13 +302,11 @@ function mapPublicError(error: unknown): never {
 export class ProjectAcceptCoordinator implements ProjectRecoveryPort {
   readonly #admission: ProjectWriteAdmission;
   readonly #clock: () => Date;
-  readonly #controllers = new Set<AbortController>();
   readonly #coordination: ProjectAcceptCoordination;
+  readonly #operations = new OperationDrain();
   readonly #operationIdFactory: () => string;
   readonly #repository: ProjectAcceptRepository;
-  readonly #running = new Set<Promise<void>>();
   #closePromise: Promise<void> | undefined;
-  #closed = false;
 
   constructor(options: ProjectAcceptCoordinatorOptions) {
     this.#admission = new ProjectWriteAdmission({
@@ -324,23 +326,14 @@ export class ProjectAcceptCoordinator implements ProjectRecoveryPort {
     request: AcceptRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<AcceptResponse> {
-    if (this.#closed) {
-      return Promise.reject(domainError('operation-failed', 'accept-closed'));
-    }
-    const controller = new AbortController();
-    const onAbort = (): void => controller.abort();
-    options.signal?.addEventListener('abort', onAbort, { once: true });
-    if (options.signal?.aborted === true) controller.abort();
-    this.#controllers.add(controller);
-    const running = this.#accept(principal, request, controller.signal)
-      .catch(mapPublicError);
-    const tracked = running.then(() => undefined, () => undefined).finally(() => {
-      options.signal?.removeEventListener('abort', onAbort);
-      this.#controllers.delete(controller);
+    return this.#operations.run(options, signal => (
+      this.#accept(principal, request, signal).catch(mapPublicError)
+    )).catch((error: unknown) => {
+      if (error instanceof OperationDrainClosedError) {
+        throw domainError('operation-failed', 'accept-closed');
+      }
+      throw error;
     });
-    this.#running.add(tracked);
-    void tracked.finally(() => this.#running.delete(tracked));
-    return running;
   }
 
   async #accept(
@@ -448,23 +441,20 @@ export class ProjectAcceptCoordinator implements ProjectRecoveryPort {
   }
 
   recoverProject(projectId: CollabProjectId): Promise<void> {
-    if (this.#closed) {
-      return Promise.reject(new ProjectAcceptCoordinatorError('closed'));
-    }
-    const running = this.#recoverProject(projectId);
-    const tracked = running.then(() => undefined, () => undefined);
-    this.#running.add(tracked);
-    void tracked.finally(() => this.#running.delete(tracked));
-    return running;
+    return this.#operations.run({}, () => this.#recoverProject(projectId)).catch(
+      (error: unknown) => {
+        if (error instanceof OperationDrainClosedError) {
+          throw new ProjectAcceptCoordinatorError('closed');
+        }
+        throw error;
+      },
+    );
   }
 
   close(): Promise<void> {
     if (this.#closePromise === undefined) {
-      this.#closed = true;
-      for (const controller of this.#controllers) controller.abort();
-      this.#closePromise = this.#admission.close().then(() => (
-        Promise.allSettled([...this.#running]).then(() => undefined)
-      ));
+      const operationsClosed = this.#operations.close();
+      this.#closePromise = this.#admission.close().then(() => operationsClosed);
     }
     return this.#closePromise;
   }
