@@ -4,6 +4,8 @@ import {
   COLLAB_CHECKPOINT_ARTIFACT_LIMITS,
   decodeCollabProjectBackupCheckpointCoordinationNdjson,
   encodeCollabProjectBackupCheckpointCoordinationNdjson,
+  collabControlOperationCodec,
+  collabMemberRef,
   isCollabOpaqueId,
   type CollabProjectBackupRecord,
   type CollabProjectId,
@@ -25,6 +27,7 @@ import { PostgresMigrator } from './PostgresMigrator.js';
 import { PostgresProjectCheckpointPersistence } from './PostgresProjectCheckpointPersistence.js';
 import type { TerminalProjectContinuityRecord } from '../ProjectCheckpointPersistence.js';
 import { createTerminalProjectContinuityArtifact } from '../../environment-maintenance/restore/TerminalProjectContinuityArtifact.js';
+import { unframeBackupProtectedSecretEnvelope } from '../backupProtectedSecretEnvelope.js';
 
 export interface PostgresEnvironmentRestorePersistenceOptions {
   readonly connectionString: string;
@@ -66,6 +69,22 @@ const CONTINUITY_KINDS = new Set<CollabProjectBackupRecord['kind']>([
   'transfer-receipt-key',
   'transfer-redemption-receipt',
   'transferred-membership-claim',
+]);
+const MEMBERSHIP_IDEMPOTENCY_OPERATIONS = new Set([
+  'acknowledgeManagerResponsibility',
+  'cancelManagerResponsibilityOffer',
+  'createManagerResponsibilityOffer',
+  'declineManagerResponsibility',
+  'demoteManager',
+  'promoteManager',
+  'revokeProjectInvitation',
+  'revokeTransferredMembershipClaim',
+]);
+const SYNTHETIC_MEMBERSHIP_IDEMPOTENCY_OPERATIONS = new Set([
+  'createCloudProject',
+  'joinCloudProject',
+  'leaveProject',
+  'removeMember',
 ]);
 
 const CREATE_FENCE_SQL = `
@@ -396,15 +415,22 @@ implements EnvironmentRestorePersistence {
       'idempotency-result',
       'leave-former-principal-replay',
       'lifecycle-journal',
+      'manager-responsibility-offer',
+      'membership-idempotency-tombstone',
       'member',
       'principal-binding',
+      'project-invitation',
+      'project-membership-recovery',
       'project',
+      'protected-claim-override-envelope',
       'protected-claim-envelope',
+      'protected-invitation-envelope',
       'request',
       'request-comment',
       'repository-placement',
       'schema-catalog',
       'server-compatibility',
+      'secret-replay-tombstone',
       'terminal-principal',
       'terminal-responder',
       'terminal-responder-replay',
@@ -417,6 +443,7 @@ implements EnvironmentRestorePersistence {
       'transfer-redemption-receipt',
       'transfer-receipt-key',
       'transferred-membership-claim',
+      'transferred-membership-claim-override',
     ]);
     if (records.some(record => !supportedKinds.has(record.kind))) {
       fail('state-conflict');
@@ -537,6 +564,16 @@ implements EnvironmentRestorePersistence {
             projectRecord.revision,
           ],
         );
+        const findIdempotency = (
+          operation: string,
+          memberId: string,
+          idempotencyKey: string,
+        ) => records.find(record => (
+          record.kind === 'idempotency-result'
+          && record.value.operation === operation
+          && record.value.memberId === memberId
+          && record.value.idempotencyKey === idempotencyKey
+        ));
         for (const record of records) {
           if (record.kind !== 'terminal-responder') continue;
           const operationKind = record.value.operation === 'retireProject'
@@ -767,24 +804,47 @@ implements EnvironmentRestorePersistence {
               ],
             );
           } else if (record.kind === 'idempotency-result') {
-            await client.query(
-              `INSERT INTO claudian_cloud.idempotency_results (
-                 project_id, member_id, operation, idempotency_key,
-                 request_fingerprint, response_json, created_at
-               ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
-               ON CONFLICT (
-                 project_id, member_id, operation, idempotency_key
-               ) DO NOTHING`,
-              [
-                record.value.projectId,
-                record.value.memberId,
-                record.value.operation,
-                record.value.idempotencyKey,
-                record.value.requestFingerprint,
-                record.value.responseJson,
-                record.value.createdAt,
-              ],
-            );
+            if (MEMBERSHIP_IDEMPOTENCY_OPERATIONS.has(record.value.operation)) {
+              await client.query(
+                `INSERT INTO claudian_cloud.project_membership_idempotency_results (
+                   project_id, actor_member_id, operation, idempotency_key,
+                   request_fingerprint, result_json, created_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT (
+                   project_id, actor_member_id, operation, idempotency_key
+                 ) DO NOTHING`,
+                [
+                  record.value.projectId,
+                  record.value.memberId,
+                  record.value.operation,
+                  record.value.idempotencyKey,
+                  record.value.requestFingerprint,
+                  record.value.responseJson,
+                  record.value.createdAt,
+                ],
+              );
+            } else if (!SYNTHETIC_MEMBERSHIP_IDEMPOTENCY_OPERATIONS.has(
+              record.value.operation,
+            )) {
+              await client.query(
+                `INSERT INTO claudian_cloud.idempotency_results (
+                   project_id, member_id, operation, idempotency_key,
+                   request_fingerprint, response_json, created_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+                 ON CONFLICT (
+                   project_id, member_id, operation, idempotency_key
+                 ) DO NOTHING`,
+                [
+                  record.value.projectId,
+                  record.value.memberId,
+                  record.value.operation,
+                  record.value.idempotencyKey,
+                  record.value.requestFingerprint,
+                  record.value.responseJson,
+                  record.value.createdAt,
+                ],
+              );
+            }
           } else if (record.kind === 'principal-binding') {
             await client.query(
               `INSERT INTO claudian_cloud.project_principal_bindings (
@@ -800,6 +860,20 @@ implements EnvironmentRestorePersistence {
               ],
             );
           } else if (record.kind === 'lifecycle-journal') {
+            if (
+              record.value.operationKind === 'create-project'
+              || record.value.operationKind === 'join-project'
+            ) continue;
+            const membershipRecovery = record.value.operationKind === 'remove-member'
+              ? records.find(candidate => (
+                  candidate.kind === 'project-membership-recovery'
+                  && candidate.value.operationId === record.value.operationId
+                ))
+              : undefined;
+            if (
+              record.value.operationKind === 'remove-member'
+              && membershipRecovery?.kind !== 'project-membership-recovery'
+            ) fail('state-conflict');
             await client.query(
               `INSERT INTO claudian_cloud.project_lifecycle_journals (
                  project_id, operation_id, kind, direction, phase,
@@ -832,7 +906,9 @@ implements EnvironmentRestorePersistence {
                 record.value.scheduledAt,
                 record.value.createdAt,
                 record.value.updatedAt,
-                record.value.expectedPersonalRefOid,
+                membershipRecovery?.kind === 'project-membership-recovery'
+                  ? membershipRecovery.value.expectedPersonalRefOid
+                  : record.value.expectedPersonalRefOid,
               ],
             );
             if (
@@ -1018,14 +1094,20 @@ implements EnvironmentRestorePersistence {
               ],
             );
           } else if (record.kind === 'leave-former-principal-replay') {
+            const response = findIdempotency(
+              'leaveProject',
+              record.value.memberId,
+              record.value.intentId,
+            );
+            if (response?.kind !== 'idempotency-result') fail('state-conflict');
             await client.query(
               `INSERT INTO claudian_cloud.leave_former_principal_replays (
                  project_id, operation_id, principal_sha256, member_id,
                  intent_id, request_fingerprint, state, result_sha256,
                  created_at, completed_at, expires_at,
-                 expected_personal_ref_oid
+                 expected_personal_ref_oid, response_json
                ) VALUES (
-                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
                )
                ON CONFLICT (project_id, operation_id) DO NOTHING`,
               [
@@ -1041,6 +1123,217 @@ implements EnvironmentRestorePersistence {
                 record.value.completedAt,
                 record.value.expiresAt,
                 record.value.expectedPersonalRefOid,
+                response.value.responseJson,
+              ],
+            );
+          } else if (record.kind === 'project-invitation') {
+            await client.query(
+              `INSERT INTO claudian_cloud.project_invitations (
+                 project_id, invitation_id, issued_by_member_id,
+                 idempotency_key, request_fingerprint, secret_sha256, state,
+                 revision, created_at, expires_at, secret_replay_expires_at,
+                 terminal_at
+               ) VALUES (
+                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+               ) ON CONFLICT (project_id, invitation_id) DO NOTHING`,
+              [
+                record.value.projectId,
+                record.value.invitationId,
+                record.value.issuedByMemberId,
+                record.value.idempotencyKey,
+                record.value.requestFingerprint,
+                record.value.secretSha256,
+                record.value.state,
+                record.value.revision,
+                record.value.createdAt,
+                record.value.expiresAt,
+                record.value.secretReplayExpiresAt,
+                record.value.terminalAt,
+              ],
+            );
+          } else if (record.kind === 'protected-invitation-envelope') {
+            const invitation = records.find(candidate => (
+              candidate.kind === 'project-invitation'
+              && candidate.value.invitationId === record.value.invitationId
+            ));
+            if (invitation?.kind !== 'project-invitation') fail('state-conflict');
+            const envelope = unframeBackupProtectedSecretEnvelope(
+              record.value.ciphertext,
+            );
+            await client.query(
+              `INSERT INTO claudian_cloud.protected_invitation_envelopes (
+                 project_id, invitation_id, encryption_algorithm, key_id,
+                 key_version, nonce, ciphertext, tag,
+                 associated_data_sha256, created_at, expires_at
+               ) VALUES (
+                 $1, $2, 'xchacha20-poly1305', $3, $4, $5, $6, $7, $8,
+                 $9, $10
+               ) ON CONFLICT (project_id, invitation_id) DO NOTHING`,
+              [
+                record.value.projectId,
+                record.value.invitationId,
+                record.value.keyId,
+                envelope.keyVersion,
+                record.value.nonce,
+                envelope.ciphertext,
+                envelope.tag,
+                record.value.associatedDataSha256,
+                record.value.createdAt,
+                invitation.value.expiresAt,
+              ],
+            );
+          } else if (record.kind === 'transferred-membership-claim-override') {
+            const redemptionReceipt = record.value.state === 'redeemed'
+              ? records.find(candidate => (
+                  candidate.kind === 'transfer-redemption-receipt'
+                  && candidate.value.receipt.transferId === record.value.transferId
+                  && candidate.value.receipt.memberId === record.value.memberId
+                ))
+              : undefined;
+            if (
+              record.value.state === 'redeemed'
+              && redemptionReceipt?.kind !== 'transfer-redemption-receipt'
+            ) fail('state-conflict');
+            await client.query(
+              `INSERT INTO claudian_cloud.transferred_membership_claim_overrides (
+                 project_id, transfer_id, member_id, claim_generation,
+                 superseded_claim_sha256, claim_sha256, manager_member_id,
+                 idempotency_key, request_fingerprint, state,
+                 target_principal_id, operation_intent_id,
+                 redemption_receipt_id, created_at, expires_at,
+                 secret_replay_expires_at, updated_at
+               ) VALUES (
+                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                 $13, $14, $15, $16, $17
+               ) ON CONFLICT (
+                 project_id, transfer_id, member_id, claim_generation
+               ) DO NOTHING`,
+              [
+                record.value.projectId,
+                record.value.transferId,
+                record.value.memberId,
+                record.value.claimGeneration,
+                record.value.supersededClaimSha256,
+                record.value.claimSha256,
+                record.value.managerMemberId,
+                record.value.idempotencyKey,
+                record.value.requestFingerprint,
+                record.value.state,
+                record.value.targetPrincipalId,
+                redemptionReceipt?.kind === 'transfer-redemption-receipt'
+                  ? redemptionReceipt.value.receipt.operationIntentId
+                  : null,
+                record.value.redemptionReceiptId,
+                record.value.createdAt,
+                record.value.expiresAt,
+                record.value.secretReplayExpiresAt,
+                record.value.updatedAt,
+              ],
+            );
+          } else if (record.kind === 'protected-claim-override-envelope') {
+            const envelope = unframeBackupProtectedSecretEnvelope(
+              record.value.ciphertext,
+            );
+            await client.query(
+              `INSERT INTO claudian_cloud.protected_claim_override_envelopes (
+                 project_id, transfer_id, member_id, claim_generation,
+                 encryption_algorithm, key_id, key_version, nonce,
+                 ciphertext, tag, associated_data_sha256, created_at,
+                 expires_at
+               ) VALUES (
+                 $1, $2, $3, $4, 'xchacha20-poly1305', $5, $6, $7, $8,
+                 $9, $10, $11, $12
+               ) ON CONFLICT (
+                 project_id, transfer_id, member_id, claim_generation
+               ) DO NOTHING`,
+              [
+                record.value.projectId,
+                record.value.transferId,
+                record.value.memberId,
+                record.value.claimGeneration,
+                record.value.keyId,
+                envelope.keyVersion,
+                record.value.nonce,
+                envelope.ciphertext,
+                envelope.tag,
+                record.value.associatedDataSha256,
+                record.value.createdAt,
+                record.value.expiresAt,
+              ],
+            );
+          } else if (record.kind === 'manager-responsibility-offer') {
+            await client.query(
+              `INSERT INTO claudian_cloud.manager_responsibility_offers (
+                 project_id, offer_id, source_manager_member_id,
+                 target_member_id, purpose, state, revision,
+                 manager_set_generation_at_offer,
+                 target_membership_revision_at_offer, idempotency_key,
+                 request_fingerprint, offered_at, expires_at,
+                 acknowledged_at, terminal_at
+               ) VALUES (
+                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                 $13, $14, $15
+               ) ON CONFLICT (project_id, offer_id) DO NOTHING`,
+              [
+                record.value.projectId,
+                record.value.offerId,
+                record.value.sourceManagerMemberId,
+                record.value.targetMemberId,
+                record.value.purpose,
+                record.value.state,
+                record.value.revision,
+                record.value.managerSetGenerationAtOffer,
+                record.value.targetMembershipRevisionAtOffer,
+                record.value.idempotencyKey,
+                record.value.requestFingerprint,
+                record.value.offeredAt,
+                record.value.expiresAt,
+                record.value.acknowledgedAt,
+                record.value.terminalAt,
+              ],
+            );
+          } else if (record.kind === 'membership-idempotency-tombstone') {
+            await client.query(
+              `INSERT INTO claudian_cloud.project_membership_idempotency_tombstones (
+                 project_id, actor_member_id, operation, idempotency_key,
+                 request_fingerprint, compacted_at
+               ) VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT (
+                 project_id, actor_member_id, operation, idempotency_key
+               ) DO NOTHING`,
+              [
+                record.value.projectId,
+                record.value.actorMemberId,
+                record.value.operation,
+                record.value.idempotencyKey,
+                record.value.requestFingerprint,
+                record.value.compactedAt,
+              ],
+            );
+          } else if (record.kind === 'project-membership-recovery') {
+            await this.#importMembershipRecovery(
+              client,
+              records,
+              record,
+              projectRecord,
+              sourcePlacement,
+            );
+          } else if (record.kind === 'secret-replay-tombstone') {
+            await client.query(
+              `INSERT INTO claudian_cloud.secret_replay_tombstones (
+                 project_id, actor_member_id, operation, idempotency_key,
+                 request_fingerprint, expired_at
+               ) VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT (
+                 project_id, actor_member_id, operation, idempotency_key
+               ) DO NOTHING`,
+              [
+                record.value.projectId,
+                record.value.actorMemberId,
+                record.value.operation,
+                record.value.idempotencyKey,
+                record.value.requestFingerprint,
+                record.value.expiredAt,
               ],
             );
           } else if (record.kind === 'protected-claim-envelope') {
@@ -1180,6 +1473,227 @@ implements EnvironmentRestorePersistence {
         throw error;
       }
     });
+  }
+
+  async #importMembershipRecovery(
+    client: Client,
+    records: readonly CollabProjectBackupRecord[],
+    recovery: Extract<
+      CollabProjectBackupRecord,
+      { readonly kind: 'project-membership-recovery' }
+    >,
+    project: Extract<
+      CollabProjectBackupRecord,
+      { readonly kind: 'project' }
+    >,
+    placement: Extract<
+      CollabProjectBackupRecord,
+      { readonly kind: 'repository-placement' }
+    >,
+  ): Promise<void> {
+    const lifecycle = records.find(record => (
+      record.kind === 'lifecycle-journal'
+      && record.value.operationId === recovery.value.operationId
+    ));
+    const member = records.find(record => (
+      record.kind === 'member'
+      && record.value.memberId === recovery.value.memberId
+    ));
+    if (
+      lifecycle?.kind !== 'lifecycle-journal'
+      || member?.kind !== 'member'
+      || lifecycle.value.state !== 'completed'
+      || lifecycle.value.resultSha256 === null
+    ) fail('state-conflict');
+    const responseRecord = records.find(record => (
+      record.kind === 'idempotency-result'
+      && record.value.memberId === (
+        recovery.value.operationKind === 'remove-member'
+          ? lifecycle.value.actorMemberId
+          : recovery.value.memberId
+      )
+      && record.value.idempotencyKey === lifecycle.value.idempotencyKey
+      && record.value.operation === (
+        recovery.value.operationKind === 'create-project'
+          ? 'createCloudProject'
+          : recovery.value.operationKind === 'join-project'
+            ? 'joinCloudProject'
+            : 'removeMember'
+      )
+    ));
+    if (responseRecord?.kind !== 'idempotency-result') fail('state-conflict');
+    if (
+      createHash('sha256')
+        .update(responseRecord.value.responseJson)
+        .digest('hex') !== lifecycle.value.resultSha256
+    ) fail('state-conflict');
+
+    if (recovery.value.operationKind === 'create-project') {
+      const binding = records.find(record => (
+        record.kind === 'principal-binding'
+        && record.value.memberId === recovery.value.memberId
+      ));
+      if (
+        binding?.kind !== 'principal-binding'
+        || recovery.value.principalSha256 === null
+        || recovery.value.repositoryPlanSha256 === null
+        || recovery.value.publicationMarkerSha256 === null
+        || createHash('sha256').update(binding.value.principalId).digest('hex')
+          !== recovery.value.principalSha256
+      ) fail('state-conflict');
+      const response = collabControlOperationCodec('createCloudProject')
+        .decodeResponse(JSON.parse(responseRecord.value.responseJson) as unknown);
+      if (
+        response.memberId !== recovery.value.memberId
+        || response.mainOid !== recovery.value.expectedMainOid
+      ) fail('state-conflict');
+      await client.query(
+        `INSERT INTO claudian_cloud.cloud_project_creation_journals (
+           project_id, operation_id, phase, principal_id, idempotency_key,
+           request_fingerprint, project_name, member_id,
+           manager_display_name, personal_ref, object_format,
+           empty_tree_oid, initial_commit_oid, commit_timestamp_seconds,
+           author_name, author_email, commit_timezone, commit_message,
+           main_ref, storage_node_id, repository_storage_key,
+           placement_generation, plan_sha256, publication_marker_sha256,
+           response_json, prepared_at, updated_at
+         ) VALUES (
+           $1, $2, 'completed', $3, $4, $5, $6, $7, $8, $9, 'sha1',
+           '4b825dc642cb6eb9a060e54bf8d69288fbee4904', $10, $11,
+           'Claudian Cloud', 'cloud@claudian.invalid', '+0000', $12,
+           'refs/heads/main', $13, $14, $15, $16, $17, $18, $19, $20
+         ) ON CONFLICT (project_id) DO NOTHING`,
+        [
+          recovery.value.projectId,
+          recovery.value.operationId,
+          binding.value.principalId,
+          lifecycle.value.idempotencyKey,
+          lifecycle.value.requestFingerprint,
+          project.value.name,
+          recovery.value.memberId,
+          member.value.displayName,
+          collabMemberRef(recovery.value.memberId),
+          recovery.value.expectedMainOid,
+          Math.floor(Date.parse(lifecycle.value.createdAt) / 1_000),
+          Buffer.from('Initialize Collab project', 'utf8'),
+          placement.value.nodeId,
+          placement.value.repositoryIdentity,
+          1,
+          recovery.value.repositoryPlanSha256,
+          recovery.value.publicationMarkerSha256,
+          responseRecord.value.responseJson,
+          lifecycle.value.createdAt,
+          lifecycle.value.updatedAt,
+        ],
+      );
+      return;
+    }
+
+    if (recovery.value.operationKind === 'join-project') {
+      const binding = records.find(record => (
+        record.kind === 'principal-binding'
+        && record.value.memberId === recovery.value.memberId
+      ));
+      const invitation = records.find(record => (
+        record.kind === 'project-invitation'
+        && record.value.invitationId === recovery.value.invitationId
+      ));
+      if (
+        binding?.kind !== 'principal-binding'
+        || invitation?.kind !== 'project-invitation'
+        || recovery.value.principalSha256 === null
+        || createHash('sha256').update(binding.value.principalId).digest('hex')
+          !== recovery.value.principalSha256
+      ) fail('state-conflict');
+      const response = collabControlOperationCodec('joinCloudProject')
+        .decodeResponse(JSON.parse(responseRecord.value.responseJson) as unknown);
+      if (
+        response.memberId !== recovery.value.memberId
+        || response.mainOid !== recovery.value.expectedMainOid
+      ) fail('state-conflict');
+      await client.query(
+        `INSERT INTO claudian_cloud.cloud_project_join_journals (
+           project_id, operation_id, phase, principal_id, principal_sha256,
+           idempotency_key, request_fingerprint, invitation_id,
+           invitation_revision, secret_sha256, member_id, display_name,
+           personal_ref, expected_main_oid, manager_set_generation,
+           storage_node_id, repository_storage_key, placement_generation,
+           response_json, prepared_at, updated_at
+         ) VALUES (
+           $1, $2, 'completed', $3, $4, $5, $6, $7, $8, $9, $10, $11,
+           $12, $13, $14, $15, $16, $17, $18, $19, $20
+         ) ON CONFLICT (project_id, operation_id) DO NOTHING`,
+        [
+          recovery.value.projectId,
+          recovery.value.operationId,
+          binding.value.principalId,
+          recovery.value.principalSha256,
+          lifecycle.value.idempotencyKey,
+          lifecycle.value.requestFingerprint,
+          invitation.value.invitationId,
+          Math.max(1, invitation.value.revision - 2),
+          invitation.value.secretSha256,
+          recovery.value.memberId,
+          member.value.displayName,
+          collabMemberRef(recovery.value.memberId),
+          recovery.value.expectedMainOid,
+          response.managerSetGeneration,
+          placement.value.nodeId,
+          placement.value.repositoryIdentity,
+          placement.value.placementGeneration,
+          responseRecord.value.responseJson,
+          lifecycle.value.createdAt,
+          lifecycle.value.updatedAt,
+        ],
+      );
+      return;
+    }
+
+    if (
+      lifecycle.value.actorMemberId === null
+      || member.value.status !== 'revoked'
+      || member.revision <= 1
+    ) fail('state-conflict');
+    const response = collabControlOperationCodec('removeMember')
+      .decodeResponse(JSON.parse(responseRecord.value.responseJson) as unknown);
+    const expectedManagerSetGeneration = member.value.role === 'manager'
+      ? response.managerSetGeneration - 1
+      : response.managerSetGeneration;
+    if (
+      response.memberId !== recovery.value.memberId
+      || expectedManagerSetGeneration < 1
+    ) fail('state-conflict');
+    await client.query(
+      `INSERT INTO claudian_cloud.project_member_removal_journals (
+         project_id, operation_id, actor_member_id, target_member_id,
+         idempotency_key, request_fingerprint,
+         expected_target_membership_revision,
+         expected_manager_set_generation, expected_personal_ref_oid,
+         personal_ref, storage_node_id, repository_storage_key,
+         placement_generation, phase, response_json, prepared_at, updated_at
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+         'completed', $14, $15, $16
+       ) ON CONFLICT (project_id, operation_id) DO NOTHING`,
+      [
+        recovery.value.projectId,
+        recovery.value.operationId,
+        lifecycle.value.actorMemberId,
+        recovery.value.memberId,
+        lifecycle.value.idempotencyKey,
+        lifecycle.value.requestFingerprint,
+        member.revision - 1,
+        expectedManagerSetGeneration,
+        recovery.value.expectedPersonalRefOid,
+        collabMemberRef(recovery.value.memberId),
+        placement.value.nodeId,
+        placement.value.repositoryIdentity,
+        placement.value.placementGeneration,
+        responseRecord.value.responseJson,
+        lifecycle.value.createdAt,
+        lifecycle.value.updatedAt,
+      ],
+    );
   }
 
   async importTerminalProject(input: Readonly<{

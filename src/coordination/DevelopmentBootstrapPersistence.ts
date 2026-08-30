@@ -241,9 +241,12 @@ export type RecoveryCandidateKind =
   | 'activation'
   | 'authority-transfer'
   | 'backup'
+  | 'create-project'
   | 'delete'
   | 'export'
+  | 'join-project'
   | 'leave'
+  | 'remove-member'
   | 'retire';
 
 export interface KnownRecoveryCandidate {

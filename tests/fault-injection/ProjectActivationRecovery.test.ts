@@ -30,6 +30,7 @@ import type {
 } from '../../src/coordination/postgres/PostgresCoordination.js';
 import { PostgresCoordination } from '../../src/coordination/postgres/PostgresCoordination.js';
 import { PostgresMigrator } from '../../src/coordination/postgres/PostgresMigrator.js';
+import { createDevelopmentIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
 import {
   ProjectActivationCoordinator,
   ProjectActivationCoordinatorError,
@@ -693,10 +694,7 @@ describe('Project activation restart recovery', () => {
           recovery: recovered,
         });
         assert.equal(await admission.run(
-          Object.freeze({
-            actorId: 'member_a',
-            profile: 'loopback-development' as const,
-          }),
+          createDevelopmentIngressPrincipal('member_a'),
           'project_fault',
           async write => {
             assert.equal(write.memberId, 'member_a');
@@ -708,10 +706,7 @@ describe('Project activation restart recovery', () => {
           },
         ), 'admitted');
         await assert.rejects(admission.run(
-          Object.freeze({
-            actorId: 'member_outsider',
-            profile: 'loopback-development' as const,
-          }),
+          createDevelopmentIngressPrincipal('member_outsider'),
           'project_fault',
           () => Promise.resolve(),
         ), error => {

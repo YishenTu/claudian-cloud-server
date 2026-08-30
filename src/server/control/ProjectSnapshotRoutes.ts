@@ -12,12 +12,12 @@ import {
 import {
   ProjectReadAuthorityError,
 } from '../../project-authority/reads/ProjectReadAuthority.js';
-import type { DevelopmentPrincipalAdapter } from '../../request-context/DevelopmentPrincipalAdapter.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
 import {
   ProjectJsonRouteFailure,
   ProjectJsonTransport,
   projectProtocolFailure,
+  type ProjectJsonTransportOptions,
 } from './ProjectJsonTransport.js';
 
 export interface ProjectSnapshotHandler {
@@ -36,12 +36,9 @@ export interface ProjectRetirementTerminalHandler {
   ): Promise<CollabProjectRetirementResult | null>;
 }
 
-export interface ProjectSnapshotRoutesOptions {
+export interface ProjectSnapshotRoutesOptions
+  extends ProjectJsonTransportOptions {
   readonly authority: ProjectSnapshotHandler;
-  readonly maximumJsonBytes: number;
-  readonly operationTimeoutMs: number;
-  readonly principalAdapter: DevelopmentPrincipalAdapter;
-  readonly requestIdFactory?: () => string;
   readonly retirementTerminal?: ProjectRetirementTerminalHandler;
 }
 
@@ -121,7 +118,7 @@ export class ProjectSnapshotRoutes {
             let terminal: CollabProjectRetirementResult | null;
             try {
               terminal = await this.#retirementTerminal.getRetirementTerminal(
-                context.principal.actorId,
+                context.principal.principalId,
                 decoded.value.projectId,
                 { signal: context.signal },
               );

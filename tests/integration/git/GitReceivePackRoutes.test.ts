@@ -168,12 +168,12 @@ describe('GitReceivePackRoutes', () => {
     const route = new GitReceivePackRoutes({
       authority: {
         advertiseReceivePack: (principal, projectId) => {
-          actorId = principal.actorId;
+          actorId = principal.principalId;
           assert.equal(projectId, 'project-a');
           return Promise.resolve(Buffer.from('0000', 'ascii'));
         },
         runReceivePack: async (principal, projectId, options) => {
-          actorId = principal.actorId;
+          actorId = principal.principalId;
           assert.equal(projectId, 'project-a');
           for await (const chunk of options.request) observed.push(Buffer.from(chunk));
           await options.onResponseChunk(
@@ -316,7 +316,7 @@ describe('GitReceivePackRoutes', () => {
           readonly signal?: AbortSignal;
         }>,
       ): Promise<Buffer> => {
-        assert.equal(principal.actorId, 'member-a');
+        assert.equal(principal.principalId, 'member-a');
         const reservation = await repository.reserveReceivePack('project-a', options);
         try {
           return await repository.advertiseReceivePack(reservation, placement, {
@@ -338,7 +338,7 @@ describe('GitReceivePackRoutes', () => {
         _projectId: string,
         options: Parameters<GitReceivePackWriteAuthority['runReceivePack']>[2],
       ): Promise<void> => {
-        assert.equal(principal.actorId, 'member-a');
+        assert.equal(principal.principalId, 'member-a');
         const reservation = await repository.reserveReceivePack('project-a', options);
         try {
           try {

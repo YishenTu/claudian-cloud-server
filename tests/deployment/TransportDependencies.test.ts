@@ -5,9 +5,9 @@ import { describe, it } from 'node:test';
 
 const repositoryRoot = resolve(import.meta.dirname, '../..');
 const protocolPackageName = '@claudian-collab/protocol';
-const protocolVersion = '3.2.1';
-const protocolRegistryArtifact = 'https://registry.npmjs.org/@claudian-collab/protocol/-/protocol-3.2.1.tgz';
-const protocolIntegrity = 'sha512-FqUca4/S9Jgu5QsMR4Gs3KgAfYytIdVn8V7w7Fn2hQjJ0nA9D9ULgJlvqOojqwaNh+ci+DblLcD5Z2oC7WJCcw==';
+const protocolVersion = '3.3.1';
+const protocolRegistryArtifact = 'https://registry.npmjs.org/@claudian-collab/protocol/-/protocol-3.3.1.tgz';
+const protocolIntegrity = 'sha512-F+D1Y8RbTbZAWu13HYI6mv9feoLDMII0mEZTapoDLqRNm+ZZ6VAgqOH3h9kGMNb6uR9dVTMiNb8nQ4KABEHZZw==';
 
 interface PackageManifest {
   readonly dependencies: Readonly<Record<string, string>>;
@@ -73,5 +73,33 @@ describe('Cloud transport dependency baseline', () => {
     assert.equal(typeof ws.WebSocket, 'function');
     assert.equal(typeof ws.WebSocketServer, 'function');
     assert.equal(typeof ws.createWebSocketStream, 'function');
+  });
+
+  it('loads the Step 12 contract only from the exact installed registry artifact', async () => {
+    const protocol = await import('@claudian-collab/protocol');
+
+    assert.equal(protocol.COLLAB_PROTOCOL_VERSION, 6);
+    assert.equal(protocol.COLLAB_CLOUD_BINDING_VERSION, 2);
+    assert.equal(protocol.COLLAB_PROJECT_BACKUP_COORDINATION_FORMAT_VERSION, 3);
+    assert.deepEqual(protocol.COLLAB_PROJECT_MEMBERSHIP_OPERATIONS, [
+      'createCloudProject',
+      'createProjectInvitation',
+      'listProjectInvitations',
+      'revokeProjectInvitation',
+      'joinCloudProject',
+      'listProjectMembers',
+      'reissueTransferredMembershipClaim',
+      'revokeTransferredMembershipClaim',
+      'createManagerResponsibilityOffer',
+      'listCurrentManagerResponsibilityOffers',
+      'getManagerResponsibilityOffer',
+      'acknowledgeManagerResponsibility',
+      'declineManagerResponsibility',
+      'cancelManagerResponsibilityOffer',
+      'promoteManager',
+      'demoteManager',
+      'removeMember',
+      'leaveProject',
+    ]);
   });
 });

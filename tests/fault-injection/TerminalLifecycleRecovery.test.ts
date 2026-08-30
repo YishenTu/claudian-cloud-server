@@ -8,12 +8,14 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 
+import { CollabError } from '@claudian-collab/protocol';
+
 import { PostgresMigrator } from '../../src/coordination/postgres/PostgresMigrator.js';
 import { DeletionCoordinator } from '../../src/project-authority/lifecycle/delete/DeletionCoordinator.js';
 import {
   LeaveCoordinator,
-  LeaveCoordinatorError,
 } from '../../src/project-authority/lifecycle/leave/LeaveCoordinator.js';
+import { createTrustedIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
 import { RetireCoordinator } from '../../src/project-authority/lifecycle/retire/RetireCoordinator.js';
 import {
   RepositoryCheckpointAuthority,
@@ -194,9 +196,13 @@ describe('terminal lifecycle cross-store recovery', () => {
         const expectedOid = await seedCloudToLanRepository(root, projectId);
         await seedCloudToLanProject(database, projectId, expectedOid);
         const request = {
-          projectId,
-          idempotencyKey: 'leave-recovery-intent',
+          expectedManagerSetGeneration: 1,
+          expectedMembershipRevision: 1,
+          expectedOfferRevision: null,
           expectedPersonalRefOid: expectedOid,
+          idempotencyKey: 'leave-recovery-intent',
+          managerResponsibilityOfferId: null,
+          projectId,
         };
         let failDeletion = true;
         let store = cloudToLanPostgres(database);
@@ -219,11 +225,14 @@ describe('terminal lifecycle cross-store recovery', () => {
             },
           },
         });
-        await assert.rejects(leave.leave({
-          principalId: CLOUD_TO_LAN_TARGET_PRINCIPAL,
+        await assert.rejects(leave.leave(
+          createTrustedIngressPrincipal({
+            principalId: CLOUD_TO_LAN_TARGET_PRINCIPAL,
+            providerId: 'test',
+          }),
           request,
-        }), (error: unknown) => error instanceof LeaveCoordinatorError
-          && error.code === 'dependency-failed');
+        ), (error: unknown) => error instanceof CollabError
+          && error.code === 'operation-failed');
         await store.withProjectScope(projectId, async scope => {
           assert.equal((await scope.portability.getNonterminalLifecycleJournal())?.phase,
             'membership-left');
@@ -239,15 +248,14 @@ describe('terminal lifecycle cross-store recovery', () => {
           coordination: store,
           repository,
         });
-        await assert.rejects(leave.leave({
-          principalId: CLOUD_TO_LAN_MANAGER_PRINCIPAL,
-          request: {
-            expectedPersonalRefOid: expectedOid,
-            idempotencyKey: request.idempotencyKey,
-            projectId,
-          },
-        }), (error: unknown) => error instanceof LeaveCoordinatorError
-          && error.code === 'manager-succession-required');
+        await assert.rejects(leave.leave(
+          createTrustedIngressPrincipal({
+            principalId: CLOUD_TO_LAN_MANAGER_PRINCIPAL,
+            providerId: 'test',
+          }),
+          request,
+        ), (error: unknown) => error instanceof CollabError
+          && error.code === 'authority-not-synchronized');
         const verification = await repository.reserveExactRepositoryOperation(projectId);
         await repository.verifyExactPersonalRef(verification, {
           expectedOid,
@@ -261,18 +269,12 @@ describe('terminal lifecycle cross-store recovery', () => {
           },
         });
         await verification.close();
-        const result = await leave.leave({
+        const targetPrincipal = createTrustedIngressPrincipal({
           principalId: CLOUD_TO_LAN_TARGET_PRINCIPAL,
-          request: {
-            expectedPersonalRefOid: expectedOid,
-            idempotencyKey: request.idempotencyKey,
-            projectId,
-          },
+          providerId: 'test',
         });
-        assert.deepEqual(await leave.leave({
-          principalId: CLOUD_TO_LAN_TARGET_PRINCIPAL,
-          request,
-        }), result);
+        const result = await leave.leave(targetPrincipal, request);
+        assert.deepEqual(await leave.leave(targetPrincipal, request), result);
         const removedVerification = await repository.reserveExactRepositoryOperation(
           projectId,
         );

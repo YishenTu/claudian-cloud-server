@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { describe, it } from 'node:test';
 
+import { CollabError } from '@claudian-collab/protocol';
+
 import type {
   AdvanceProjectLifecycleJournalInput,
   ProjectDeletionIntentRecord,
@@ -17,13 +19,13 @@ import type {
 } from '../../src/coordination/ProjectCoordination.js';
 import type { RepositoryPlacementLease } from '../../src/repositories/RepositoryPlacement.js';
 import { RepositoryCheckpointError } from '../../src/repositories/RepositoryCheckpointAuthority.js';
+import { createTrustedIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
 import {
   DeletionCoordinator,
   DeletionCoordinatorError,
 } from '../../src/project-authority/lifecycle/delete/DeletionCoordinator.js';
 import {
   LeaveCoordinator,
-  LeaveCoordinatorError,
 } from '../../src/project-authority/lifecycle/leave/LeaveCoordinator.js';
 import {
   RetireCoordinator,
@@ -47,6 +49,28 @@ const SHA = '3'.repeat(64);
 function repositoryReservation() {
   return Object.freeze({
     async close() {},
+    projectId: PROJECT_ID,
+  });
+}
+
+function trustedPrincipal(principalId: string) {
+  return createTrustedIngressPrincipal({ principalId, providerId: 'test' });
+}
+
+function leaveRequest(input: Readonly<{
+  readonly expectedMembershipRevision?: number;
+  readonly expectedOfferRevision?: number | null;
+  readonly expectedPersonalRefOid?: string;
+  readonly idempotencyKey: string;
+  readonly managerResponsibilityOfferId?: string | null;
+}> ) {
+  return Object.freeze({
+    expectedManagerSetGeneration: 1,
+    expectedMembershipRevision: input.expectedMembershipRevision ?? 2,
+    expectedOfferRevision: input.expectedOfferRevision ?? null,
+    expectedPersonalRefOid: input.expectedPersonalRefOid ?? MEMBER_OID,
+    idempotencyKey: input.idempotencyKey,
+    managerResponsibilityOfferId: input.managerResponsibilityOfferId ?? null,
     projectId: PROJECT_ID,
   });
 }
@@ -223,6 +247,7 @@ describe('terminal Project lifecycle', () => {
     });
     let settled = false;
     let verified = false;
+    let competingMutation = true;
     let deletedRef: string | undefined;
     let leaveJournal: ProjectLifecycleJournalRecord | undefined;
     let leaveReplay: Readonly<{
@@ -234,6 +259,15 @@ describe('terminal Project lifecycle', () => {
       readonly memberId: string;
       readonly operationId: string;
       readonly resultSha256: string | undefined;
+      readonly response: Readonly<{
+        readonly discardedRequestId: null;
+        readonly leftAt: string;
+        readonly managerSetGeneration: number;
+        readonly memberId: string;
+        readonly projectId: string;
+        readonly promotedSuccessorMemberId: null;
+        readonly status: 'left';
+      }>;
       readonly state: 'completed' | 'recovering';
     }> | undefined;
     const portability = {
@@ -247,6 +281,9 @@ describe('terminal Project lifecycle', () => {
         };
       },
       async getLifecycleJournal() { return leaveJournal; },
+      async getNonterminalLifecycleJournal() {
+        return competingMutation ? journal('leave', 'leave-active', 'prepared') : undefined;
+      },
       async getLeaveFormerPrincipalReplay() { return leaveReplay; },
       async findLeaveFormerPrincipalReplay() { return leaveReplay; },
       async putLifecycleJournal(input: PutProjectLifecycleJournalInput) {
@@ -259,15 +296,28 @@ describe('terminal Project lifecycle', () => {
         });
         return 'created' as const;
       },
+      async putLeaveProjectRequestFacts() { return 'created' as const; },
       async settleLeaveMembership() {
         assert.equal(verified, true);
         settled = true;
-        return 'settled' as const;
+        return {
+          response: {
+            discardedRequestId: null,
+            leftAt: NOW,
+            managerSetGeneration: 1,
+            memberId: MEMBER_ID,
+            projectId: PROJECT_ID,
+            promotedSuccessorMemberId: null,
+            status: 'left' as const,
+          },
+          status: 'settled' as const,
+        };
       },
       async putLeaveFormerPrincipalReplay(input: {
         readonly createdAt: string; readonly expiresAt: string;
         readonly expectedPersonalRefOid: string; readonly intentId: string;
         readonly memberId: string; readonly operationId: string;
+        readonly response: NonNullable<typeof leaveReplay>['response'];
       }) {
         leaveReplay = { ...input, completedAt: undefined, resultSha256: undefined,
           state: 'recovering' };
@@ -293,16 +343,23 @@ describe('terminal Project lifecycle', () => {
       async close() {},
       async withProjectScope<T>(operation: (scope: ProjectScope) => Promise<T>) {
         return operation({
+          accept: { async getNonterminal() { return undefined; } },
           appendProjectEvent: async () => ({}) as never,
           findMembership: async () => ({
             displayName: 'Member', memberId: MEMBER_ID, revision: 2n,
             role: 'member', status: settled ? 'left' : 'active',
           }),
           getRepositoryPlacement: async () => placement,
+          getNonterminalDevelopmentBootstrapAttempt: async () => undefined,
           getProject: async () => ({ activatedAt: NOW, authorityGeneration: 4,
             authorityStateRevision: 1, createdAt: NOW, expectedMainOid: MAIN_OID,
             managerSetGeneration: 1, projectId: PROJECT_ID,
             projectName: 'Terminal', serviceState: 'active' as const }),
+          listMemberships: async () => [{
+            displayName: 'Member', memberId: MEMBER_ID, revision: 2n,
+            role: 'member' as const, status: settled ? 'left' as const : 'active' as const,
+          }],
+          membership: { async getNonterminalJoin() { return undefined; } },
           portability,
         } as unknown as ProjectScope);
       },
@@ -327,16 +384,24 @@ describe('terminal Project lifecycle', () => {
       },
     });
 
-    const result = await coordinator.leave({
-      principalId: MEMBER_PRINCIPAL,
-      request: {
-        expectedPersonalRefOid: MEMBER_OID,
-        idempotencyKey: 'leave-one',
-        projectId: PROJECT_ID,
-      },
-    });
+    await assert.rejects(
+      coordinator.leave(
+        trustedPrincipal(MEMBER_PRINCIPAL),
+        leaveRequest({ idempotencyKey: 'leave-one' }),
+      ),
+      (error: unknown) => error instanceof CollabError
+        && error.code === 'authority-not-synchronized',
+    );
+    assert.equal(verified, false);
+    assert.equal(leaveJournal, undefined);
 
-    assert.equal(result.kind, 'member-left');
+    competingMutation = false;
+    const result = await coordinator.leave(
+      trustedPrincipal(MEMBER_PRINCIPAL),
+      leaveRequest({ idempotencyKey: 'leave-one' }),
+    );
+
+    assert.equal(result.status, 'left');
     assert.equal(verified, true);
     assert.equal(deletedRef, 'refs/heads/members/member-member');
   });
@@ -350,6 +415,7 @@ describe('terminal Project lifecycle', () => {
             async close() {},
             async withProjectScope<T>(operation: (scope: ProjectScope) => Promise<T>) {
               return operation({
+                accept: { async getNonterminal() { return undefined; } },
                 findMembership: async () => ({
                   displayName: 'Manager', memberId: MANAGER_ID, revision: 1n,
                   role: 'manager', status: 'active',
@@ -358,6 +424,7 @@ describe('terminal Project lifecycle', () => {
                   active: true, generation: 7, projectId: PROJECT_ID,
                   repositoryStorageKey: 'repository_terminal', storageNodeId: 'local',
                 }),
+                getNonterminalDevelopmentBootstrapAttempt: async () => undefined,
                 getProject: async () => ({ activatedAt: NOW,
                   authorityGeneration: 4, authorityStateRevision: 1,
                   createdAt: NOW, expectedMainOid: MAIN_OID,
@@ -367,6 +434,7 @@ describe('terminal Project lifecycle', () => {
                   displayName: 'Manager', memberId: MANAGER_ID, revision: 1n,
                   role: 'manager' as const, status: 'active' as const,
                 }],
+                membership: { async getNonterminalJoin() { return undefined; } },
                 portability: {
                   async findProjectPrincipalBinding() {
                     return { boundAt: NOW, memberId: MANAGER_ID,
@@ -374,6 +442,7 @@ describe('terminal Project lifecycle', () => {
                       state: 'active' as const };
                   },
                   async getLifecycleJournal() { return undefined; },
+                  async getNonterminalLifecycleJournal() { return undefined; },
                   async findLeaveFormerPrincipalReplay() { return undefined; },
                   async putLifecycleJournal() { return 'created' as const; },
                   async settleLeaveMembership() { return 'last-manager' as const; },
@@ -391,17 +460,88 @@ describe('terminal Project lifecycle', () => {
     });
 
     await assert.rejects(
-      coordinator.leave({
-        principalId: MANAGER_PRINCIPAL,
-        request: { expectedPersonalRefOid: MEMBER_OID,
-          idempotencyKey: 'leave-manager', projectId: PROJECT_ID },
-      }),
+      coordinator.leave(
+        trustedPrincipal(MANAGER_PRINCIPAL),
+        leaveRequest({
+          expectedMembershipRevision: 1,
+          idempotencyKey: 'leave-manager',
+        }),
+      ),
       (error: unknown) => {
-        assert.ok(error instanceof LeaveCoordinatorError);
-        assert.equal(error.code, 'manager-succession-required');
+        assert.ok(error instanceof CollabError);
+        assert.equal(error.code, 'authority-not-synchronized');
         return true;
       },
     );
+  });
+
+  it('settles a prepared Manager Leave at its durable preparation time', async () => {
+    const request = leaveRequest({
+      expectedMembershipRevision: 1,
+      expectedOfferRevision: 2,
+      idempotencyKey: 'leave-manager-after-offer-expiry',
+      managerResponsibilityOfferId: 'offer-manager-leave',
+    });
+    const prepared = Object.freeze({
+      ...journal('leave', 'leave-manager-expiry', 'prepared'),
+      actorMemberId: MANAGER_ID,
+      expectedPersonalRefOid: MEMBER_OID,
+      idempotencyKey: request.idempotencyKey,
+      requestFingerprint: sha256(JSON.stringify(request)),
+    });
+    let observedLeftAt: string | undefined;
+    const coordinator = new LeaveCoordinator({
+      clock: () => new Date('2026-09-30T00:00:00.000Z'),
+      coordination: {
+        async acquireProjectLease() { throw new Error('unused'); },
+      },
+      repository: {
+        async reserveExactRepositoryOperation() { return repositoryReservation(); },
+        async verifyExactPersonalRef() {},
+        async deleteExactPersonalRef() { throw new Error('must not delete'); },
+      },
+    });
+    const lease = {
+      async close() {},
+      async withProjectScope<T>(operation: (scope: ProjectScope) => Promise<T>) {
+        return operation({
+          findMembership: async () => ({
+            displayName: 'Manager', memberId: MANAGER_ID, revision: 1n,
+            role: 'manager', status: 'active',
+          }),
+          getRepositoryPlacement: async () => ({
+            active: true, generation: 7, projectId: PROJECT_ID,
+            repositoryStorageKey: 'repository_terminal', storageNodeId: 'local',
+          }),
+          portability: {
+            async getLeaveProjectRequestFacts() {
+              return {
+                expectedManagerSetGeneration: request.expectedManagerSetGeneration,
+                expectedMembershipRevision: request.expectedMembershipRevision,
+                expectedOfferRevision: request.expectedOfferRevision,
+                managerResponsibilityOfferId: request.managerResponsibilityOfferId,
+              };
+            },
+            async listActiveProjectPrincipalBindings() {
+              return [{ boundAt: NOW, memberId: MANAGER_ID,
+                principalId: MANAGER_PRINCIPAL, revokedAt: undefined,
+                state: 'active' as const }];
+            },
+            async settleLeaveMembership(input: { readonly leftAt: string }) {
+              observedLeftAt = input.leftAt;
+              return { response: undefined, status: 'stale' as const };
+            },
+          },
+        } as unknown as ProjectScope);
+      },
+    } as PinnedProjectLease;
+
+    await assert.rejects(coordinator.recover({
+      journal: prepared,
+      lease,
+      repositoryReservation: repositoryReservation(),
+    }));
+    assert.equal(observedLeftAt, prepared.scheduledAt);
   });
 
   it('rejects a stale personal ref before membership settlement', async () => {
@@ -415,6 +555,7 @@ describe('terminal Project lifecycle', () => {
             async close() {},
             async withProjectScope<T>(operation: (scope: ProjectScope) => Promise<T>) {
               return operation({
+                accept: { async getNonterminal() { return undefined; } },
                 findMembership: async () => ({
                   displayName: 'Member', memberId: MEMBER_ID, revision: 2n,
                   role: 'member', status: 'active',
@@ -423,11 +564,17 @@ describe('terminal Project lifecycle', () => {
                   active: true, generation: 7, projectId: PROJECT_ID,
                   repositoryStorageKey: 'repository_terminal', storageNodeId: 'local',
                 }),
+                getNonterminalDevelopmentBootstrapAttempt: async () => undefined,
                 getProject: async () => ({ activatedAt: NOW,
                   authorityGeneration: 4, authorityStateRevision: 1,
                   createdAt: NOW, expectedMainOid: MAIN_OID,
                   managerSetGeneration: 1, projectId: PROJECT_ID,
                   projectName: 'Terminal', serviceState: 'active' as const }),
+                listMemberships: async () => [{
+                  displayName: 'Member', memberId: MEMBER_ID, revision: 2n,
+                  role: 'member' as const, status: 'active' as const,
+                }],
+                membership: { async getNonterminalJoin() { return undefined; } },
                 portability: {
                   async findProjectPrincipalBinding(principalId: string) {
                     return { boundAt: NOW,
@@ -437,6 +584,7 @@ describe('terminal Project lifecycle', () => {
                       state: 'active' as const };
                   },
                   async getLifecycleJournal() { return leaveJournal; },
+                  async getNonterminalLifecycleJournal() { return undefined; },
                   async findLeaveFormerPrincipalReplay() { return undefined; },
                   async putLifecycleJournal(input: PutProjectLifecycleJournalInput) {
                     leaveJournal = Object.freeze({
@@ -467,20 +615,16 @@ describe('terminal Project lifecycle', () => {
       },
     });
 
-    await assert.rejects(coordinator.leave({
-      principalId: MEMBER_PRINCIPAL,
-      request: { projectId: PROJECT_ID,
-        idempotencyKey: 'leave-stale-ref', expectedPersonalRefOid: MEMBER_OID },
-    }), (error: unknown) => error instanceof LeaveCoordinatorError
-      && error.code === 'state-conflict');
+    await assert.rejects(coordinator.leave(
+      trustedPrincipal(MEMBER_PRINCIPAL),
+      leaveRequest({ idempotencyKey: 'leave-stale-ref' }),
+    ), (error: unknown) => error instanceof Error);
     assert.equal(settlements, 0);
     assert.equal(leaveJournal, undefined);
-    await assert.rejects(coordinator.leave({
-      principalId: OTHER_PRINCIPAL,
-      request: { expectedPersonalRefOid: MEMBER_OID,
-        idempotencyKey: 'leave-stale-ref', projectId: PROJECT_ID },
-    }), (error: unknown) => error instanceof LeaveCoordinatorError
-      && error.code === 'state-conflict');
+    await assert.rejects(coordinator.leave(
+      trustedPrincipal(OTHER_PRINCIPAL),
+      leaveRequest({ idempotencyKey: 'leave-stale-ref' }),
+    ), (error: unknown) => error instanceof Error);
     assert.equal(settlements, 0);
   });
 

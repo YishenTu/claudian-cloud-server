@@ -24,6 +24,7 @@ import {
 import type { QueryResultRow } from 'pg';
 
 import { CoordinationError } from '../CoordinationError.js';
+import { frameBackupProtectedSecretEnvelope } from '../backupProtectedSecretEnvelope.js';
 import type {
   ProjectCheckpointPersistence,
   ProjectCheckpointRecord,
@@ -550,6 +551,9 @@ implements ProjectCheckpointPersistence {
         value: Object.freeze({ event }),
       }));
     }
+
+    await this.#readMembershipIdempotency(records);
+    await this.#readMembershipIdempotencyTombstones(records);
     const cursors = await this.#query<{
       readonly current_sequence: string;
       readonly updated_at: Date;
@@ -665,6 +669,7 @@ implements ProjectCheckpointPersistence {
     }));
 
     await this.#readLifecycle(records, input.excludedOperationId);
+    await this.#readMembershipRecoveries(records, input.excludedOperationId);
     await this.#readAuthorityTransferRecovery(records, input.excludedOperationId);
     await this.#readTransferredClaims(records, input.excludedOperationId);
     await this.#readTransferReceiptKeys(records, input.excludedOperationId);
@@ -672,6 +677,10 @@ implements ProjectCheckpointPersistence {
     await this.#readTransferRedemptionReceipts(records, input.excludedOperationId);
     await this.#readTerminalResponders(records);
     await this.#readLeaveReplays(records, input.excludedOperationId);
+    await this.#readInvitations(records);
+    await this.#readTransferredClaimOverrides(records);
+    await this.#readManagerResponsibilityOffers(records);
+    await this.#readSecretReplayTombstones(records);
     await this.#readProtectedEnvelopes(records);
     await this.#readTombstone(records);
 
@@ -708,6 +717,432 @@ implements ProjectCheckpointPersistence {
         }),
       }),
     );
+  }
+
+  async #readMembershipIdempotency(
+    records: BoundedCheckpointRecords,
+  ): Promise<void> {
+    for await (const row of this.#queryRows<{
+      readonly actor_member_id: string;
+      readonly created_at: Date;
+      readonly idempotency_key: string;
+      readonly operation: CollabControlOperation;
+      readonly request_fingerprint: string;
+      readonly result_json: string;
+    }>(
+      `SELECT actor_member_id, created_at, idempotency_key, operation,
+              request_fingerprint, result_json
+         FROM claudian_cloud.project_membership_idempotency_results
+        WHERE project_id = $1
+        ORDER BY actor_member_id, operation, idempotency_key`,
+      [this.#projectId],
+      records,
+    )) {
+      let responseJson: string;
+      try {
+        responseJson = JSON.stringify(
+          collabControlOperationCodec(row.operation).decodeResponse(
+            parsedJson(row.result_json),
+          ),
+        );
+      } catch {
+        return dependencyFailure();
+      }
+      const value = Object.freeze({
+        createdAt: iso(row.created_at),
+        idempotencyKey: row.idempotency_key,
+        memberId: row.actor_member_id,
+        operation: row.operation,
+        projectId: this.#projectId,
+        requestFingerprint: row.request_fingerprint,
+        responseJson,
+      });
+      records.push(Object.freeze({
+        kind: 'idempotency-result',
+        recordId: collabProjectBackupIdempotencyRecordId(value),
+        revision: 1,
+        value,
+      }));
+    }
+  }
+
+  async #readMembershipIdempotencyTombstones(
+    records: BoundedCheckpointRecords,
+  ): Promise<void> {
+    for await (const row of this.#queryRows<{
+      readonly actor_member_id: string;
+      readonly compacted_at: Date;
+      readonly idempotency_key: string;
+      readonly operation:
+        | 'acknowledgeManagerResponsibility'
+        | 'cancelManagerResponsibilityOffer'
+        | 'createManagerResponsibilityOffer'
+        | 'declineManagerResponsibility'
+        | 'promoteManager';
+      readonly request_fingerprint: string;
+    }>(
+      `SELECT actor_member_id, compacted_at, idempotency_key, operation,
+              request_fingerprint
+         FROM claudian_cloud.project_membership_idempotency_tombstones
+        WHERE project_id = $1
+        ORDER BY actor_member_id, operation, idempotency_key`,
+      [this.#projectId],
+      records,
+    )) {
+      records.push(Object.freeze({
+        kind: 'membership-idempotency-tombstone',
+        recordId: `${row.operation}:${row.actor_member_id}:${row.idempotency_key}`,
+        revision: 1,
+        value: Object.freeze({
+          actorMemberId: row.actor_member_id,
+          compactedAt: iso(row.compacted_at),
+          idempotencyKey: row.idempotency_key,
+          operation: row.operation,
+          projectId: this.#projectId,
+          requestFingerprint: row.request_fingerprint,
+        }),
+      }));
+    }
+  }
+
+  async #readInvitations(records: BoundedCheckpointRecords): Promise<void> {
+    for await (const row of this.#queryRows<{
+      readonly associated_data_sha256: string | null;
+      readonly ciphertext: string | null;
+      readonly created_at: Date;
+      readonly envelope_created_at: Date | null;
+      readonly envelope_expires_at: Date | null;
+      readonly expires_at: Date;
+      readonly idempotency_key: string;
+      readonly invitation_id: string;
+      readonly issued_by_member_id: string;
+      readonly key_id: string | null;
+      readonly key_version: string | null;
+      readonly nonce: string | null;
+      readonly request_fingerprint: string;
+      readonly revision: string;
+      readonly secret_replay_expires_at: Date;
+      readonly secret_sha256: string;
+      readonly state: 'active' | 'expired' | 'redeemed' | 'redeeming' | 'revoked';
+      readonly tag: string | null;
+      readonly terminal_at: Date | null;
+    }>(
+      `SELECT invitation.associated_data_sha256,
+              invitation.ciphertext,
+              invitation.envelope_created_at,
+              invitation.envelope_expires_at,
+              invitation.key_id,
+              invitation.key_version,
+              invitation.nonce,
+              invitation.tag,
+              invitation.created_at,
+              invitation.expires_at,
+              invitation.idempotency_key,
+              invitation.invitation_id,
+              invitation.issued_by_member_id,
+              invitation.request_fingerprint,
+              invitation.revision,
+              invitation.secret_replay_expires_at,
+              invitation.secret_sha256,
+              invitation.state,
+              invitation.terminal_at
+         FROM (
+           SELECT source.*,
+                  envelope.associated_data_sha256,
+                  envelope.ciphertext,
+                  envelope.created_at AS envelope_created_at,
+                  envelope.expires_at AS envelope_expires_at,
+                  envelope.key_id,
+                  envelope.key_version,
+                  envelope.nonce,
+                  envelope.tag
+             FROM claudian_cloud.project_invitations AS source
+             LEFT JOIN claudian_cloud.protected_invitation_envelopes AS envelope
+               USING (project_id, invitation_id)
+            WHERE source.project_id = $1
+         ) AS invitation
+        ORDER BY invitation.invitation_id`,
+      [this.#projectId],
+      records,
+    )) {
+      records.push(Object.freeze({
+        kind: 'project-invitation',
+        recordId: row.invitation_id,
+        revision: safeInteger(row.revision),
+        value: Object.freeze({
+          createdAt: iso(row.created_at),
+          expiresAt: iso(row.expires_at),
+          idempotencyKey: row.idempotency_key,
+          invitationId: row.invitation_id,
+          issuedByMemberId: row.issued_by_member_id,
+          projectId: this.#projectId,
+          requestFingerprint: row.request_fingerprint,
+          revision: safeInteger(row.revision),
+          secretReplayExpiresAt: iso(row.secret_replay_expires_at),
+          secretSha256: row.secret_sha256,
+          state: row.state,
+          terminalAt: row.terminal_at === null ? null : iso(row.terminal_at),
+        }),
+      }));
+      const envelopeFields = [
+        row.associated_data_sha256,
+        row.ciphertext,
+        row.envelope_created_at,
+        row.envelope_expires_at,
+        row.key_id,
+        row.key_version,
+        row.nonce,
+        row.tag,
+      ];
+      if (envelopeFields.every(value => value === null)) continue;
+      if (envelopeFields.some(value => value === null)) dependencyFailure();
+      if (
+        iso(row.envelope_created_at as Date) !== iso(row.created_at)
+        || iso(row.envelope_expires_at as Date) !== iso(row.expires_at)
+      ) dependencyFailure();
+      records.push(Object.freeze({
+        kind: 'protected-invitation-envelope',
+        recordId: row.invitation_id,
+        revision: 1,
+        value: Object.freeze({
+          associatedDataSha256: row.associated_data_sha256 as string,
+          ciphertext: frameBackupProtectedSecretEnvelope({
+            ciphertext: row.ciphertext as string,
+            keyVersion: safeInteger(row.key_version as string),
+            tag: row.tag as string,
+          }),
+          createdAt: iso(row.envelope_created_at as Date),
+          expiresAt: iso(row.secret_replay_expires_at),
+          invitationId: row.invitation_id,
+          keyId: row.key_id as string,
+          nonce: row.nonce as string,
+          projectId: this.#projectId,
+        }),
+      }));
+    }
+  }
+
+  async #readManagerResponsibilityOffers(
+    records: BoundedCheckpointRecords,
+  ): Promise<void> {
+    for await (const row of this.#queryRows<{
+      readonly acknowledged_at: Date | null;
+      readonly expires_at: Date;
+      readonly idempotency_key: string;
+      readonly manager_set_generation_at_offer: string;
+      readonly offered_at: Date;
+      readonly offer_id: string;
+      readonly purpose: 'manager-leave' | 'manager-promotion';
+      readonly request_fingerprint: string;
+      readonly revision: string;
+      readonly source_manager_member_id: string;
+      readonly state: 'acknowledged' | 'cancelled' | 'consumed' | 'declined' | 'expired' | 'offered';
+      readonly target_member_id: string;
+      readonly target_membership_revision_at_offer: string;
+      readonly terminal_at: Date | null;
+    }>(
+      `SELECT acknowledged_at, expires_at, idempotency_key,
+              manager_set_generation_at_offer, offered_at, offer_id, purpose,
+              request_fingerprint, revision, source_manager_member_id, state,
+              target_member_id, target_membership_revision_at_offer,
+              terminal_at
+         FROM claudian_cloud.manager_responsibility_offers
+        WHERE project_id = $1
+        ORDER BY offer_id`,
+      [this.#projectId],
+      records,
+    )) records.push(Object.freeze({
+      kind: 'manager-responsibility-offer',
+      recordId: row.offer_id,
+      revision: safeInteger(row.revision),
+      value: Object.freeze({
+        acknowledgedAt: row.acknowledged_at === null
+          ? null
+          : iso(row.acknowledged_at),
+        expiresAt: iso(row.expires_at),
+        idempotencyKey: row.idempotency_key,
+        managerSetGenerationAtOffer: safeInteger(
+          row.manager_set_generation_at_offer,
+        ),
+        offeredAt: iso(row.offered_at),
+        offerId: row.offer_id,
+        projectId: this.#projectId,
+        purpose: row.purpose,
+        requestFingerprint: row.request_fingerprint,
+        revision: safeInteger(row.revision),
+        sourceManagerMemberId: row.source_manager_member_id,
+        state: row.state,
+        targetMemberId: row.target_member_id,
+        targetMembershipRevisionAtOffer: safeInteger(
+          row.target_membership_revision_at_offer,
+        ),
+        terminalAt: row.terminal_at === null ? null : iso(row.terminal_at),
+      }),
+    }));
+  }
+
+  async #readTransferredClaimOverrides(
+    records: BoundedCheckpointRecords,
+  ): Promise<void> {
+    for await (const row of this.#queryRows<{
+      readonly associated_data_sha256: string | null;
+      readonly claim_generation: string;
+      readonly claim_sha256: string;
+      readonly ciphertext: string | null;
+      readonly created_at: Date;
+      readonly envelope_created_at: Date | null;
+      readonly envelope_expires_at: Date | null;
+      readonly expires_at: Date;
+      readonly idempotency_key: string;
+      readonly key_id: string | null;
+      readonly key_version: string | null;
+      readonly manager_member_id: string;
+      readonly member_id: string;
+      readonly nonce: string | null;
+      readonly redemption_receipt_id: string | null;
+      readonly request_fingerprint: string;
+      readonly secret_replay_expires_at: Date;
+      readonly state: 'active' | 'expired' | 'redeemed' | 'revoked' | 'superseded';
+      readonly superseded_claim_sha256: string;
+      readonly tag: string | null;
+      readonly target_principal_id: string | null;
+      readonly transfer_id: string;
+      readonly updated_at: Date;
+    }>(
+      `SELECT override.associated_data_sha256,
+              override.ciphertext,
+              override.envelope_created_at,
+              override.envelope_expires_at,
+              override.key_id,
+              override.key_version,
+              override.nonce,
+              override.tag,
+              override.claim_generation,
+              override.claim_sha256,
+              override.created_at,
+              override.expires_at,
+              override.idempotency_key,
+              override.manager_member_id,
+              override.member_id,
+              override.redemption_receipt_id,
+              override.request_fingerprint,
+              override.secret_replay_expires_at,
+              override.state,
+              override.superseded_claim_sha256,
+              override.target_principal_id,
+              override.transfer_id,
+              override.updated_at
+         FROM (
+           SELECT source.*,
+                  envelope.associated_data_sha256,
+                  envelope.ciphertext,
+                  envelope.created_at AS envelope_created_at,
+                  envelope.expires_at AS envelope_expires_at,
+                  envelope.key_id,
+                  envelope.key_version,
+                  envelope.nonce,
+                  envelope.tag
+             FROM claudian_cloud.transferred_membership_claim_overrides AS source
+             LEFT JOIN claudian_cloud.protected_claim_override_envelopes AS envelope
+               USING (project_id, transfer_id, member_id, claim_generation)
+            WHERE source.project_id = $1
+         ) AS override
+        ORDER BY override.transfer_id, override.member_id,
+                 override.claim_generation`,
+      [this.#projectId],
+      records,
+    )) {
+      const claimGeneration = safeInteger(row.claim_generation);
+      const identity = `${row.transfer_id}:${row.member_id}:${String(claimGeneration)}`;
+      records.push(Object.freeze({
+        kind: 'transferred-membership-claim-override',
+        recordId: identity,
+        revision: 1,
+        value: Object.freeze({
+          claimGeneration,
+          claimSha256: row.claim_sha256,
+          createdAt: iso(row.created_at),
+          expiresAt: iso(row.expires_at),
+          idempotencyKey: row.idempotency_key,
+          managerMemberId: row.manager_member_id,
+          memberId: row.member_id,
+          projectId: this.#projectId,
+          redemptionReceiptId: row.redemption_receipt_id,
+          requestFingerprint: row.request_fingerprint,
+          secretReplayExpiresAt: iso(row.secret_replay_expires_at),
+          state: row.state,
+          supersededClaimSha256: row.superseded_claim_sha256,
+          targetPrincipalId: row.target_principal_id,
+          transferId: row.transfer_id,
+          updatedAt: iso(row.updated_at),
+        }),
+      }));
+      const envelopeFields = [
+        row.associated_data_sha256,
+        row.ciphertext,
+        row.envelope_created_at,
+        row.envelope_expires_at,
+        row.key_id,
+        row.key_version,
+        row.nonce,
+        row.tag,
+      ];
+      if (envelopeFields.every(value => value === null)) continue;
+      if (envelopeFields.some(value => value === null)) dependencyFailure();
+      records.push(Object.freeze({
+        kind: 'protected-claim-override-envelope',
+        recordId: identity,
+        revision: 1,
+        value: Object.freeze({
+          associatedDataSha256: row.associated_data_sha256 as string,
+          ciphertext: frameBackupProtectedSecretEnvelope({
+            ciphertext: row.ciphertext as string,
+            keyVersion: safeInteger(row.key_version as string),
+            tag: row.tag as string,
+          }),
+          claimGeneration,
+          createdAt: iso(row.envelope_created_at as Date),
+          expiresAt: iso(row.envelope_expires_at as Date),
+          keyId: row.key_id as string,
+          memberId: row.member_id,
+          nonce: row.nonce as string,
+          projectId: this.#projectId,
+          transferId: row.transfer_id,
+        }),
+      }));
+    }
+  }
+
+  async #readSecretReplayTombstones(
+    records: BoundedCheckpointRecords,
+  ): Promise<void> {
+    for await (const row of this.#queryRows<{
+      readonly actor_member_id: string;
+      readonly expired_at: Date;
+      readonly idempotency_key: string;
+      readonly operation: 'createProjectInvitation' | 'reissueTransferredMembershipClaim';
+      readonly request_fingerprint: string;
+    }>(
+      `SELECT actor_member_id, expired_at, idempotency_key, operation,
+              request_fingerprint
+         FROM claudian_cloud.secret_replay_tombstones
+        WHERE project_id = $1
+        ORDER BY actor_member_id, operation, idempotency_key`,
+      [this.#projectId],
+      records,
+    )) records.push(Object.freeze({
+      kind: 'secret-replay-tombstone',
+      recordId: `${row.operation}:${row.actor_member_id}:${row.idempotency_key}`,
+      revision: 1,
+      value: Object.freeze({
+        actorMemberId: row.actor_member_id,
+        expiredAt: iso(row.expired_at),
+        idempotencyKey: row.idempotency_key,
+        operation: row.operation,
+        projectId: this.#projectId,
+        requestFingerprint: row.request_fingerprint,
+      }),
+    }));
   }
 
   async #readTombstone(records: BoundedCheckpointRecords): Promise<void> {
@@ -749,7 +1184,16 @@ implements ProjectCheckpointPersistence {
       readonly expected_authority_generation: string;
       readonly expected_personal_ref_oid: string | null;
       readonly idempotency_key: string;
-      readonly kind: 'authority-transfer' | 'backup' | 'delete' | 'export' | 'leave' | 'retire';
+      readonly kind:
+        | 'authority-transfer'
+        | 'backup'
+        | 'create-project'
+        | 'delete'
+        | 'export'
+        | 'join-project'
+        | 'leave'
+        | 'remove-member'
+        | 'retire';
       readonly operation_id: string;
       readonly phase: string;
       readonly recovery_from_phase: string | null;
@@ -785,7 +1229,9 @@ implements ProjectCheckpointPersistence {
         createdAt: iso(row.created_at),
         direction: row.direction,
         expectedAuthorityGeneration: safeInteger(row.expected_authority_generation),
-        expectedPersonalRefOid: row.expected_personal_ref_oid,
+        expectedPersonalRefOid: row.kind === 'remove-member'
+          ? null
+          : row.expected_personal_ref_oid,
         idempotencyKey: row.idempotency_key,
         operationId: row.operation_id,
         operationKind: row.kind,
@@ -798,6 +1244,333 @@ implements ProjectCheckpointPersistence {
         state: row.state,
         updatedAt: iso(row.updated_at),
       }),
+    }));
+  }
+
+  async #readMembershipRecoveries(
+    records: BoundedCheckpointRecords,
+    excludedOperationId: string | undefined,
+  ): Promise<void> {
+    for await (const row of this.#queryRows<{
+      readonly authority_generation: string;
+      readonly idempotency_key: string;
+      readonly initial_commit_oid: string;
+      readonly member_id: string;
+      readonly operation_id: string;
+      readonly personal_ref: string;
+      readonly plan_sha256: string;
+      readonly prepared_at: Date;
+      readonly principal_id: string;
+      readonly publication_marker_sha256: string;
+      readonly request_fingerprint: string;
+      readonly response_json: string;
+      readonly updated_at: Date;
+    }>(
+      `SELECT project.authority_generation,
+              journal.idempotency_key,
+              journal.initial_commit_oid,
+              journal.member_id,
+              journal.operation_id,
+              journal.personal_ref,
+              journal.plan_sha256,
+              journal.prepared_at,
+              journal.principal_id,
+              journal.publication_marker_sha256,
+              journal.request_fingerprint,
+              journal.response_json,
+              journal.updated_at
+         FROM claudian_cloud.cloud_project_creation_journals AS journal
+         JOIN claudian_cloud.projects AS project USING (project_id)
+         JOIN claudian_cloud.project_principal_bindings AS binding
+           ON binding.project_id = journal.project_id
+          AND binding.principal_id = journal.principal_id
+          AND binding.member_id = journal.member_id
+          AND binding.state = 'active'
+        WHERE journal.project_id = $1
+          AND journal.phase = 'completed'
+          AND ($2::text IS NULL OR journal.operation_id <> $2)
+        ORDER BY journal.operation_id`,
+      [this.#projectId, excludedOperationId ?? null],
+      records,
+    )) {
+      const responseJson = this.#canonicalResponse(
+        'createCloudProject',
+        row.response_json,
+      );
+      const resultSha256 = createHash('sha256').update(responseJson).digest('hex');
+      this.#pushCompletedMembershipLifecycle(records, {
+        actorMemberId: null,
+        createdAt: row.prepared_at,
+        expectedAuthorityGeneration: safeInteger(row.authority_generation),
+        idempotencyKey: row.idempotency_key,
+        operationId: row.operation_id,
+        operationKind: 'create-project',
+        requestFingerprint: row.request_fingerprint,
+        resultSha256,
+        updatedAt: row.updated_at,
+      });
+      records.push(Object.freeze({
+        kind: 'project-membership-recovery',
+        recordId: row.operation_id,
+        revision: 1,
+        value: Object.freeze({
+          expectedMainOid: row.initial_commit_oid,
+          expectedPersonalRefOid: row.initial_commit_oid,
+          invitationId: null,
+          memberId: row.member_id,
+          operationId: row.operation_id,
+          operationKind: 'create-project',
+          principalSha256: createHash('sha256')
+            .update(row.principal_id)
+            .digest('hex'),
+          projectId: this.#projectId,
+          publicationMarkerSha256: row.publication_marker_sha256,
+          repositoryPlanSha256: row.plan_sha256,
+          requestFingerprint: row.request_fingerprint,
+        }),
+      }));
+      this.#pushIdempotencyRecord(records, {
+        createdAt: row.prepared_at,
+        idempotencyKey: row.idempotency_key,
+        memberId: row.member_id,
+        operation: 'createCloudProject',
+        requestFingerprint: row.request_fingerprint,
+        responseJson,
+      });
+    }
+
+    for await (const row of this.#queryRows<{
+      readonly authority_generation: string;
+      readonly expected_main_oid: string;
+      readonly idempotency_key: string;
+      readonly invitation_id: string;
+      readonly member_id: string;
+      readonly operation_id: string;
+      readonly prepared_at: Date;
+      readonly principal_sha256: string;
+      readonly request_fingerprint: string;
+      readonly response_json: string;
+      readonly updated_at: Date;
+    }>(
+      `SELECT project.authority_generation,
+              journal.expected_main_oid,
+              journal.idempotency_key,
+              journal.invitation_id,
+              journal.member_id,
+              journal.operation_id,
+              journal.prepared_at,
+              journal.principal_sha256,
+              journal.request_fingerprint,
+              journal.response_json,
+              journal.updated_at
+         FROM claudian_cloud.cloud_project_join_journals AS journal
+         JOIN claudian_cloud.projects AS project USING (project_id)
+         JOIN claudian_cloud.project_principal_bindings AS binding
+           ON binding.project_id = journal.project_id
+          AND binding.principal_id = journal.principal_id
+          AND binding.member_id = journal.member_id
+          AND binding.state = 'active'
+        WHERE journal.project_id = $1
+          AND journal.phase = 'completed'
+          AND ($2::text IS NULL OR journal.operation_id <> $2)
+        ORDER BY journal.operation_id`,
+      [this.#projectId, excludedOperationId ?? null],
+      records,
+    )) {
+      const responseJson = this.#canonicalResponse(
+        'joinCloudProject',
+        row.response_json,
+      );
+      const decoded = collabControlOperationCodec('joinCloudProject')
+        .decodeResponse(parsedJson(responseJson));
+      const resultSha256 = createHash('sha256').update(responseJson).digest('hex');
+      this.#pushCompletedMembershipLifecycle(records, {
+        actorMemberId: null,
+        createdAt: row.prepared_at,
+        expectedAuthorityGeneration: safeInteger(row.authority_generation),
+        idempotencyKey: row.idempotency_key,
+        operationId: row.operation_id,
+        operationKind: 'join-project',
+        requestFingerprint: row.request_fingerprint,
+        resultSha256,
+        updatedAt: row.updated_at,
+      });
+      records.push(Object.freeze({
+        kind: 'project-membership-recovery',
+        recordId: row.operation_id,
+        revision: 1,
+        value: Object.freeze({
+          expectedMainOid: row.expected_main_oid,
+          expectedPersonalRefOid: row.expected_main_oid,
+          invitationId: row.invitation_id,
+          memberId: row.member_id,
+          operationId: row.operation_id,
+          operationKind: 'join-project',
+          principalSha256: row.principal_sha256,
+          projectId: this.#projectId,
+          publicationMarkerSha256: null,
+          repositoryPlanSha256: null,
+          requestFingerprint: row.request_fingerprint,
+        }),
+      }));
+      this.#pushIdempotencyRecord(records, {
+        createdAt: row.prepared_at,
+        idempotencyKey: row.idempotency_key,
+        memberId: decoded.memberId,
+        operation: 'joinCloudProject',
+        requestFingerprint: row.request_fingerprint,
+        responseJson,
+      });
+    }
+
+    for await (const row of this.#queryRows<{
+      readonly actor_member_id: string;
+      readonly expected_main_oid: string;
+      readonly expected_personal_ref_oid: string;
+      readonly idempotency_key: string;
+      readonly lifecycle_result_sha256: string;
+      readonly operation_id: string;
+      readonly prepared_at: Date;
+      readonly request_fingerprint: string;
+      readonly response_json: string;
+      readonly target_member_id: string;
+    }>(
+      `SELECT removal.actor_member_id,
+              project.expected_main_oid,
+              removal.expected_personal_ref_oid,
+              removal.idempotency_key,
+              lifecycle.result_sha256 AS lifecycle_result_sha256,
+              removal.operation_id,
+              removal.prepared_at,
+              removal.request_fingerprint,
+              removal.response_json,
+              removal.target_member_id
+         FROM claudian_cloud.project_member_removal_journals AS removal
+         JOIN claudian_cloud.project_lifecycle_journals AS lifecycle
+           USING (project_id, operation_id)
+         JOIN claudian_cloud.projects AS project USING (project_id)
+        WHERE removal.project_id = $1
+          AND removal.phase = 'completed'
+          AND lifecycle.state = 'completed'
+          AND ($2::text IS NULL OR removal.operation_id <> $2)
+        ORDER BY removal.operation_id`,
+      [this.#projectId, excludedOperationId ?? null],
+      records,
+    )) {
+      const responseJson = this.#canonicalResponse('removeMember', row.response_json);
+      const resultSha256 = createHash('sha256').update(responseJson).digest('hex');
+      if (resultSha256 !== row.lifecycle_result_sha256) dependencyFailure();
+      records.push(Object.freeze({
+        kind: 'project-membership-recovery',
+        recordId: row.operation_id,
+        revision: 1,
+        value: Object.freeze({
+          expectedMainOid: row.expected_main_oid,
+          expectedPersonalRefOid: row.expected_personal_ref_oid,
+          invitationId: null,
+          memberId: row.target_member_id,
+          operationId: row.operation_id,
+          operationKind: 'remove-member',
+          principalSha256: null,
+          projectId: this.#projectId,
+          publicationMarkerSha256: null,
+          repositoryPlanSha256: null,
+          requestFingerprint: row.request_fingerprint,
+        }),
+      }));
+      this.#pushIdempotencyRecord(records, {
+        createdAt: row.prepared_at,
+        idempotencyKey: row.idempotency_key,
+        memberId: row.actor_member_id,
+        operation: 'removeMember',
+        requestFingerprint: row.request_fingerprint,
+        responseJson,
+      });
+    }
+  }
+
+  #canonicalResponse(
+    operation: CollabControlOperation,
+    responseJson: string,
+  ): string {
+    try {
+      return JSON.stringify(
+        collabControlOperationCodec(operation).decodeResponse(
+          parsedJson(responseJson),
+        ),
+      );
+    } catch {
+      return dependencyFailure();
+    }
+  }
+
+  #pushCompletedMembershipLifecycle(
+    records: BoundedCheckpointRecords,
+    input: Readonly<{
+      readonly actorMemberId: string | null;
+      readonly createdAt: Date;
+      readonly expectedAuthorityGeneration: number;
+      readonly idempotencyKey: string;
+      readonly operationId: string;
+      readonly operationKind: 'create-project' | 'join-project';
+      readonly requestFingerprint: string;
+      readonly resultSha256: string;
+      readonly updatedAt: Date;
+    }>,
+  ): void {
+    records.push(Object.freeze({
+      kind: 'lifecycle-journal',
+      recordId: input.operationId,
+      revision: 1,
+      value: Object.freeze({
+        actorMemberId: input.actorMemberId,
+        batchRevision: null,
+        batchSha256: null,
+        checkpointSha256: null,
+        createdAt: iso(input.createdAt),
+        direction: null,
+        expectedAuthorityGeneration: input.expectedAuthorityGeneration,
+        expectedPersonalRefOid: null,
+        idempotencyKey: input.idempotencyKey,
+        operationId: input.operationId,
+        operationKind: input.operationKind,
+        phase: 'completed',
+        projectId: this.#projectId,
+        recoveryFromPhase: null,
+        requestFingerprint: input.requestFingerprint,
+        resultSha256: input.resultSha256,
+        scheduledAt: iso(input.createdAt),
+        state: 'completed',
+        updatedAt: iso(input.updatedAt),
+      }),
+    }));
+  }
+
+  #pushIdempotencyRecord(
+    records: BoundedCheckpointRecords,
+    input: Readonly<{
+      readonly createdAt: Date;
+      readonly idempotencyKey: string;
+      readonly memberId: string;
+      readonly operation: CollabControlOperation;
+      readonly requestFingerprint: string;
+      readonly responseJson: string;
+    }>,
+  ): void {
+    const value = Object.freeze({
+      createdAt: iso(input.createdAt),
+      idempotencyKey: input.idempotencyKey,
+      memberId: input.memberId,
+      operation: input.operation,
+      projectId: this.#projectId,
+      requestFingerprint: input.requestFingerprint,
+      responseJson: input.responseJson,
+    });
+    records.push(Object.freeze({
+      kind: 'idempotency-result',
+      recordId: collabProjectBackupIdempotencyRecordId(value),
+      revision: 1,
+      value,
     }));
   }
 
@@ -1153,37 +1926,54 @@ implements ProjectCheckpointPersistence {
       readonly operation_id: string;
       readonly principal_sha256: string;
       readonly request_fingerprint: string;
+      readonly response_json: string;
       readonly result_sha256: string | null;
       readonly state: 'completed' | 'recovering';
     }>(
       `SELECT completed_at, created_at, expected_personal_ref_oid,
               expires_at, intent_id, member_id, operation_id,
-              principal_sha256, request_fingerprint, result_sha256, state
+              principal_sha256, request_fingerprint, response_json,
+              result_sha256, state
          FROM claudian_cloud.leave_former_principal_replays
         WHERE project_id = $1
           AND ($2::text IS NULL OR operation_id <> $2)
         ORDER BY operation_id`,
       [this.#projectId, excludedOperationId ?? null],
       records,
-    )) records.push(Object.freeze({
-      kind: 'leave-former-principal-replay',
-      recordId: row.operation_id,
-      revision: 1,
-      value: Object.freeze({
-        completedAt: row.completed_at === null ? null : iso(row.completed_at),
-        createdAt: iso(row.created_at),
-        expectedPersonalRefOid: row.expected_personal_ref_oid,
-        expiresAt: iso(row.expires_at),
-        intentId: row.intent_id,
+    )) {
+      if (row.state !== 'completed') dependencyFailure();
+      const responseJson = this.#canonicalResponse('leaveProject', row.response_json);
+      if (
+        row.result_sha256 !== createHash('sha256').update(responseJson).digest('hex')
+      ) dependencyFailure();
+      records.push(Object.freeze({
+        kind: 'leave-former-principal-replay',
+        recordId: row.operation_id,
+        revision: 1,
+        value: Object.freeze({
+          completedAt: row.completed_at === null ? null : iso(row.completed_at),
+          createdAt: iso(row.created_at),
+          expectedPersonalRefOid: row.expected_personal_ref_oid,
+          expiresAt: iso(row.expires_at),
+          intentId: row.intent_id,
+          memberId: row.member_id,
+          operationId: row.operation_id,
+          principalSha256: row.principal_sha256,
+          projectId: this.#projectId,
+          requestFingerprint: row.request_fingerprint,
+          resultSha256: row.result_sha256,
+          state: row.state,
+        }),
+      }));
+      this.#pushIdempotencyRecord(records, {
+        createdAt: row.created_at,
+        idempotencyKey: row.intent_id,
         memberId: row.member_id,
-        operationId: row.operation_id,
-        principalSha256: row.principal_sha256,
-        projectId: this.#projectId,
+        operation: 'leaveProject',
         requestFingerprint: row.request_fingerprint,
-        resultSha256: row.result_sha256,
-        state: row.state,
-      }),
-    }));
+        responseJson,
+      });
+    }
   }
 
   async #readProtectedEnvelopes(

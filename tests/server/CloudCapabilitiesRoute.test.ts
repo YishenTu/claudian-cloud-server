@@ -85,6 +85,15 @@ describe('CloudCapabilitiesRoute', () => {
     assert.equal(capabilities.includes('authority-transfer'), false);
     assert.equal(capabilities.includes('project-checkpoint-export'), false);
     assert.equal(capabilities.includes('project-retirement'), false);
+    for (const hidden of [
+      'cloud-imported-membership-claims',
+      'cloud-project-create',
+      'cloud-project-invitations',
+      'cloud-project-join',
+      'cloud-project-leave',
+      'cloud-project-membership',
+      'cloud-project-manager-responsibility',
+    ]) assert.equal(capabilities.includes(hidden), false);
   });
 
   it('does not accept a noncanonical path or method', async () => {

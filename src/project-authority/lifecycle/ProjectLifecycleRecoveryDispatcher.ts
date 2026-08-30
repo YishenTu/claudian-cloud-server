@@ -54,6 +54,7 @@ export interface ProjectLifecycleRecoveryOwners {
   readonly deletion: ProjectLifecycleRecoveryOwner;
   readonly export: ProjectLifecycleRecoveryOwner;
   readonly leave: ProjectLifecycleRecoveryOwner;
+  readonly removal?: ProjectLifecycleRecoveryOwner;
   readonly retire: ProjectLifecycleRecoveryOwner;
 }
 
@@ -86,6 +87,7 @@ const LIFECYCLE_KINDS = new Set<ProjectLifecycleKind>([
   'delete',
   'export',
   'leave',
+  'remove-member',
   'retire',
 ]);
 const MAXIMUM_LIFECYCLE_JOURNALS_PER_RECOVERY = 2;
@@ -394,6 +396,11 @@ implements ProjectLifecycleRecoveryPort {
       case 'delete': return this.#owners.deletion;
       case 'export': return this.#owners.export;
       case 'leave': return this.#owners.leave;
+      case 'remove-member': {
+        const removal = this.#owners.removal;
+        if (removal === undefined) return fail('dependency-failed');
+        return removal;
+      }
       case 'retire': return this.#owners.retire;
     }
   }

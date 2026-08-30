@@ -56,8 +56,10 @@ import {
   ProjectLifecycleRecoveryDispatcher,
 } from '../project-authority/lifecycle/ProjectLifecycleRecoveryDispatcher.js';
 import { XChaCha20ClaimCustody } from '../project-authority/lifecycle/cloud-to-lan/XChaCha20ClaimCustody.js';
+import { ProtectedSecretCustody } from '../project-authority/lifecycle/ProtectedSecretCustody.js';
 import { DeletionCoordinator } from '../project-authority/lifecycle/delete/DeletionCoordinator.js';
 import { LeaveCoordinator } from '../project-authority/lifecycle/leave/LeaveCoordinator.js';
+import { ProjectMemberRemovalCoordinator } from '../project-authority/membership/ProjectMemberRemovalCoordinator.js';
 import { RetireCoordinator } from '../project-authority/lifecycle/retire/RetireCoordinator.js';
 import { EnvironmentRestoreRepositoryInspection } from '../repositories/EnvironmentRestoreRepositoryInspection.js';
 import { GitRepositoryAuthority } from '../repositories/GitRepositoryAuthority.js';
@@ -150,6 +152,7 @@ interface BackupExportOwners {
   readonly dispatcher: ProjectLifecycleRecoveryDispatcher;
   readonly exportProject: BackupExportCoordinator;
   readonly leave: LeaveCoordinator;
+  readonly removal: ProjectMemberRemovalCoordinator;
   readonly retire: RetireCoordinator;
   close(): Promise<void>;
 }
@@ -192,6 +195,10 @@ function keyReferenceVerifier(
       keys: keyring.encryptionKeys,
     }),
     keyring,
+    membershipCustody: new ProtectedSecretCustody({
+      activeKeyId: keyring.activeEncryptionKeyId,
+      keys: keyring.encryptionKeys,
+    }),
   });
 }
 
@@ -237,6 +244,10 @@ function backupExportOwners(
     coordination: runtime.coordination,
     repository: runtime.repository,
   });
+  const removal = new ProjectMemberRemovalCoordinator({
+    coordination: runtime.coordination,
+    repository: runtime.repository,
+  });
   const retire = new RetireCoordinator({
     coordination: runtime.coordination,
     repository: runtime.repository,
@@ -255,6 +266,7 @@ function backupExportOwners(
       deletion,
       export: exportProject,
       leave,
+      removal,
       retire,
     },
   });
@@ -265,16 +277,18 @@ function backupExportOwners(
     dispatcher: exactDispatcher,
     exportProject,
     leave,
+    removal,
     retire,
     async close(): Promise<void> {
       exactDispatcher.close();
       deletion.close();
-      leave.close();
       retire.close();
       const results = await Promise.allSettled([
         backup.close(),
         authorityTransfer.close(),
         exportProject.close(),
+        leave.close(),
+        removal.close(),
       ]);
       if (results.some(result => result.status === 'rejected')) {
         throw new Error('maintenance-backup-export-owners.close-failed');

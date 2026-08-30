@@ -12,9 +12,10 @@ import {
 } from '@claudian-collab/protocol';
 
 import {
-  DevelopmentPrincipalError,
-  type DevelopmentPrincipalAdapter,
-} from '../../request-context/DevelopmentPrincipalAdapter.js';
+  RequestPrincipalBinding,
+  RequestPrincipalBindingError,
+  type RequestPrincipalBindingOptions,
+} from '../../request-context/RequestPrincipalBinding.js';
 
 export interface AuthorityTransferArtifactUpload {
   readonly artifact: CollabCloudAuthorityTransferArtifact;
@@ -41,11 +42,11 @@ export interface AuthorityTransferArtifactAuthority {
   upload(input: AuthorityTransferArtifactUpload): Promise<void>;
 }
 
-export interface AuthorityTransferArtifactRoutesOptions {
+export interface AuthorityTransferArtifactRoutesOptions
+  extends RequestPrincipalBindingOptions {
   readonly authority: AuthorityTransferArtifactAuthority;
   readonly limits: Readonly<Record<CollabCloudAuthorityTransferArtifact, number>>;
   readonly operationTimeoutMs: number;
-  readonly principalAdapter: DevelopmentPrincipalAdapter;
   readonly requestIdFactory?: () => string;
 }
 
@@ -198,7 +199,7 @@ export class AuthorityTransferArtifactRoutes {
   readonly #authority: AuthorityTransferArtifactAuthority;
   readonly #limits: AuthorityTransferArtifactRoutesOptions['limits'];
   readonly #operationTimeoutMs: number;
-  readonly #principalAdapter: DevelopmentPrincipalAdapter;
+  readonly #principalBinding: RequestPrincipalBinding;
   readonly #requestIdFactory: () => string;
 
   constructor(options: AuthorityTransferArtifactRoutesOptions) {
@@ -213,7 +214,7 @@ export class AuthorityTransferArtifactRoutes {
     this.#authority = options.authority;
     this.#limits = Object.freeze({ ...options.limits });
     this.#operationTimeoutMs = options.operationTimeoutMs;
-    this.#principalAdapter = options.principalAdapter;
+    this.#principalBinding = new RequestPrincipalBinding(options);
     this.#requestIdFactory = options.requestIdFactory ?? randomUUID;
   }
 
@@ -252,13 +253,9 @@ export class AuthorityTransferArtifactRoutes {
     try {
       let principalId: string;
       try {
-        principalId = this.#principalAdapter.bind({
-          headerValues: headerValues(request, 'x-claudian-development-actor'),
-          localAddress: request.socket.localAddress,
-          remoteAddress: request.socket.remoteAddress,
-        }).actorId;
+        principalId = this.#principalBinding.bind(request).principalId;
       } catch (error: unknown) {
-        if (error instanceof DevelopmentPrincipalError) {
+        if (error instanceof RequestPrincipalBindingError) {
           throw new ArtifactRouteFailure(
             403,
             new CollabError({ code: 'authentication-failed' }),

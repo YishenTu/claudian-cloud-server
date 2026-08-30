@@ -6,8 +6,103 @@ import {
   KeyReferenceCheckingBackupExportSource,
   KeyReferenceCheckingPublishedCheckpoint,
 } from '../../src/environment-maintenance/commands/ClaimCustodyKeyReferenceVerifier.js';
+import { frameBackupProtectedSecretEnvelope } from '../../src/coordination/backupProtectedSecretEnvelope.js';
+import { ProtectedSecretCustody } from '../../src/project-authority/lifecycle/ProtectedSecretCustody.js';
+import { encodeInvitationAssociatedData } from '../../src/project-authority/membership/ProjectInvitationAuthority.js';
+import { encodeClaimOverrideAssociatedData } from '../../src/project-authority/membership/TransferredMembershipClaimAuthority.js';
 
 describe('ClaimCustodyKeyReferenceVerifier', () => {
+  it('opens framed invitation custody and rejects the wrong retained key', async () => {
+    const key = Buffer.alloc(32, 7);
+    const custody = new ProtectedSecretCustody({
+      activeKeyId: 'membership-key',
+      keys: [{ key, keyId: 'membership-key', keyVersion: 3 }],
+      nonceFactory: () => Buffer.alloc(24, 9),
+    });
+    const associatedData = encodeInvitationAssociatedData({
+      expiresAt: '2026-08-31T00:00:00.000Z',
+      invitationId: 'invitation-one',
+      projectId: 'project-one',
+    });
+    const sealed = await custody.seal({
+      associatedData,
+      secret: Buffer.alloc(32, 5).toString('base64url'),
+    });
+    const overrideAssociatedData = encodeClaimOverrideAssociatedData({
+      claimGeneration: 2,
+      expiresAt: '2026-09-29T00:00:00.000Z',
+      memberId: 'member-one',
+      projectId: 'project-one',
+      transferId: 'transfer-one',
+    });
+    const overrideSealed = await custody.seal({
+      associatedData: overrideAssociatedData,
+      secret: Buffer.alloc(32, 6).toString('base64url'),
+    });
+    const records = [{
+      kind: 'project-invitation',
+      value: {
+        expiresAt: '2026-08-31T00:00:00.000Z',
+        invitationId: 'invitation-one',
+        projectId: 'project-one',
+      },
+    }, {
+      kind: 'protected-invitation-envelope',
+      value: {
+        associatedDataSha256: sealed.associatedDataSha256,
+        ciphertext: frameBackupProtectedSecretEnvelope(sealed),
+        invitationId: 'invitation-one',
+        keyId: sealed.keyId,
+        nonce: sealed.nonce,
+        projectId: 'project-one',
+      },
+    }, {
+      kind: 'protected-claim-override-envelope',
+      value: {
+        associatedDataSha256: overrideSealed.associatedDataSha256,
+        ciphertext: frameBackupProtectedSecretEnvelope(overrideSealed),
+        claimGeneration: 2,
+        expiresAt: '2026-09-29T00:00:00.000Z',
+        keyId: overrideSealed.keyId,
+        memberId: 'member-one',
+        nonce: overrideSealed.nonce,
+        projectId: 'project-one',
+        transferId: 'transfer-one',
+      },
+    }];
+    const references: unknown[] = [];
+    const verifier = new ClaimCustodyKeyReferenceVerifier({
+      custody: { open: () => Promise.resolve('unused') },
+      keyring: {
+        assertReferences: input => references.push(input),
+        assertReceiptPublicKey() {},
+      },
+      membershipCustody: custody,
+    });
+    await verifier.verify(records);
+    assert.deepEqual(references, [{
+      encryptionKeyIds: ['membership-key'],
+      receiptKeyIds: [],
+    }]);
+
+    const wrongKeyVerifier = new ClaimCustodyKeyReferenceVerifier({
+      custody: { open: () => Promise.resolve('unused') },
+      keyring: {
+        assertReferences() {},
+        assertReceiptPublicKey() {},
+      },
+      membershipCustody: new ProtectedSecretCustody({
+        activeKeyId: 'membership-key',
+        keys: [{
+          key: Buffer.alloc(32, 8),
+          keyId: 'membership-key',
+          keyVersion: 3,
+        }],
+      }),
+    });
+    await assert.rejects(wrongKeyVerifier.verify(records));
+  });
+
   it('collects and opens every historical encryption and receipt-key reference', async () => {
     const calls: unknown[] = [];
     const opened: unknown[] = [];

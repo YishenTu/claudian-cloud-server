@@ -811,7 +811,7 @@ describe('ProjectCheckpointCoordinator', () => {
 
     assert.deepEqual(checkpoint.records, records);
     assert.equal(checkpoint.manifest.profile, 'backup');
-    assert.equal(checkpoint.manifest.coordinationFormatVersion, 2);
+    assert.equal(checkpoint.manifest.coordinationFormatVersion, 3);
     assert.equal(checkpoint.manifest.targetAuthority, null);
     assert.equal(
       checkpoint.manifest.manifestSha256,

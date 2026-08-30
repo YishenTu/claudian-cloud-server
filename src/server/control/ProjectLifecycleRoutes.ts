@@ -12,12 +12,12 @@ import {
   type CollabProjectRetirementResult,
 } from '@claudian-collab/protocol';
 
-import type { DevelopmentPrincipalAdapter } from '../../request-context/DevelopmentPrincipalAdapter.js';
 import {
   ProjectJsonRouteFailure,
   ProjectJsonTransport,
   projectProtocolFailure,
   type ProjectJsonRequestContext,
+  type ProjectJsonTransportOptions,
 } from './ProjectJsonTransport.js';
 
 type CloudAuthorityTransferOperation = Exclude<
@@ -49,12 +49,9 @@ export interface CloudLifecycleControl {
   ): Promise<CollabProjectRetirementResult | null>;
 }
 
-export interface ProjectLifecycleRoutesOptions {
+export interface ProjectLifecycleRoutesOptions
+  extends ProjectJsonTransportOptions {
   readonly control: CloudLifecycleControl;
-  readonly maximumJsonBytes: number;
-  readonly operationTimeoutMs: number;
-  readonly principalAdapter: DevelopmentPrincipalAdapter;
-  readonly requestIdFactory?: () => string;
 }
 
 const AUTHORITY_TRANSFER_OPERATION_SET: ReadonlySet<string> = new Set(
@@ -123,7 +120,7 @@ export class ProjectLifecycleRoutes {
     const request = decodeRequest(operation, context.data);
     assertPathProject(pathProjectId, request);
     const response = await this.#control.execute(operation, {
-      principalId: context.principal.actorId,
+      principalId: context.principal.principalId,
       request,
       signal: context.signal,
     });

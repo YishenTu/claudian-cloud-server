@@ -113,6 +113,7 @@ class MemoryState {
   deletionIntent: ProjectDeletionIntentInput | undefined;
   failNextJournalPhase: string | undefined;
   journal: ProjectLifecycleJournalRecord | undefined;
+  membershipAuthoritiesRelinquished = false;
   placement: RepositoryPlacementLease = Object.freeze({
     active: true,
     generation: 7,
@@ -380,6 +381,11 @@ class MemoryState {
   scope(): ProjectScope {
     const state = this;
     return {
+      membership: {
+        relinquishCloudMembershipAuthorities: async () => {
+          state.membershipAuthoritiesRelinquished = true;
+        },
+      },
       portability: this.portability(),
       async getProject() {
         return state.project;
@@ -394,6 +400,9 @@ class MemoryState {
         return state.placement;
       },
       async advanceProjectAuthorityState(input: AdvanceProjectAuthorityStateInput) {
+        if (input.nextServiceState === 'deleting') {
+          assert.equal(state.membershipAuthoritiesRelinquished, true);
+        }
         assert.equal(state.project.authorityGeneration, input.expectedAuthorityGeneration);
         assert.equal(state.project.authorityStateRevision, input.expectedAuthorityStateRevision);
         assert.equal(state.project.serviceState, input.expectedServiceState);
@@ -730,6 +739,7 @@ describe('CloudToLanTransferCoordinator', () => {
     assert.equal(harness.state.journal?.phase, 'cloud-relinquished');
     assert.equal(harness.state.project.authorityGeneration, 5);
     assert.equal(harness.state.project.serviceState, 'deleting');
+    assert.equal(harness.state.membershipAuthoritiesRelinquished, true);
 
     await assert.rejects(
       coordinator.getClaim({

@@ -9,6 +9,10 @@ import type {
 import type {
   ProjectCheckpointCoordinator,
 } from '../../project-authority/checkpoint/ProjectCheckpointCoordinator.js';
+import { unframeBackupProtectedSecretEnvelope } from '../../coordination/backupProtectedSecretEnvelope.js';
+import type { ProtectedSecretCustody } from '../../project-authority/lifecycle/ProtectedSecretCustody.js';
+import { encodeInvitationAssociatedData } from '../../project-authority/membership/ProjectInvitationAuthority.js';
+import { encodeClaimOverrideAssociatedData } from '../../project-authority/membership/TransferredMembershipClaimAuthority.js';
 
 export interface ClaimCustodyKeyReferenceConfigPort {
   assertReferences(input: Readonly<{
@@ -27,6 +31,7 @@ export interface ClaimCustodyEnvelopeOpeningPort {
 export interface ClaimCustodyKeyReferenceVerifierOptions {
   readonly custody: ClaimCustodyEnvelopeOpeningPort;
   readonly keyring: ClaimCustodyKeyReferenceConfigPort;
+  readonly membershipCustody?: Pick<ProtectedSecretCustody, 'open'>;
 }
 
 interface CandidateRecord {
@@ -68,10 +73,12 @@ function rawPublicKey(value: unknown): string {
 export class ClaimCustodyKeyReferenceVerifier {
   readonly #custody: ClaimCustodyEnvelopeOpeningPort;
   readonly #keyring: ClaimCustodyKeyReferenceConfigPort;
+  readonly #membershipCustody: Pick<ProtectedSecretCustody, 'open'> | undefined;
 
   constructor(options: ClaimCustodyKeyReferenceVerifierOptions) {
     this.#custody = options.custody;
     this.#keyring = options.keyring;
+    this.#membershipCustody = options.membershipCustody;
   }
 
   async verify(records: readonly CandidateRecord[]): Promise<void> {
@@ -108,6 +115,11 @@ export class ClaimCustodyKeyReferenceVerifier {
           return invalid();
         }
         encryption.add(keyId(item.value, 'keyId'));
+      } else if (
+        item.kind === 'protected-invitation-envelope'
+        || item.kind === 'protected-claim-override-envelope'
+      ) {
+        encryption.add(keyId(item.value, 'keyId'));
       }
     }
     const referencedPublicKeys = new Map<string, string>();
@@ -136,6 +148,72 @@ export class ClaimCustodyKeyReferenceVerifier {
         record(item.value) as unknown as
           CollabCheckpointProtectedClaimEnvelopeRecord['value'],
       );
+    }
+    for (const item of records) {
+      if (
+        item.kind !== 'protected-invitation-envelope'
+        && item.kind !== 'protected-claim-override-envelope'
+      ) continue;
+      if (this.#membershipCustody === undefined) return invalid();
+      const value = record(item.value);
+      let framed;
+      try {
+        const encoded = value.ciphertext;
+        if (typeof encoded !== 'string') return invalid();
+        framed = unframeBackupProtectedSecretEnvelope(encoded);
+      } catch {
+        return invalid();
+      }
+      let associatedData: string;
+      if (item.kind === 'protected-invitation-envelope') {
+        const invitationId = keyId(value, 'invitationId');
+        const invitation = records.find(candidate => (
+          candidate.kind === 'project-invitation'
+          && record(candidate.value).invitationId === invitationId
+        ));
+        if (invitation === undefined) return invalid();
+        const invitationValue = record(invitation.value);
+        const expiresAt = invitationValue.expiresAt;
+        if (typeof expiresAt !== 'string') return invalid();
+        associatedData = encodeInvitationAssociatedData({
+          expiresAt,
+          invitationId,
+          projectId: keyId(value, 'projectId'),
+        });
+      } else {
+        const claimGeneration = value.claimGeneration;
+        const expiresAt = value.expiresAt;
+        if (
+          !Number.isSafeInteger(claimGeneration)
+          || (claimGeneration as number) <= 0
+          || typeof expiresAt !== 'string'
+        ) return invalid();
+        associatedData = encodeClaimOverrideAssociatedData({
+          claimGeneration: claimGeneration as number,
+          expiresAt,
+          memberId: keyId(value, 'memberId'),
+          projectId: keyId(value, 'projectId'),
+          transferId: keyId(value, 'transferId'),
+        });
+      }
+      const associatedDataSha256 = value.associatedDataSha256;
+      const nonce = value.nonce;
+      if (
+        typeof associatedDataSha256 !== 'string'
+        || typeof nonce !== 'string'
+      ) return invalid();
+      await this.#membershipCustody.open({
+        associatedData,
+        envelope: Object.freeze({
+          algorithm: 'xchacha20-poly1305' as const,
+          associatedDataSha256,
+          ciphertext: framed.ciphertext,
+          keyId: keyId(value, 'keyId'),
+          keyVersion: framed.keyVersion,
+          nonce,
+          tag: framed.tag,
+        }),
+      });
     }
   }
 }

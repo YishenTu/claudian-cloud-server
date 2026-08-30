@@ -6,11 +6,12 @@ import {
 } from '@claudian-collab/protocol';
 
 import { ProjectWriteAdmissionError } from '../../project-authority/admission/ProjectWriteAdmission.js';
-import {
-  DevelopmentPrincipalError,
-  type DevelopmentPrincipalAdapter,
-} from '../../request-context/DevelopmentPrincipalAdapter.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import {
+  RequestPrincipalBinding,
+  RequestPrincipalBindingError,
+  type RequestPrincipalBindingOptions,
+} from '../../request-context/RequestPrincipalBinding.js';
 import { GitRepositoryError } from '../../repositories/GitRepositoryAuthority.js';
 import {
   GitSmartHttpRouteFailure,
@@ -51,12 +52,12 @@ export interface GitReceivePackWriteAuthority {
   ): Promise<void>;
 }
 
-export interface GitReceivePackRoutesOptions {
+export interface GitReceivePackRoutesOptions
+  extends RequestPrincipalBindingOptions {
   readonly authority: GitReceivePackWriteAuthority;
   readonly maximumRequestBytes: number;
   readonly maximumResponseBytes: number;
   readonly operationTimeoutMs: number;
-  readonly principalAdapter: DevelopmentPrincipalAdapter;
 }
 
 async function* boundedRequestBody(
@@ -124,7 +125,7 @@ export class GitReceivePackRoutes {
   readonly #maximumRequestBytes: number;
   readonly #maximumResponseBytes: number;
   readonly #operationTimeoutMs: number;
-  readonly #principalAdapter: DevelopmentPrincipalAdapter;
+  readonly #principalBinding: RequestPrincipalBinding;
 
   constructor(options: GitReceivePackRoutesOptions) {
     if (
@@ -141,7 +142,7 @@ export class GitReceivePackRoutes {
     this.#maximumRequestBytes = options.maximumRequestBytes;
     this.#maximumResponseBytes = options.maximumResponseBytes;
     this.#operationTimeoutMs = options.operationTimeoutMs;
-    this.#principalAdapter = options.principalAdapter;
+    this.#principalBinding = new RequestPrincipalBinding(options);
   }
 
   handle(request: IncomingMessage, response: ServerResponse): boolean {
@@ -178,13 +179,9 @@ export class GitReceivePackRoutes {
     try {
       let principal: IngressPrincipal;
       try {
-        principal = this.#principalAdapter.bind({
-          headerValues: headerValues(request, 'x-claudian-development-actor'),
-          localAddress: request.socket.localAddress,
-          remoteAddress: request.socket.remoteAddress,
-        });
+        principal = this.#principalBinding.bind(request);
       } catch (error: unknown) {
-        if (error instanceof DevelopmentPrincipalError) {
+        if (error instanceof RequestPrincipalBindingError) {
           throw new GitSmartHttpRouteFailure(403);
         }
         throw error;

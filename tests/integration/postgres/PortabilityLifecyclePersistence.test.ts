@@ -8,10 +8,12 @@ import { Client } from 'pg';
 import { CoordinationError } from '../../../src/coordination/CoordinationError.js';
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
 import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { CLOUD_PROJECT_MEMBERSHIP_SCHEMA } from '../../../src/coordination/postgres/PostgresSchema.js';
 import { LeaveCoordinator } from '../../../src/project-authority/lifecycle/leave/LeaveCoordinator.js';
 import { RetireCoordinator } from '../../../src/project-authority/lifecycle/retire/RetireCoordinator.js';
 import { DeletionCoordinator } from '../../../src/project-authority/lifecycle/delete/DeletionCoordinator.js';
 import { TerminalResponderExpiry } from '../../../src/project-authority/lifecycle/retire/TerminalResponderExpiry.js';
+import { createTrustedIngressPrincipal } from '../../../src/request-context/IngressPrincipal.js';
 import {
   type PostgresTestDatabase,
   withPostgresTestDatabase,
@@ -27,6 +29,18 @@ const BATCH_SHA = 'b'.repeat(64);
 const CLAIM_SHA = 'c'.repeat(64);
 const RESULT_SHA = 'd'.repeat(64);
 const AUTHORIZATION_SHA = 'e'.repeat(64);
+
+function leaveResponse(projectId: string, memberId: string) {
+  return Object.freeze({
+    discardedRequestId: null,
+    leftAt: T1,
+    managerSetGeneration: 1,
+    memberId,
+    projectId,
+    promotedSuccessorMemberId: null,
+    status: 'left' as const,
+  });
+}
 
 function coordination(database: PostgresTestDatabase): PostgresCoordination {
   return new PostgresCoordination({
@@ -179,10 +193,8 @@ describe('portability lifecycle persistence', () => {
             ORDER BY version`,
         );
         assert.deepEqual(history.rows.at(-1), {
-          checksum: '696e518fbdf82efd12f6276650862e86f0eed5da66013de4ba924cd2a005fe3f',
-          name: 'terminal-continuity-catalog',
+          ...CLOUD_PROJECT_MEMBERSHIP_SCHEMA,
           state: 'applied',
-          version: 10,
         });
 
         const projectColumns = await migration.query<{
@@ -360,14 +372,30 @@ describe('portability lifecycle persistence', () => {
     });
   });
 
-  it('constructs an ordinary read facade without portability capabilities', async () => {
+  it('constructs an ordinary read facade with lifecycle fences but no mutations', async () => {
     await withPostgresTestDatabase(async database => {
       await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
       const store = coordination(database);
       try {
         await store.withProjectReadScope('project-read-facade', scope => {
           const dynamic = scope as unknown as Record<string, unknown>;
-          assert.equal(dynamic.portability, undefined);
+          assert.equal(
+            typeof (dynamic.portability as Record<string, unknown>)
+              .getNonterminalLifecycleJournal,
+            'function',
+          );
+          assert.equal(
+            (dynamic.portability as Record<string, unknown>).putLifecycleJournal,
+            undefined,
+          );
+          assert.equal(
+            typeof (dynamic.membership as Record<string, unknown>).getNonterminalJoin,
+            'function',
+          );
+          assert.equal(
+            (dynamic.membership as Record<string, unknown>).prepareJoin,
+            undefined,
+          );
           assert.equal(dynamic.advanceProjectAuthorityState, undefined);
           assert.equal(dynamic.appendProjectEvent, undefined);
           assert.equal(
@@ -948,6 +976,7 @@ describe('portability lifecycle persistence', () => {
         operationId: 'leave-operation',
         principalId: 'principal:leaving',
         requestFingerprint: '7'.repeat(64),
+        response: leaveResponse(projectId, memberId),
       };
       try {
         await store.withProjectScope(projectId, async scope => {
@@ -1001,6 +1030,7 @@ describe('portability lifecycle persistence', () => {
             intentId: locator.intentId,
             memberId,
             operationId: locator.operationId,
+            response: locator.response,
             resultSha256: undefined,
             state: 'recovering',
           });
@@ -1046,6 +1076,7 @@ describe('portability lifecycle persistence', () => {
             intentId: locator.intentId,
             memberId,
             operationId: locator.operationId,
+            response: locator.response,
             resultSha256: RESULT_SHA,
             state: 'completed',
           });
@@ -1096,13 +1127,20 @@ describe('portability lifecycle persistence', () => {
             operationId,
             principalId,
             requestFingerprint: '7'.repeat(64),
+            response: leaveResponse(projectId, memberId),
           });
-          assert.equal(await scope.portability.settleLeaveMembership({
+          assert.deepEqual(await scope.portability.settleLeaveMembership({
+            expectedManagerSetGeneration: 1,
             expectedMembershipRevision: 1n,
+            expectedOfferRevision: null,
             leftAt: T1,
+            managerResponsibilityOfferId: null,
             memberId,
             operationId,
-          }), 'settled');
+          }), {
+            response: leaveResponse(projectId, memberId),
+            status: 'settled',
+          });
           await scope.portability.advanceLifecycleJournal({
             expectedPhase: 'prepared',
             expectedState: 'active',
@@ -1123,12 +1161,18 @@ describe('portability lifecycle persistence', () => {
             (await scope.portability.findProjectPrincipalBinding(principalId))?.state,
             'revoked',
           );
-          assert.equal(await scope.portability.settleLeaveMembership({
+          assert.deepEqual(await scope.portability.settleLeaveMembership({
+            expectedManagerSetGeneration: 1,
             expectedMembershipRevision: 1n,
+            expectedOfferRevision: null,
             leftAt: T1,
+            managerResponsibilityOfferId: null,
             memberId,
             operationId,
-          }), 'replayed');
+          }), {
+            response: leaveResponse(projectId, memberId),
+            status: 'replayed',
+          });
         });
       } finally {
         await store.close();
@@ -1188,14 +1232,21 @@ describe('portability lifecycle persistence', () => {
         });
         const results = [];
         for (const actor of actors) {
-          results.push(await leave.leave({
-            principalId: actor.principalId,
-            request: {
+          results.push(await leave.leave(
+            createTrustedIngressPrincipal({
+              principalId: actor.principalId,
+              providerId: 'test',
+            }),
+            {
+              expectedManagerSetGeneration: 1,
+              expectedMembershipRevision: 1,
+              expectedOfferRevision: null,
               expectedPersonalRefOid: actor.oid,
               idempotencyKey: 'shared-leave-intent',
+              managerResponsibilityOfferId: null,
               projectId,
             },
-          }));
+          ));
         }
         assert.deepEqual(results.map(result => result.memberId), [
           actors[0].memberId,
@@ -1704,6 +1755,225 @@ describe('portability lifecycle persistence', () => {
             checkpointSha256: CHECKPOINT_SHA,
             transferId: targetClaim.transferId,
           }), 'replayed');
+        });
+      } finally {
+        await store.close();
+      }
+    });
+  });
+
+  it('keeps imported claim overrides monotonic and resolves one effective redemption authority', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      const projectId = 'project-claim-overrides';
+      const transferId = 'transfer-claim-overrides';
+      const importedMemberId = 'member-imported-override';
+      const managerMemberId = 'member-claim-manager';
+      await seedProject(database, projectId);
+      await seedMembership(database, projectId, importedMemberId);
+      await seedMembership(database, projectId, managerMemberId);
+      const migration = new Client({ connectionString: database.migrationUrl });
+      try {
+        await migration.connect();
+        await migration.query('BEGIN');
+        await migration.query(
+          `SELECT set_config('claudian_cloud.project_id', $1, true)`,
+          [projectId],
+        );
+        await migration.query(
+          `UPDATE claudian_cloud.project_memberships
+              SET role = 'manager'
+            WHERE project_id = $1 AND member_id = $2`,
+          [projectId, managerMemberId],
+        );
+        await migration.query(
+          `INSERT INTO claudian_cloud.project_lifecycle_journals (
+             project_id, operation_id, kind, direction, phase,
+             recovery_from_phase, state, expected_authority_generation,
+             actor_member_id, idempotency_key, request_fingerprint,
+             checkpoint_sha256, batch_revision, batch_sha256, result_sha256,
+             scheduled_at, created_at, updated_at
+           ) VALUES (
+             $1, $2, 'authority-transfer', 'lan-to-cloud', 'completed', NULL,
+             'completed', 4, $3, 'claim-override-transfer-key', $4,
+             $5, 1, $6, NULL, $7, $7, $7
+           )`,
+          [
+            projectId,
+            transferId,
+            managerMemberId,
+            '8'.repeat(64),
+            CHECKPOINT_SHA,
+            BATCH_SHA,
+            T0,
+          ],
+        );
+        await migration.query('COMMIT');
+      } finally {
+        await migration.end();
+      }
+      const store = coordination(database);
+      try {
+        await store.withProjectScope(projectId, async scope => {
+          await scope.portability.putTransferredMembershipClaim({
+            batchRevision: 1,
+            checkpointSha256: CHECKPOINT_SHA,
+            claimSha256: CLAIM_SHA,
+            createdAt: T0,
+            expiresAt: EXPIRES,
+            memberId: importedMemberId,
+            transferId,
+          });
+          assert.deepEqual(
+            await scope.membership.getImportedMembershipClaimFacts(
+              importedMemberId,
+              T1,
+            ),
+            {
+              claimGeneration: 0,
+              claimSha256: CLAIM_SHA,
+              memberId: importedMemberId,
+              transferId,
+            },
+          );
+          const firstDigest = '1'.repeat(64);
+          const firstExpires = new Date(
+            Date.parse(T1) + 30 * 24 * 60 * 60 * 1_000,
+          ).toISOString();
+          const first = {
+            actorMemberId: managerMemberId,
+            claimGeneration: 1,
+            claimSha256: firstDigest,
+            createdAt: T1,
+            envelope: {
+              algorithm: 'xchacha20-poly1305' as const,
+              associatedDataSha256: '2'.repeat(64),
+              ciphertext: Buffer.alloc(43, 2).toString('base64url'),
+              claimGeneration: 1,
+              createdAt: T1,
+              expiresAt: firstExpires,
+              keyId: 'claim-override-key',
+              keyVersion: 1,
+              memberId: importedMemberId,
+              nonce: Buffer.alloc(24, 3).toString('base64url'),
+              projectId,
+              tag: Buffer.alloc(16, 4).toString('base64url'),
+              transferId,
+            },
+            expectedClaimGeneration: 0,
+            expectedManagerSetGeneration: 1,
+            expectedMembershipRevision: 1,
+            expiresAt: firstExpires,
+            idempotencyKey: 'claim-override-first',
+            memberId: importedMemberId,
+            projectId,
+            requestFingerprint: '3'.repeat(64),
+            secretReplayExpiresAt: firstExpires,
+            transferId,
+          };
+          assert.equal((await scope.membership.reissueTransferredMembershipClaim(
+            first,
+          )).status, 'created');
+          assert.equal((await scope.membership.reissueTransferredMembershipClaim(
+            first,
+          )).status, 'replayed');
+          assert.equal(await scope.membership.resolveEffectiveTransferredMembershipClaim(
+            transferId,
+            CLAIM_SHA,
+            T2,
+          ), undefined);
+          assert.equal((await scope.membership.resolveEffectiveTransferredMembershipClaim(
+            transferId,
+            firstDigest,
+            T2,
+          ))?.claimGeneration, 1);
+          assert.equal((await scope.membership.revokeTransferredMembershipClaim({
+            actorMemberId: managerMemberId,
+            expectedClaimGeneration: 1,
+            expectedManagerSetGeneration: 1,
+            expectedMembershipRevision: 1,
+            idempotencyKey: 'claim-override-revoke',
+            memberId: importedMemberId,
+            projectId,
+            requestFingerprint: '4'.repeat(64),
+            revokedAt: T2,
+          })).status, 'created');
+
+          const secondDigest = '5'.repeat(64);
+          const secondExpires = new Date(
+            Date.parse(T3) + 30 * 24 * 60 * 60 * 1_000,
+          ).toISOString();
+          const second = {
+            ...first,
+            claimGeneration: 2,
+            claimSha256: secondDigest,
+            createdAt: T3,
+            envelope: {
+              ...first.envelope,
+              associatedDataSha256: '6'.repeat(64),
+              claimGeneration: 2,
+              createdAt: T3,
+              expiresAt: secondExpires,
+            },
+            expectedClaimGeneration: 1,
+            expiresAt: secondExpires,
+            idempotencyKey: 'claim-override-second',
+            requestFingerprint: '7'.repeat(64),
+            secretReplayExpiresAt: secondExpires,
+          };
+          assert.equal((await scope.membership.reissueTransferredMembershipClaim(
+            second,
+          )).status, 'created');
+          assert.equal(await scope.membership.resolveEffectiveTransferredMembershipClaim(
+            transferId,
+            firstDigest,
+            T3,
+          ), undefined);
+          const effective = await scope.membership
+            .resolveEffectiveTransferredMembershipClaim(
+              transferId,
+              secondDigest,
+              T3,
+            );
+          assert.ok(effective);
+          assert.equal(effective.kind, 'override');
+          await scope.portability.putTransferReceiptKey({
+            createdAt: T0,
+            publicKey: 'A'.repeat(43),
+            receiptKeyId: 'claim-override-receipt-key',
+            transferId,
+          });
+          const redeemedAt = '2026-08-25T00:04:00.000Z';
+          const receipt = {
+            checkpointSha256: CHECKPOINT_SHA,
+            claimSha256: secondDigest,
+            memberId: importedMemberId,
+            operationIntentId: 'claim-override-redemption-intent',
+            projectId,
+            receiptId: 'claim-override-redemption-receipt',
+            receiptKeyId: 'claim-override-receipt-key',
+            redeemedAt,
+            signature: 'A'.repeat(86),
+            signatureAlgorithm: 'ed25519' as const,
+            targetAuthorityGeneration: 5,
+            transferId,
+          };
+          assert.deepEqual(
+            await scope.membership.redeemTransferredMembershipClaimOverride({
+              claim: effective,
+              operationIntentId: receipt.operationIntentId,
+              receipt,
+              targetPrincipalId: 'principal:claim-override',
+              updatedAt: redeemedAt,
+            }),
+            receipt,
+          );
+          assert.equal((await scope.membership.listProjectMembers({
+            actorRole: 'manager',
+            now: redeemedAt,
+          })).members.find(member => (
+            member.memberId === importedMemberId
+          ))?.importedClaimState, 'redeemed');
         });
       } finally {
         await store.close();
@@ -2324,6 +2594,43 @@ describe('portability lifecycle persistence', () => {
              project_id, storage_node_id, repository_storage_key, generation
            ) VALUES ($1, 'node-delete', 'repository-delete', 3)`,
           [projectId],
+        );
+        await migration.query(
+          `INSERT INTO claudian_cloud.project_invitations (
+             project_id, invitation_id, issued_by_member_id, idempotency_key,
+             request_fingerprint, secret_sha256, state, revision, created_at,
+             expires_at, secret_replay_expires_at, terminal_at
+           ) VALUES (
+             $1, 'invitation-delete-content', 'member-manager',
+             'invitation-delete-key', $2, $3, 'active', 1, $4, $5, $6, NULL
+           )`,
+          [
+            projectId,
+            '2'.repeat(64),
+            '3'.repeat(64),
+            T0,
+            '2026-08-26T00:00:00.000Z',
+            EXPIRES,
+          ],
+        );
+        await migration.query(
+          `INSERT INTO claudian_cloud.protected_invitation_envelopes (
+             project_id, invitation_id, encryption_algorithm, key_id,
+             key_version, nonce, ciphertext, tag, associated_data_sha256,
+             created_at, expires_at
+           ) VALUES (
+             $1, 'invitation-delete-content', 'xchacha20-poly1305',
+             'membership-delete-key', 1, $2, $3, $4, $5, $6, $7
+           )`,
+          [
+            projectId,
+            Buffer.alloc(24, 1).toString('base64url'),
+            Buffer.from('deletion-invitation').toString('base64url'),
+            Buffer.alloc(16, 2).toString('base64url'),
+            '1'.repeat(64),
+            T0,
+            '2026-08-26T00:00:00.000Z',
+          ],
         );
         await migration.query('COMMIT');
       } finally {

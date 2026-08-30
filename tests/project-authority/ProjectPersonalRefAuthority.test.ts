@@ -68,8 +68,11 @@ class MemoryCoordination {
         operation: (scope: ProjectScope) => Promise<T>,
       ): Promise<T> => operation({
         accept: { getNonterminal: () => Promise.resolve(undefined) },
-        findDevelopmentActorMember: (actorId: string) => Promise.resolve(
-          actorId,
+        findDevelopmentActorMember: (principalId: string) => Promise.resolve(
+          principalId,
+        ),
+        findPrincipalMember: (principalId: string) => Promise.resolve(
+          principalId,
         ),
         findMembership: (memberId: CollabMemberId) => Promise.resolve({
           displayName: memberId,
@@ -79,6 +82,9 @@ class MemoryCoordination {
           status: 'active' as const,
         }),
         getNonterminalDevelopmentBootstrapAttempt: () => Promise.resolve(undefined),
+        membership: {
+          getNonterminalJoin: () => Promise.resolve(undefined),
+        },
         portability: {
           getNonterminalLifecycleJournal: () => Promise.resolve(undefined),
         },
@@ -109,7 +115,10 @@ class MemoryCoordination {
     operation: (scope: ProjectReadScope) => Promise<T>,
   ): Promise<T> {
     return operation({
-      findDevelopmentActorMember: (actorId: string) => Promise.resolve(actorId),
+      findDevelopmentActorMember: (principalId: string) => Promise.resolve(
+        principalId,
+      ),
+      findPrincipalMember: (principalId: string) => Promise.resolve(principalId),
       findMembership: (memberId: CollabMemberId) => Promise.resolve({
         displayName: memberId,
         memberId,
@@ -117,6 +126,13 @@ class MemoryCoordination {
         role: 'member' as const,
         status: 'active' as const,
       }),
+      getNonterminalDevelopmentBootstrapAttempt: () => Promise.resolve(undefined),
+      membership: {
+        getNonterminalJoin: () => Promise.resolve(undefined),
+      },
+      portability: {
+        getNonterminalLifecycleJournal: () => Promise.resolve(undefined),
+      },
       getProject: () => Promise.resolve({
         activatedAt: '2026-08-22T00:00:00.000Z',
         createdAt: '2026-08-22T00:00:00.000Z',
@@ -189,7 +205,11 @@ describe('ProjectPersonalRefAuthority', () => {
           operation: (scope: ProjectScope) => Promise<T>,
         ): Promise<T> => operation({
           findDevelopmentActorMember: () => Promise.resolve(undefined),
+          findPrincipalMember: () => Promise.resolve(undefined),
           findMembership: () => Promise.resolve(undefined),
+          membership: {
+            getNonterminalJoin: () => Promise.resolve(undefined),
+          },
           portability: {
             getNonterminalLifecycleJournal: () => Promise.resolve(undefined),
           },
@@ -200,7 +220,15 @@ describe('ProjectPersonalRefAuthority', () => {
         operation: (scope: ProjectReadScope) => Promise<T>,
       ): Promise<T> => operation({
         findDevelopmentActorMember: () => Promise.resolve(undefined),
+        findPrincipalMember: () => Promise.resolve(undefined),
         findMembership: () => Promise.resolve(undefined),
+        getNonterminalDevelopmentBootstrapAttempt: () => Promise.resolve(undefined),
+        membership: {
+          getNonterminalJoin: () => Promise.resolve(undefined),
+        },
+        portability: {
+          getNonterminalLifecycleJournal: () => Promise.resolve(undefined),
+        },
       } as unknown as ProjectReadScope),
     };
     const authority = new ProjectPersonalRefAuthority({
@@ -247,6 +275,9 @@ describe('ProjectPersonalRefAuthority', () => {
               findDevelopmentActorMember: () => Promise.resolve(
                 preflight ? 'member-a' : undefined,
               ),
+              findPrincipalMember: () => Promise.resolve(
+                preflight ? 'member-a' : undefined,
+              ),
               findMembership: () => Promise.resolve(preflight
                 ? {
                     displayName: 'Member A',
@@ -261,6 +292,9 @@ describe('ProjectPersonalRefAuthority', () => {
                   ? ({ state: 'recovery-required' } as never)
                   : undefined,
               ),
+              membership: {
+                getNonterminalJoin: () => Promise.resolve(undefined),
+              },
               portability: {
                 getNonterminalLifecycleJournal: () => Promise.resolve(undefined),
               },
@@ -292,6 +326,7 @@ describe('ProjectPersonalRefAuthority', () => {
           operation: (scope: ProjectReadScope) => Promise<T>,
         ): Promise<T> => operation({
           findDevelopmentActorMember: () => Promise.resolve('member-a'),
+          findPrincipalMember: () => Promise.resolve('member-a'),
           findMembership: () => Promise.resolve({
             displayName: 'Member A',
             memberId: 'member-a',
@@ -299,6 +334,13 @@ describe('ProjectPersonalRefAuthority', () => {
             role: 'member' as const,
             status: 'active' as const,
           }),
+          getNonterminalDevelopmentBootstrapAttempt: () => Promise.resolve(undefined),
+          membership: {
+            getNonterminalJoin: () => Promise.resolve(undefined),
+          },
+          portability: {
+            getNonterminalLifecycleJournal: () => Promise.resolve(undefined),
+          },
         } as unknown as ProjectReadScope),
       };
       const authority = new ProjectPersonalRefAuthority({
@@ -353,11 +395,15 @@ describe('ProjectPersonalRefAuthority', () => {
             ): Promise<T> => operation({
               accept: { getNonterminal: () => Promise.resolve(undefined) },
               findDevelopmentActorMember: () => Promise.resolve('member-a'),
+              findPrincipalMember: () => Promise.resolve('member-a'),
               findMembership: () => Promise.resolve(activeMember),
               getNonterminalDevelopmentBootstrapAttempt: () => Promise.resolve({
                 projectId,
                 state: 'collecting',
               } as never),
+              membership: {
+                getNonterminalJoin: () => Promise.resolve(undefined),
+              },
               portability: {
                 getNonterminalLifecycleJournal: () => Promise.resolve(undefined),
               },
@@ -369,7 +415,15 @@ describe('ProjectPersonalRefAuthority', () => {
           operation: (scope: ProjectReadScope) => Promise<T>,
         ): Promise<T> => operation({
           findDevelopmentActorMember: () => Promise.resolve('member-a'),
+          findPrincipalMember: () => Promise.resolve('member-a'),
           findMembership: () => Promise.resolve(activeMember),
+          getNonterminalDevelopmentBootstrapAttempt: () => Promise.resolve(undefined),
+          membership: {
+            getNonterminalJoin: () => Promise.resolve(undefined),
+          },
+          portability: {
+            getNonterminalLifecycleJournal: () => Promise.resolve(undefined),
+          },
         } as unknown as ProjectReadScope),
       };
       const authority = new ProjectPersonalRefAuthority({

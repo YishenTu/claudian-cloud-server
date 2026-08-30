@@ -125,7 +125,10 @@ describe('ProjectSnapshotRoutes', () => {
       collabCloudSuccessEnvelope('request-a', snapshot),
     );
     assert.deepEqual(calls, [{
-      principal: { actorId: 'member-a', profile: 'loopback-development' },
+      principal: {
+        principalId: 'member-a',
+        provenance: { kind: 'private-development' },
+      },
       projectId: 'project-a',
     }]);
   });

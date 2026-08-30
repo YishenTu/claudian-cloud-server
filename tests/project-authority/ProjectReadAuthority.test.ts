@@ -22,6 +22,8 @@ const MAIN_OID = 'a'.repeat(40);
 
 interface MemoryState {
   activeAttempt: boolean;
+  activeJoin: boolean;
+  activeLifecycle: boolean;
   eventSequence: number;
   expectedMainOid: string;
   membershipStatus: 'active' | 'left';
@@ -33,6 +35,8 @@ interface MemoryState {
 class MemoryCoordination implements ProjectReadAuthorityCoordination {
   readonly state: MemoryState = {
     activeAttempt: false,
+    activeJoin: false,
+    activeLifecycle: false,
     eventSequence: 2,
     expectedMainOid: MAIN_OID,
     membershipStatus: 'active',
@@ -75,10 +79,12 @@ class MemoryCoordination implements ProjectReadAuthorityCoordination {
           }),
         },
       } as never,
-      findDevelopmentActorMember: actorId => Promise.resolve(
-        actorId === 'member-001' ? 'member-001' : undefined,
+      findDevelopmentActorMember: principalId => Promise.resolve(
+        principalId === 'member-001' ? 'member-001' : undefined,
       ),
-      findPrincipalMember: () => Promise.resolve(undefined),
+      findPrincipalMember: principalId => Promise.resolve(
+        principalId === 'member-001' ? 'member-001' : undefined,
+      ),
       findMembership: memberId => Promise.resolve(
         members.find(member => member.memberId === memberId),
       ),
@@ -115,6 +121,16 @@ class MemoryCoordination implements ProjectReadAuthorityCoordination {
           : undefined,
       ),
       listActiveSnapshotMemberships: () => Promise.resolve(activeMembers),
+      membership: {
+        getNonterminalJoin: () => Promise.resolve(
+          this.state.activeJoin ? ({ phase: 'membership-pending' } as never) : undefined,
+        ),
+      },
+      portability: {
+        getNonterminalLifecycleJournal: () => Promise.resolve(
+          this.state.activeLifecycle ? ({ kind: 'remove-member' } as never) : undefined,
+        ),
+      },
       readProjectEvents: ({ afterSequence }) => Promise.resolve({
         events: afterSequence === 0 ? [
           {
@@ -329,6 +345,28 @@ describe('ProjectReadAuthority', () => {
     {
       const { coordination, read } = authority();
       coordination.state.activeAttempt = true;
+      await expectReadError(
+        read.getProjectSnapshot(
+          createDevelopmentIngressPrincipal('member-001'),
+          'project-a',
+        ),
+        'recovery-required',
+      );
+    }
+    {
+      const { coordination, read } = authority();
+      coordination.state.activeJoin = true;
+      await expectReadError(
+        read.getProjectSnapshot(
+          createDevelopmentIngressPrincipal('member-001'),
+          'project-a',
+        ),
+        'recovery-required',
+      );
+    }
+    {
+      const { coordination, read } = authority();
+      coordination.state.activeLifecycle = true;
       await expectReadError(
         read.getProjectSnapshot(
           createDevelopmentIngressPrincipal('member-001'),

@@ -88,7 +88,7 @@ describe('migration process', () => {
       assert.deepEqual(await runMigration(database.migrationUrl, 'preflight'), {
         exitCode: 0,
         stderr: '',
-        stdout: '10\n',
+        stdout: '11\n',
       });
     });
   });
@@ -97,14 +97,14 @@ describe('migration process', () => {
     assert.deepEqual(await runMigration(undefined, 'target'), {
       exitCode: 0,
       stderr: '',
-      stdout: '10\n',
+      stdout: '11\n',
     });
-    assert.deepEqual(await runMigration(undefined, 'supports', '9'), {
+    assert.deepEqual(await runMigration(undefined, 'supports', '10'), {
       exitCode: 0,
       stderr: '',
       stdout: '',
     });
-    assert.deepEqual(await runMigration(undefined, 'supports', '8'), {
+    assert.deepEqual(await runMigration(undefined, 'supports', '9'), {
       exitCode: 2,
       stderr: '',
       stdout: '',

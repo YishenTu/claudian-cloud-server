@@ -25,6 +25,7 @@ const LAN_TO_CLOUD_TRANSFER_CHECKSUM = 'd49bf1335d3410cdd95ff2b928f21264eb6212e7
 const CLOUD_TO_LAN_TRANSFER_CHECKSUM = '12e60f0ef26d2906687635cc4bdc59f33cb3bbfbc2095d2e7196b57417eb0e12';
 const TERMINAL_PROJECT_LIFECYCLE_CHECKSUM = 'f5a9541802d114f0959b2e62c9a884cba938c99926fe9547063d95a457a6d284';
 const TERMINAL_CONTINUITY_CATALOG_CHECKSUM = '696e518fbdf82efd12f6276650862e86f0eed5da66013de4ba924cd2a005fe3f';
+const CLOUD_PROJECT_MEMBERSHIP_CHECKSUM = 'bbe549d51b6f5c5f23994b57959548cefc5a6cc741e1d0f61680fdcfb933ca1d';
 
 const MIGRATION_HISTORY = Object.freeze([
   { checksum: FOUNDATION_CHECKSUM, name: 'foundation', version: 1 },
@@ -64,6 +65,11 @@ const MIGRATION_HISTORY = Object.freeze([
     checksum: TERMINAL_CONTINUITY_CATALOG_CHECKSUM,
     name: 'terminal-continuity-catalog',
     version: 10,
+  },
+  {
+    checksum: CLOUD_PROJECT_MEMBERSHIP_CHECKSUM,
+    name: 'cloud-project-membership',
+    version: 11,
   },
 ]);
 
@@ -245,6 +251,12 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
         state: 'applied',
         version: 10,
       },
+      {
+        checksum: CLOUD_PROJECT_MEMBERSHIP_CHECKSUM,
+        name: 'cloud-project-membership',
+        state: 'applied',
+        version: 11,
+      },
     ]);
 
     const relations = await client.query<{ readonly relation: string }>(
@@ -261,6 +273,8 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
         'active_repository_placement_catalog',
         'authority_transfer_recovery',
         'change_requests',
+        'cloud_project_creation_journals',
+        'cloud_project_join_journals',
         'development_actor_mappings',
         'development_bootstrap_attempt_routes',
         'development_bootstrap_attempts',
@@ -270,11 +284,17 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
         'development_bootstrap_uploads',
         'idempotency_results',
         'leave_former_principal_replays',
+        'leave_project_request_facts',
+        'manager_responsibility_offers',
         'project_backup_catalog',
         'project_deletion_intents',
         'project_event_sequences',
         'project_events',
+        'project_invitations',
         'project_lifecycle_journals',
+        'project_member_removal_journals',
+        'project_membership_idempotency_results',
+        'project_membership_idempotency_tombstones',
         'project_memberships',
         'project_principal_bindings',
         'project_terminal_acknowledgements',
@@ -283,11 +303,14 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
         'project_terminal_responders',
         'project_tombstones',
         'projects',
+        'protected_claim_override_envelopes',
+        'protected_invitation_envelopes',
         'recovery_candidates',
         'repository_placements',
         'request_comments',
         'request_ticket_relations',
         'schema_migrations',
+        'secret_replay_tombstones',
         'source_protected_claim_envelopes',
         'ticket_comments',
         'ticket_mentions',
@@ -295,6 +318,7 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
         'transfer_claim_batch_receipts',
         'transfer_receipt_keys',
         'transfer_redemption_receipts',
+        'transferred_membership_claim_overrides',
         'transferred_membership_claims',
       ],
     );
@@ -340,10 +364,10 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
     await client.query(
       `INSERT INTO claudian_cloud.schema_migrations
         (version, name, checksum, state, applied_at)
-       VALUES (11, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
+       VALUES (12, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
     );
-    await expectMigrationError(migrator, 'schema-newer', 11);
-    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 11');
+    await expectMigrationError(migrator, 'schema-newer', 12);
+    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 12');
 
     await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 1');
     await expectMigrationError(migrator, 'schema-gap', 2);
@@ -375,10 +399,18 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
         WHERE n.nspname = 'claudian_cloud'
           AND c.relname IN (
             'authority_transfer_recovery',
+            'cloud_project_creation_journals',
+            'cloud_project_join_journals',
             'leave_former_principal_replays',
+            'leave_project_request_facts',
+            'manager_responsibility_offers',
             'project_event_sequences',
             'project_events',
+            'project_invitations',
             'project_lifecycle_journals',
+            'project_member_removal_journals',
+            'project_membership_idempotency_results',
+            'project_membership_idempotency_tombstones',
             'projects',
             'project_memberships',
             'project_principal_bindings',
@@ -387,10 +419,14 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
             'project_tombstones',
             'project_deletion_intents',
             'project_backup_catalog',
+            'protected_claim_override_envelopes',
+            'protected_invitation_envelopes',
+            'secret_replay_tombstones',
             'source_protected_claim_envelopes',
             'transfer_claim_batch_receipts',
             'transfer_receipt_keys',
             'transfer_redemption_receipts',
+            'transferred_membership_claim_overrides',
             'transferred_membership_claims',
             'repository_placements'
           )
@@ -398,23 +434,35 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
     );
     assert.deepEqual(rls.rows, [
       { forced: true, relation: 'authority_transfer_recovery', row_security: true },
+      { forced: true, relation: 'cloud_project_creation_journals', row_security: true },
+      { forced: true, relation: 'cloud_project_join_journals', row_security: true },
       { forced: true, relation: 'leave_former_principal_replays', row_security: true },
+      { forced: true, relation: 'leave_project_request_facts', row_security: true },
+      { forced: true, relation: 'manager_responsibility_offers', row_security: true },
       { forced: true, relation: 'project_backup_catalog', row_security: true },
       { forced: true, relation: 'project_deletion_intents', row_security: true },
       { forced: true, relation: 'project_event_sequences', row_security: true },
       { forced: true, relation: 'project_events', row_security: true },
+      { forced: true, relation: 'project_invitations', row_security: true },
       { forced: true, relation: 'project_lifecycle_journals', row_security: true },
+      { forced: true, relation: 'project_member_removal_journals', row_security: true },
+      { forced: true, relation: 'project_membership_idempotency_results', row_security: true },
+      { forced: true, relation: 'project_membership_idempotency_tombstones', row_security: true },
       { forced: true, relation: 'project_memberships', row_security: true },
       { forced: true, relation: 'project_principal_bindings', row_security: true },
       { forced: true, relation: 'project_terminal_acknowledgements', row_security: true },
       { forced: true, relation: 'project_terminal_responders', row_security: true },
       { forced: true, relation: 'project_tombstones', row_security: true },
       { forced: true, relation: 'projects', row_security: true },
+      { forced: true, relation: 'protected_claim_override_envelopes', row_security: true },
+      { forced: true, relation: 'protected_invitation_envelopes', row_security: true },
       { forced: true, relation: 'repository_placements', row_security: true },
+      { forced: true, relation: 'secret_replay_tombstones', row_security: true },
       { forced: true, relation: 'source_protected_claim_envelopes', row_security: true },
       { forced: true, relation: 'transfer_claim_batch_receipts', row_security: true },
       { forced: true, relation: 'transfer_receipt_keys', row_security: true },
       { forced: true, relation: 'transfer_redemption_receipts', row_security: true },
+      { forced: true, relation: 'transferred_membership_claim_overrides', row_security: true },
       { forced: true, relation: 'transferred_membership_claims', row_security: true },
     ]);
 
@@ -435,6 +483,8 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       { owner: 'claudian_cloud_migration', relation: 'active_repository_placement_catalog' },
       { owner: 'claudian_cloud_migration', relation: 'authority_transfer_recovery' },
       { owner: 'claudian_cloud_migration', relation: 'change_requests' },
+      { owner: 'claudian_cloud_migration', relation: 'cloud_project_creation_journals' },
+      { owner: 'claudian_cloud_migration', relation: 'cloud_project_join_journals' },
       { owner: 'claudian_cloud_migration', relation: 'development_actor_mappings' },
       { owner: 'claudian_cloud_migration', relation: 'development_bootstrap_attempt_routes' },
       { owner: 'claudian_cloud_migration', relation: 'development_bootstrap_attempts' },
@@ -444,11 +494,17 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       { owner: 'claudian_cloud_migration', relation: 'development_bootstrap_uploads' },
       { owner: 'claudian_cloud_migration', relation: 'idempotency_results' },
       { owner: 'claudian_cloud_migration', relation: 'leave_former_principal_replays' },
+      { owner: 'claudian_cloud_migration', relation: 'leave_project_request_facts' },
+      { owner: 'claudian_cloud_migration', relation: 'manager_responsibility_offers' },
       { owner: 'claudian_cloud_migration', relation: 'project_backup_catalog' },
       { owner: 'claudian_cloud_migration', relation: 'project_deletion_intents' },
       { owner: 'claudian_cloud_migration', relation: 'project_event_sequences' },
       { owner: 'claudian_cloud_migration', relation: 'project_events' },
+      { owner: 'claudian_cloud_migration', relation: 'project_invitations' },
       { owner: 'claudian_cloud_migration', relation: 'project_lifecycle_journals' },
+      { owner: 'claudian_cloud_migration', relation: 'project_member_removal_journals' },
+      { owner: 'claudian_cloud_migration', relation: 'project_membership_idempotency_results' },
+      { owner: 'claudian_cloud_migration', relation: 'project_membership_idempotency_tombstones' },
       { owner: 'claudian_cloud_migration', relation: 'project_memberships' },
       { owner: 'claudian_cloud_migration', relation: 'project_principal_bindings' },
       { owner: 'claudian_cloud_migration', relation: 'project_terminal_acknowledgements' },
@@ -457,11 +513,14 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       { owner: 'claudian_cloud_migration', relation: 'project_terminal_responders' },
       { owner: 'claudian_cloud_migration', relation: 'project_tombstones' },
       { owner: 'claudian_cloud_migration', relation: 'projects' },
+      { owner: 'claudian_cloud_migration', relation: 'protected_claim_override_envelopes' },
+      { owner: 'claudian_cloud_migration', relation: 'protected_invitation_envelopes' },
       { owner: 'claudian_cloud_migration', relation: 'recovery_candidates' },
       { owner: 'claudian_cloud_migration', relation: 'repository_placements' },
       { owner: 'claudian_cloud_migration', relation: 'request_comments' },
       { owner: 'claudian_cloud_migration', relation: 'request_ticket_relations' },
       { owner: 'claudian_cloud_migration', relation: 'schema_migrations' },
+      { owner: 'claudian_cloud_migration', relation: 'secret_replay_tombstones' },
       { owner: 'claudian_cloud_migration', relation: 'source_protected_claim_envelopes' },
       { owner: 'claudian_cloud_migration', relation: 'ticket_comments' },
       { owner: 'claudian_cloud_migration', relation: 'ticket_mentions' },
@@ -469,6 +528,7 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       { owner: 'claudian_cloud_migration', relation: 'transfer_claim_batch_receipts' },
       { owner: 'claudian_cloud_migration', relation: 'transfer_receipt_keys' },
       { owner: 'claudian_cloud_migration', relation: 'transfer_redemption_receipts' },
+      { owner: 'claudian_cloud_migration', relation: 'transferred_membership_claim_overrides' },
       { owner: 'claudian_cloud_migration', relation: 'transferred_membership_claims' },
     ]);
 
@@ -552,6 +612,8 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       active_repository_placement_catalog: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       authority_transfer_recovery: ['INSERT', 'SELECT'],
       change_requests: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      cloud_project_creation_journals: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      cloud_project_join_journals: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       development_actor_mappings: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       development_bootstrap_attempts: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       development_bootstrap_expiry_candidates: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
@@ -560,11 +622,17 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       development_bootstrap_uploads: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       idempotency_results: ['INSERT', 'SELECT'],
       leave_former_principal_replays: ['INSERT', 'SELECT'],
+      leave_project_request_facts: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      manager_responsibility_offers: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       project_backup_catalog: ['INSERT', 'SELECT'],
       project_deletion_intents: ['INSERT', 'SELECT'],
       project_event_sequences: ['INSERT', 'SELECT', 'UPDATE'],
       project_events: ['DELETE', 'INSERT', 'SELECT'],
+      project_invitations: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       project_lifecycle_journals: ['INSERT', 'SELECT'],
+      project_member_removal_journals: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      project_membership_idempotency_results: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      project_membership_idempotency_tombstones: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       project_memberships: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       project_principal_bindings: ['INSERT', 'SELECT'],
       project_terminal_acknowledgements: ['INSERT', 'SELECT'],
@@ -573,11 +641,14 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       project_terminal_responders: ['DELETE', 'INSERT', 'SELECT'],
       project_tombstones: ['INSERT', 'SELECT'],
       projects: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      protected_claim_override_envelopes: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
+      protected_invitation_envelopes: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       recovery_candidates: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       repository_placements: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       request_comments: ['DELETE', 'INSERT', 'SELECT'],
       request_ticket_relations: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       schema_migrations: ['SELECT'],
+      secret_replay_tombstones: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       source_protected_claim_envelopes: ['DELETE', 'INSERT', 'SELECT'],
       ticket_comments: ['DELETE', 'INSERT', 'SELECT'],
       ticket_mentions: ['DELETE', 'INSERT', 'SELECT'],
@@ -585,6 +656,7 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       transfer_claim_batch_receipts: ['INSERT', 'SELECT'],
       transfer_receipt_keys: ['DELETE', 'INSERT', 'SELECT'],
       transfer_redemption_receipts: ['DELETE', 'INSERT', 'SELECT'],
+      transferred_membership_claim_overrides: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       transferred_membership_claims: ['DELETE', 'INSERT', 'SELECT'],
     };
     assert.deepEqual(
@@ -683,6 +755,14 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
         relation: 'change_requests',
       },
       {
+        policy_name: 'cloud_project_creation_journals_project_scope',
+        relation: 'cloud_project_creation_journals',
+      },
+      {
+        policy_name: 'cloud_project_join_journals_project_scope',
+        relation: 'cloud_project_join_journals',
+      },
+      {
         policy_name: 'development_actor_mappings_project_scope',
         relation: 'development_actor_mappings',
       },
@@ -711,6 +791,14 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
         relation: 'leave_former_principal_replays',
       },
       {
+        policy_name: 'leave_project_request_facts_project_scope',
+        relation: 'leave_project_request_facts',
+      },
+      {
+        policy_name: 'manager_responsibility_offers_project_scope',
+        relation: 'manager_responsibility_offers',
+      },
+      {
         policy_name: 'project_backup_catalog_project_scope',
         relation: 'project_backup_catalog',
       },
@@ -727,8 +815,24 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
         relation: 'project_events',
       },
       {
+        policy_name: 'project_invitations_project_scope',
+        relation: 'project_invitations',
+      },
+      {
         policy_name: 'project_lifecycle_journals_project_scope',
         relation: 'project_lifecycle_journals',
+      },
+      {
+        policy_name: 'project_member_removal_journals_project_scope',
+        relation: 'project_member_removal_journals',
+      },
+      {
+        policy_name: 'project_membership_idempotency_results_project_scope',
+        relation: 'project_membership_idempotency_results',
+      },
+      {
+        policy_name: 'project_membership_idempotency_tombstones_project_scope',
+        relation: 'project_membership_idempotency_tombstones',
       },
       {
         policy_name: 'project_memberships_project_scope',
@@ -752,6 +856,14 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       },
       { policy_name: 'projects_project_scope', relation: 'projects' },
       {
+        policy_name: 'protected_claim_override_envelopes_project_scope',
+        relation: 'protected_claim_override_envelopes',
+      },
+      {
+        policy_name: 'protected_invitation_envelopes_project_scope',
+        relation: 'protected_invitation_envelopes',
+      },
+      {
         policy_name: 'repository_placements_project_scope',
         relation: 'repository_placements',
       },
@@ -762,6 +874,10 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       {
         policy_name: 'request_ticket_relations_project_scope',
         relation: 'request_ticket_relations',
+      },
+      {
+        policy_name: 'secret_replay_tombstones_project_scope',
+        relation: 'secret_replay_tombstones',
       },
       {
         policy_name: 'source_protected_claim_envelopes_project_scope',
@@ -787,6 +903,10 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       {
         policy_name: 'transfer_redemption_receipts_project_scope',
         relation: 'transfer_redemption_receipts',
+      },
+      {
+        policy_name: 'transferred_membership_claim_overrides_project_scope',
+        relation: 'transferred_membership_claim_overrides',
       },
       {
         policy_name: 'transferred_membership_claims_project_scope',
@@ -1074,10 +1194,10 @@ describe('PostgresMigrator', () => {
       const migrator = new PostgresMigrator({
         connectionString: database.migrationUrl,
       });
-      await migrator.applyThrough(9);
+      await migrator.applyThrough(10);
       assert.deepEqual(await migrator.preflight(), {
-        currentVersion: 9,
-        targetVersion: 10,
+        currentVersion: 10,
+        targetVersion: 11,
       });
       const coordination = new PostgresCoordination({
         ordinaryPoolMax: 2,
@@ -1091,7 +1211,7 @@ describe('PostgresMigrator', () => {
         await assert.rejects(coordination.verifySchemaCompatibility());
         assert.equal(await coordination.verifySchemaCompatibility(
           MAINTENANCE_POSTGRES_SCHEMA_COMPATIBILITY,
-        ), 9);
+        ), 10);
       } finally {
         await coordination.close();
       }

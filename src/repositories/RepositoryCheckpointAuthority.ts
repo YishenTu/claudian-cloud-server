@@ -168,6 +168,11 @@ export interface DeleteExactPersonalRefInput {
   readonly signal?: AbortSignal;
 }
 
+export type ReadExactPersonalRefInput = Omit<
+  DeleteExactPersonalRefInput,
+  'expectedOid'
+>;
+
 export interface ExactOwnedRepositoryIdentity {
   readonly placementGeneration: number;
   readonly projectId: CollabProjectId;
@@ -253,6 +258,17 @@ export interface ExactPersonalRefPort {
     reservation: ExactRepositoryOperationReservation,
     input: DeleteExactPersonalRefInput,
   ): Promise<'deleted' | 'replayed'>;
+}
+
+export interface ExactPersonalRefReadPort {
+  reserveExactRepositoryOperation(
+    projectId: CollabProjectId,
+    signal?: AbortSignal,
+  ): Promise<ExactRepositoryOperationReservation>;
+  readExactPersonalRef(
+    reservation: ExactRepositoryOperationReservation,
+    input: ReadExactPersonalRefInput,
+  ): Promise<string>;
 }
 
 export interface ExactRepositoryPresencePort {
@@ -1961,6 +1977,62 @@ ExactRepositoryRemovalPort {
       input.signal,
       signal => this.#verifyExactPersonalRef(input, signal),
     );
+  }
+
+  readExactPersonalRef(
+    reservation: ExactRepositoryOperationReservation,
+    input: ReadExactPersonalRefInput,
+  ): Promise<string> {
+    return this.#runExactRepositoryOperation(
+      reservation,
+      input.placement.projectId,
+      input.signal,
+      signal => this.#readExactPersonalRef(input, signal),
+    );
+  }
+
+  async #readExactPersonalRef(
+    input: ReadExactPersonalRefInput,
+    signal: AbortSignal,
+  ): Promise<string> {
+    if (!input.personalRef.startsWith(COLLAB_MEMBER_REF_PREFIX)) {
+      return fail('invalid-checkpoint');
+    }
+    try {
+      const resolved = await this.#pathPolicy.resolveExisting(input.placement)
+        .catch((error: unknown) => {
+          if (error instanceof RepositoryPlacementError) throw mapPlacement(error);
+          fail('storage-unavailable');
+        });
+      const currentRefs = parseForEachRefOutput(
+        await this.#supervisor.runCommand({
+          arguments: [
+            'for-each-ref',
+            '--format=%(refname)%00%(objectname)',
+            input.personalRef,
+          ],
+          captureOutput: true,
+          cwd: resolved.repositoryPath,
+          failureCode: 'repository-corrupt',
+          signal,
+        }),
+      );
+      const oid = currentRefs.get(input.personalRef);
+      if (currentRefs.size !== 1 || oid === undefined || !isCollabGitOid(oid)) {
+        return fail('repository-invalid');
+      }
+      await this.#pathPolicy.revalidate(input.placement).catch(
+        (error: unknown) => {
+          if (error instanceof RepositoryPlacementError) throw mapPlacement(error);
+          fail('storage-unavailable');
+        },
+      );
+      return oid;
+    } catch (error: unknown) {
+      if (error instanceof RepositoryCheckpointError) throw error;
+      if (error instanceof GitProcessError) throw mapGit(error);
+      return fail('storage-unavailable');
+    }
   }
 
   async #verifyExactPersonalRef(

@@ -10,16 +10,20 @@ import {
   isCollabOpaqueId,
 } from '@claudian-collab/protocol';
 
-import {
-  DevelopmentPrincipalError,
-  type DevelopmentPrincipalAdapter,
-} from '../../request-context/DevelopmentPrincipalAdapter.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import {
+  RequestPrincipalBinding,
+  RequestPrincipalBindingError,
+  type RequestPrincipalBindingOptions,
+  type TrustedProjectPrincipalBinding,
+} from '../../request-context/RequestPrincipalBinding.js';
 
-export interface ProjectJsonTransportOptions {
+export type { TrustedProjectPrincipalBinding };
+
+export interface ProjectJsonTransportOptions
+  extends RequestPrincipalBindingOptions {
   readonly maximumJsonBytes: number;
   readonly operationTimeoutMs: number;
-  readonly principalAdapter: DevelopmentPrincipalAdapter;
   readonly requestIdFactory?: () => string;
 }
 
@@ -200,6 +204,7 @@ function statusForCollabError(error: CollabError): number {
     case 'authority-not-synchronized':
     case 'idempotency-conflict':
     case 'membership-claim-already-redeemed':
+    case 'personal-ref-diverged':
     case 'request-head-not-pushed':
     case 'request-not-open':
     case 'stale-main':
@@ -217,7 +222,7 @@ function statusForCollabError(error: CollabError): number {
 export class ProjectJsonTransport {
   readonly #maximumJsonBytes: number;
   readonly #operationTimeoutMs: number;
-  readonly #principalAdapter: DevelopmentPrincipalAdapter;
+  readonly #principalBinding: RequestPrincipalBinding;
   readonly #requestIdFactory: () => string;
 
   constructor(options: ProjectJsonTransportOptions) {
@@ -232,7 +237,7 @@ export class ProjectJsonTransport {
     }
     this.#maximumJsonBytes = options.maximumJsonBytes;
     this.#operationTimeoutMs = options.operationTimeoutMs;
-    this.#principalAdapter = options.principalAdapter;
+    this.#principalBinding = new RequestPrincipalBinding(options);
     this.#requestIdFactory = options.requestIdFactory ?? randomUUID;
   }
 
@@ -255,13 +260,9 @@ export class ProjectJsonTransport {
     try {
       let principal: IngressPrincipal;
       try {
-        principal = this.#principalAdapter.bind({
-          headerValues: headerValues(request, 'x-claudian-development-actor'),
-          localAddress: request.socket.localAddress,
-          remoteAddress: request.socket.remoteAddress,
-        });
+        principal = this.#principalBinding.bind(request);
       } catch (error: unknown) {
-        if (error instanceof DevelopmentPrincipalError) {
+        if (error instanceof RequestPrincipalBindingError) {
           throw new ProjectJsonRouteFailure(
             403,
             new CollabError({ code: 'authentication-failed' }),

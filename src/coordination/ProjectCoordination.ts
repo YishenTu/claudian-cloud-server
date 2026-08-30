@@ -20,9 +20,15 @@ import type {
   ProjectPersistence,
   ProjectPersistenceReader,
 } from './ProjectPersistence.js';
-import type { PortabilityLifecyclePersistence } from './PortabilityLifecyclePersistence.js';
+import type {
+  PortabilityLifecyclePersistence,
+} from './PortabilityLifecyclePersistence.js';
 import type { ProjectCheckpointPersistence } from './ProjectCheckpointPersistence.js';
 import type { RepositoryPlacementLease } from '../repositories/RepositoryPlacement.js';
+import type {
+  ProjectJoinPersistence,
+  ProjectMembershipPersistence,
+} from './ProjectMembershipPersistence.js';
 
 export interface AcquireProjectLeaseOptions {
   readonly signal?: AbortSignal;
@@ -51,6 +57,11 @@ export interface ProjectReadScope
   ProjectPersistenceReader {
   readonly accept: AcceptPersistenceReader;
   readonly collaboration: CollaborationReadPersistence;
+  readonly membership: Pick<ProjectJoinPersistence, 'getNonterminalJoin'>;
+  readonly portability: Pick<
+    PortabilityLifecyclePersistence,
+    'getNonterminalLifecycleJournal'
+  >;
   findMembership(memberId: CollabMemberId): Promise<ProjectMembershipRecord | undefined>;
   getRepositoryPlacement(): Promise<RepositoryPlacementLease | undefined>;
   listActiveSnapshotMemberships(): Promise<readonly ProjectSnapshotMembershipRecord[]>;
@@ -63,6 +74,7 @@ export interface ProjectScope
   readonly accept: AcceptPersistence;
   readonly collaboration: CollaborationProjectPersistence;
   readonly checkpoint: ProjectCheckpointPersistence;
+  readonly membership: ProjectMembershipPersistence;
   readonly portability: PortabilityLifecyclePersistence;
   findMembership(memberId: CollabMemberId): Promise<ProjectMembershipRecord | undefined>;
   getRepositoryPlacement(): Promise<RepositoryPlacementLease | undefined>;

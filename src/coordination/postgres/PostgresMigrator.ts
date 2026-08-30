@@ -7,6 +7,7 @@ import { CURRENT_POSTGRES_SCHEMA_VERSION } from '../../config/PostgresSchemaComp
 import {
   ACCEPT_RECOVERY_SCHEMA,
   CLOUD_TO_LAN_TRANSFER_SCHEMA,
+  CLOUD_PROJECT_MEMBERSHIP_SCHEMA,
   COLLABORATION_SCHEMA,
   DEVELOPMENT_BOOTSTRAP_SCHEMA,
   FOUNDATION_SCHEMA,
@@ -293,6 +294,15 @@ const MIGRATION_RESOURCES = Object.freeze([
       import.meta.url,
     ),
     version: TERMINAL_CONTINUITY_CATALOG_SCHEMA.version,
+  }),
+  Object.freeze({
+    checksum: CLOUD_PROJECT_MEMBERSHIP_SCHEMA.checksum,
+    name: CLOUD_PROJECT_MEMBERSHIP_SCHEMA.name,
+    resource: new URL(
+      './migrations/0011_cloud_project_membership.sql',
+      import.meta.url,
+    ),
+    version: CLOUD_PROJECT_MEMBERSHIP_SCHEMA.version,
   }),
 ]);
 

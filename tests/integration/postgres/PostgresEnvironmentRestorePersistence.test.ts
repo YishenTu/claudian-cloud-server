@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 
 import {
   COLLAB_PROTOCOL_VERSION,
+  collabControlOperationCodec,
   decodeCollabAuthorityRelinquishmentProof,
   decodeCollabAuthorityTransferStatus,
   decodeCollabTransferredMembershipClaimCustodyReceipt,
@@ -16,6 +17,7 @@ import { Client } from 'pg';
 
 import { CURRENT_POSTGRES_SCHEMA_VERSION } from '../../../src/config/PostgresSchemaCompatibility.js';
 import { PostgresEnvironmentRestorePersistence } from '../../../src/coordination/postgres/PostgresEnvironmentRestorePersistence.js';
+import { frameBackupProtectedSecretEnvelope } from '../../../src/coordination/backupProtectedSecretEnvelope.js';
 import { withPostgresTestDatabase } from '../../helpers/PostgresTestDatabase.js';
 
 const CREATED_AT = '2026-08-29T00:00:00.000Z';
@@ -23,6 +25,84 @@ const EXPIRES_AT = '2026-09-29T00:00:00.000Z';
 const PROJECT_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const TARGET_VOLUME_IDENTITY = 'restored-volume-identity-one';
 const MAIN_OID = 'a'.repeat(40);
+const LEAVE_RESPONSE_JSON = JSON.stringify(
+  collabControlOperationCodec('leaveProject').decodeResponse({
+    discardedRequestId: null,
+    leftAt: EXPIRES_AT,
+    managerSetGeneration: 1,
+    memberId: 'member-left',
+    projectId: PROJECT_ID,
+    promotedSuccessorMemberId: null,
+    status: 'left',
+  }),
+);
+const LEAVE_RESULT_SHA256 = createHash('sha256')
+  .update(LEAVE_RESPONSE_JSON)
+  .digest('hex');
+const INVITATION_EXPIRES_AT = '2026-08-30T00:00:00.000Z';
+const SECRET_REPLAY_EXPIRES_AT = '2026-09-28T00:00:00.000Z';
+const MEMBERSHIP_OFFER_RESPONSE_JSON = JSON.stringify(
+  collabControlOperationCodec('createManagerResponsibilityOffer')
+    .decodeResponse({
+      offer: {
+        acknowledgedAt: null,
+        expiresAt: INVITATION_EXPIRES_AT,
+        managerSetGenerationAtOffer: 1,
+        offeredAt: CREATED_AT,
+        offerId: 'offer-restored',
+        purpose: 'manager-promotion',
+        revision: 1,
+        sourceManagerMemberId: 'member-manager',
+        state: 'offered',
+        targetMemberId: 'member-offline',
+        targetMembershipRevisionAtOffer: 2,
+        terminalAt: null,
+      },
+    }),
+);
+const REMOVE_RESPONSE_JSON = JSON.stringify(
+  collabControlOperationCodec('removeMember').decodeResponse({
+    discardedRequestId: null,
+    managerSetGeneration: 1,
+    memberId: 'member-revoked',
+    projectId: PROJECT_ID,
+    removedAt: EXPIRES_AT,
+    status: 'revoked',
+  }),
+);
+const REMOVE_RESULT_SHA256 = createHash('sha256')
+  .update(REMOVE_RESPONSE_JSON)
+  .digest('hex');
+const CREATE_RESPONSE_JSON = JSON.stringify(
+  collabControlOperationCodec('createCloudProject').decodeResponse({
+    createdAt: CREATED_AT,
+    mainOid: MAIN_OID,
+    managerSetGeneration: 1,
+    memberId: 'member-manager',
+    membershipRevision: 2,
+    personalRef: 'refs/heads/members/member-manager',
+    projectId: PROJECT_ID,
+    role: 'manager',
+  }),
+);
+const CREATE_RESULT_SHA256 = createHash('sha256')
+  .update(CREATE_RESPONSE_JSON)
+  .digest('hex');
+const JOIN_RESPONSE_JSON = JSON.stringify(
+  collabControlOperationCodec('joinCloudProject').decodeResponse({
+    joinedAt: CREATED_AT,
+    mainOid: MAIN_OID,
+    managerSetGeneration: 1,
+    memberId: 'member-offline',
+    membershipRevision: 2,
+    personalRef: 'refs/heads/members/member-offline',
+    projectId: PROJECT_ID,
+    role: 'member',
+  }),
+);
+const JOIN_RESULT_SHA256 = createHash('sha256')
+  .update(JOIN_RESPONSE_JSON)
+  .digest('hex');
 const SOURCE_METADATA = Object.freeze({
   authorityId: 'authority-cloud-one',
   authorityVolumeIdentity: 'volume-identity-one',
@@ -232,6 +312,40 @@ function minimumBackupRecords() {
       }),
     }),
     Object.freeze({
+      kind: 'member' as const,
+      recordId: 'member-override',
+      revision: 2,
+      value: Object.freeze({
+        activatedAt: CREATED_AT,
+        createdAt: CREATED_AT,
+        displayName: 'Override Member',
+        memberId: 'member-override',
+        personalRef: 'refs/heads/members/member-override',
+        projectId: PROJECT_ID,
+        role: 'member' as const,
+        status: 'active' as const,
+        revokedAt: null,
+        updatedAt: CREATED_AT,
+      }),
+    }),
+    Object.freeze({
+      kind: 'member' as const,
+      recordId: 'member-revoked',
+      revision: 5,
+      value: Object.freeze({
+        activatedAt: CREATED_AT,
+        createdAt: CREATED_AT,
+        displayName: 'Revoked Member',
+        memberId: 'member-revoked',
+        personalRef: 'refs/heads/members/member-revoked',
+        projectId: PROJECT_ID,
+        role: 'member' as const,
+        status: 'revoked' as const,
+        revokedAt: EXPIRES_AT,
+        updatedAt: EXPIRES_AT,
+      }),
+    }),
+    Object.freeze({
       kind: 'request' as const,
       recordId: 'request-one',
       revision: 2,
@@ -356,6 +470,62 @@ function minimumBackupRecords() {
     }),
     Object.freeze({
       kind: 'idempotency-result' as const,
+      recordId: `${PROJECT_ID}:member-left:leaveProject:leave-intent-one`,
+      revision: 1,
+      value: Object.freeze({
+        createdAt: CREATED_AT,
+        idempotencyKey: 'leave-intent-one',
+        memberId: 'member-left',
+        operation: 'leaveProject' as const,
+        projectId: PROJECT_ID,
+        requestFingerprint: '5'.repeat(64),
+        responseJson: LEAVE_RESPONSE_JSON,
+      }),
+    }),
+    Object.freeze({
+      kind: 'idempotency-result' as const,
+      recordId: `${PROJECT_ID}:member-manager:createCloudProject:create-restored-key`,
+      revision: 1,
+      value: Object.freeze({
+        createdAt: CREATED_AT,
+        idempotencyKey: 'create-restored-key',
+        memberId: 'member-manager',
+        operation: 'createCloudProject' as const,
+        projectId: PROJECT_ID,
+        requestFingerprint: '2'.repeat(64),
+        responseJson: CREATE_RESPONSE_JSON,
+      }),
+    }),
+    Object.freeze({
+      kind: 'idempotency-result' as const,
+      recordId: `${PROJECT_ID}:member-manager:createManagerResponsibilityOffer:offer-restored-key`,
+      revision: 1,
+      value: Object.freeze({
+        createdAt: CREATED_AT,
+        idempotencyKey: 'offer-restored-key',
+        memberId: 'member-manager',
+        operation: 'createManagerResponsibilityOffer' as const,
+        projectId: PROJECT_ID,
+        requestFingerprint: '0'.repeat(64),
+        responseJson: MEMBERSHIP_OFFER_RESPONSE_JSON,
+      }),
+    }),
+    Object.freeze({
+      kind: 'idempotency-result' as const,
+      recordId: `${PROJECT_ID}:member-manager:removeMember:remove-restored-key`,
+      revision: 1,
+      value: Object.freeze({
+        createdAt: CREATED_AT,
+        idempotencyKey: 'remove-restored-key',
+        memberId: 'member-manager',
+        operation: 'removeMember' as const,
+        projectId: PROJECT_ID,
+        requestFingerprint: '9'.repeat(64),
+        responseJson: REMOVE_RESPONSE_JSON,
+      }),
+    }),
+    Object.freeze({
+      kind: 'idempotency-result' as const,
       recordId: `${PROJECT_ID}:member-manager:retireProject:update-main-one`,
       revision: 1,
       value: Object.freeze({
@@ -373,6 +543,20 @@ function minimumBackupRecords() {
           retirementId: 'retirement-one',
           terminalExpiresAt: EXPIRES_AT,
         }),
+      }),
+    }),
+    Object.freeze({
+      kind: 'idempotency-result' as const,
+      recordId: `${PROJECT_ID}:member-offline:joinCloudProject:join-restored-key`,
+      revision: 1,
+      value: Object.freeze({
+        createdAt: CREATED_AT,
+        idempotencyKey: 'join-restored-key',
+        memberId: 'member-offline',
+        operation: 'joinCloudProject' as const,
+        projectId: PROJECT_ID,
+        requestFingerprint: '3'.repeat(64),
+        responseJson: JOIN_RESPONSE_JSON,
       }),
     }),
     Object.freeze({
@@ -436,6 +620,58 @@ function minimumBackupRecords() {
     }),
     Object.freeze({
       kind: 'lifecycle-journal' as const,
+      recordId: 'create-restored',
+      revision: 1,
+      value: Object.freeze({
+        actorMemberId: null,
+        batchRevision: null,
+        batchSha256: null,
+        checkpointSha256: null,
+        createdAt: CREATED_AT,
+        direction: null,
+        expectedAuthorityGeneration: 5,
+        expectedPersonalRefOid: null,
+        idempotencyKey: 'create-restored-key',
+        operationId: 'create-restored',
+        operationKind: 'create-project' as const,
+        phase: 'completed',
+        projectId: PROJECT_ID,
+        recoveryFromPhase: null,
+        requestFingerprint: '2'.repeat(64),
+        resultSha256: CREATE_RESULT_SHA256,
+        scheduledAt: CREATED_AT,
+        state: 'completed' as const,
+        updatedAt: CREATED_AT,
+      }),
+    }),
+    Object.freeze({
+      kind: 'lifecycle-journal' as const,
+      recordId: 'join-restored',
+      revision: 1,
+      value: Object.freeze({
+        actorMemberId: null,
+        batchRevision: null,
+        batchSha256: null,
+        checkpointSha256: null,
+        createdAt: CREATED_AT,
+        direction: null,
+        expectedAuthorityGeneration: 5,
+        expectedPersonalRefOid: null,
+        idempotencyKey: 'join-restored-key',
+        operationId: 'join-restored',
+        operationKind: 'join-project' as const,
+        phase: 'completed',
+        projectId: PROJECT_ID,
+        recoveryFromPhase: null,
+        requestFingerprint: '3'.repeat(64),
+        resultSha256: JOIN_RESULT_SHA256,
+        scheduledAt: CREATED_AT,
+        state: 'completed' as const,
+        updatedAt: CREATED_AT,
+      }),
+    }),
+    Object.freeze({
+      kind: 'lifecycle-journal' as const,
       recordId: 'leave-previous',
       revision: 1,
       value: Object.freeze({
@@ -454,8 +690,34 @@ function minimumBackupRecords() {
         projectId: PROJECT_ID,
         recoveryFromPhase: null,
         requestFingerprint: '5'.repeat(64),
-        resultSha256: '6'.repeat(64),
+        resultSha256: LEAVE_RESULT_SHA256,
         scheduledAt: EXPIRES_AT,
+        state: 'completed' as const,
+        updatedAt: EXPIRES_AT,
+      }),
+    }),
+    Object.freeze({
+      kind: 'lifecycle-journal' as const,
+      recordId: 'remove-restored',
+      revision: 1,
+      value: Object.freeze({
+        actorMemberId: 'member-manager',
+        batchRevision: null,
+        batchSha256: null,
+        checkpointSha256: null,
+        createdAt: CREATED_AT,
+        direction: null,
+        expectedAuthorityGeneration: 5,
+        expectedPersonalRefOid: null,
+        idempotencyKey: 'remove-restored-key',
+        operationId: 'remove-restored',
+        operationKind: 'remove-member' as const,
+        phase: 'completed',
+        projectId: PROJECT_ID,
+        recoveryFromPhase: null,
+        requestFingerprint: '9'.repeat(64),
+        resultSha256: REMOVE_RESULT_SHA256,
+        scheduledAt: CREATED_AT,
         state: 'completed' as const,
         updatedAt: EXPIRES_AT,
       }),
@@ -599,6 +861,26 @@ function minimumBackupRecords() {
       }),
     }),
     Object.freeze({
+      kind: 'transferred-membership-claim' as const,
+      recordId: `${LAN_TRANSFER_ID}:member-override`,
+      revision: 1,
+      value: Object.freeze({
+        batchRevision: 2,
+        checkpointSha256: LAN_CHECKPOINT_SHA256,
+        claimSha256: '0'.repeat(64),
+        createdAt: CREATED_AT,
+        expiresAt: EXPIRES_AT,
+        memberId: 'member-override',
+        operationIntentId: null,
+        projectId: PROJECT_ID,
+        redemptionReceiptId: null,
+        state: 'unclaimed' as const,
+        targetPrincipalId: null,
+        transferId: LAN_TRANSFER_ID,
+        updatedAt: CREATED_AT,
+      }),
+    }),
+    Object.freeze({
       kind: 'transfer-receipt-key' as const,
       recordId: `${TRANSFER_ID}:receipt-key-cloud-lan`,
       revision: 1,
@@ -687,8 +969,253 @@ function minimumBackupRecords() {
         principalSha256: '7'.repeat(64),
         projectId: PROJECT_ID,
         requestFingerprint: '5'.repeat(64),
-        resultSha256: '6'.repeat(64),
+        resultSha256: LEAVE_RESULT_SHA256,
         state: 'completed' as const,
+      }),
+    }),
+    Object.freeze({
+      kind: 'project-invitation' as const,
+      recordId: 'invitation-join-restored',
+      revision: 3,
+      value: Object.freeze({
+        createdAt: CREATED_AT,
+        expiresAt: INVITATION_EXPIRES_AT,
+        idempotencyKey: 'invitation-join-key',
+        invitationId: 'invitation-join-restored',
+        issuedByMemberId: 'member-manager',
+        projectId: PROJECT_ID,
+        requestFingerprint: '4'.repeat(64),
+        revision: 3,
+        secretReplayExpiresAt: SECRET_REPLAY_EXPIRES_AT,
+        secretSha256: '5'.repeat(64),
+        state: 'redeemed' as const,
+        terminalAt: CREATED_AT,
+      }),
+    }),
+    Object.freeze({
+      kind: 'project-invitation' as const,
+      recordId: 'invitation-restored',
+      revision: 2,
+      value: Object.freeze({
+        createdAt: CREATED_AT,
+        expiresAt: INVITATION_EXPIRES_AT,
+        idempotencyKey: 'invitation-restored-key',
+        invitationId: 'invitation-restored',
+        issuedByMemberId: 'member-manager',
+        projectId: PROJECT_ID,
+        requestFingerprint: 'a'.repeat(64),
+        revision: 2,
+        secretReplayExpiresAt: SECRET_REPLAY_EXPIRES_AT,
+        secretSha256: 'b'.repeat(64),
+        state: 'revoked' as const,
+        terminalAt: '2026-08-29T00:00:01.000Z',
+      }),
+    }),
+    Object.freeze({
+      kind: 'project-invitation' as const,
+      recordId: 'invitation-tombstone',
+      revision: 2,
+      value: Object.freeze({
+        createdAt: CREATED_AT,
+        expiresAt: INVITATION_EXPIRES_AT,
+        idempotencyKey: 'invitation-tombstone-key',
+        invitationId: 'invitation-tombstone',
+        issuedByMemberId: 'member-manager',
+        projectId: PROJECT_ID,
+        requestFingerprint: 'c'.repeat(64),
+        revision: 2,
+        secretReplayExpiresAt: SECRET_REPLAY_EXPIRES_AT,
+        secretSha256: 'd'.repeat(64),
+        state: 'expired' as const,
+        terminalAt: INVITATION_EXPIRES_AT,
+      }),
+    }),
+    Object.freeze({
+      kind: 'protected-invitation-envelope' as const,
+      recordId: 'invitation-join-restored',
+      revision: 1,
+      value: Object.freeze({
+        associatedDataSha256: '6'.repeat(64),
+        ciphertext: frameBackupProtectedSecretEnvelope({
+          ciphertext: Buffer.from('join-secret').toString('base64url'),
+          keyVersion: 3,
+          tag: Buffer.alloc(16, 6).toString('base64url'),
+        }),
+        createdAt: CREATED_AT,
+        expiresAt: SECRET_REPLAY_EXPIRES_AT,
+        invitationId: 'invitation-join-restored',
+        keyId: 'membership-custody-key',
+        nonce: Buffer.alloc(24, 5).toString('base64url'),
+        projectId: PROJECT_ID,
+      }),
+    }),
+    Object.freeze({
+      kind: 'protected-invitation-envelope' as const,
+      recordId: 'invitation-restored',
+      revision: 1,
+      value: Object.freeze({
+        associatedDataSha256: 'c'.repeat(64),
+        ciphertext: frameBackupProtectedSecretEnvelope({
+          ciphertext: Buffer.from('invitation-secret').toString('base64url'),
+          keyVersion: 3,
+          tag: Buffer.alloc(16, 8).toString('base64url'),
+        }),
+        createdAt: CREATED_AT,
+        expiresAt: SECRET_REPLAY_EXPIRES_AT,
+        invitationId: 'invitation-restored',
+        keyId: 'membership-custody-key',
+        nonce: Buffer.alloc(24, 7).toString('base64url'),
+        projectId: PROJECT_ID,
+      }),
+    }),
+    Object.freeze({
+      kind: 'transferred-membership-claim-override' as const,
+      recordId: `${LAN_TRANSFER_ID}:member-override:1`,
+      revision: 1,
+      value: Object.freeze({
+        claimGeneration: 1,
+        claimSha256: '1'.repeat(64),
+        createdAt: CREATED_AT,
+        expiresAt: SECRET_REPLAY_EXPIRES_AT,
+        idempotencyKey: 'override-restored-key',
+        managerMemberId: 'member-manager',
+        memberId: 'member-override',
+        projectId: PROJECT_ID,
+        redemptionReceiptId: null,
+        requestFingerprint: 'a'.repeat(64),
+        secretReplayExpiresAt: SECRET_REPLAY_EXPIRES_AT,
+        state: 'active' as const,
+        supersededClaimSha256: '0'.repeat(64),
+        targetPrincipalId: null,
+        transferId: LAN_TRANSFER_ID,
+        updatedAt: CREATED_AT,
+      }),
+    }),
+    Object.freeze({
+      kind: 'protected-claim-override-envelope' as const,
+      recordId: `${LAN_TRANSFER_ID}:member-override:1`,
+      revision: 1,
+      value: Object.freeze({
+        associatedDataSha256: 'b'.repeat(64),
+        ciphertext: frameBackupProtectedSecretEnvelope({
+          ciphertext: Buffer.from('override-secret').toString('base64url'),
+          keyVersion: 3,
+          tag: Buffer.alloc(16, 4).toString('base64url'),
+        }),
+        claimGeneration: 1,
+        createdAt: CREATED_AT,
+        expiresAt: SECRET_REPLAY_EXPIRES_AT,
+        keyId: 'membership-custody-key',
+        memberId: 'member-override',
+        nonce: Buffer.alloc(24, 3).toString('base64url'),
+        projectId: PROJECT_ID,
+        transferId: LAN_TRANSFER_ID,
+      }),
+    }),
+    Object.freeze({
+      kind: 'manager-responsibility-offer' as const,
+      recordId: 'offer-restored',
+      revision: 2,
+      value: Object.freeze({
+        acknowledgedAt: null,
+        expiresAt: INVITATION_EXPIRES_AT,
+        idempotencyKey: 'offer-restored-key',
+        managerSetGenerationAtOffer: 1,
+        offeredAt: CREATED_AT,
+        offerId: 'offer-restored',
+        projectId: PROJECT_ID,
+        purpose: 'manager-promotion' as const,
+        requestFingerprint: '0'.repeat(64),
+        revision: 2,
+        sourceManagerMemberId: 'member-manager',
+        state: 'consumed' as const,
+        targetMemberId: 'member-offline',
+        targetMembershipRevisionAtOffer: 2,
+        terminalAt: '2026-08-29T00:00:01.000Z',
+      }),
+    }),
+    Object.freeze({
+      kind: 'membership-idempotency-tombstone' as const,
+      recordId: 'cancelManagerResponsibilityOffer:member-manager:compacted-offer-key',
+      revision: 1,
+      value: Object.freeze({
+        actorMemberId: 'member-manager',
+        compactedAt: CREATED_AT,
+        idempotencyKey: 'compacted-offer-key',
+        operation: 'cancelManagerResponsibilityOffer' as const,
+        projectId: PROJECT_ID,
+        requestFingerprint: '6'.repeat(64),
+      }),
+    }),
+    Object.freeze({
+      kind: 'project-membership-recovery' as const,
+      recordId: 'create-restored',
+      revision: 1,
+      value: Object.freeze({
+        expectedMainOid: MAIN_OID,
+        expectedPersonalRefOid: MAIN_OID,
+        invitationId: null,
+        memberId: 'member-manager',
+        operationId: 'create-restored',
+        operationKind: 'create-project' as const,
+        principalSha256: createHash('sha256')
+          .update('principal:manager')
+          .digest('hex'),
+        projectId: PROJECT_ID,
+        publicationMarkerSha256: '7'.repeat(64),
+        repositoryPlanSha256: '8'.repeat(64),
+        requestFingerprint: '2'.repeat(64),
+      }),
+    }),
+    Object.freeze({
+      kind: 'project-membership-recovery' as const,
+      recordId: 'join-restored',
+      revision: 1,
+      value: Object.freeze({
+        expectedMainOid: MAIN_OID,
+        expectedPersonalRefOid: MAIN_OID,
+        invitationId: 'invitation-join-restored',
+        memberId: 'member-offline',
+        operationId: 'join-restored',
+        operationKind: 'join-project' as const,
+        principalSha256: createHash('sha256')
+          .update('principal:offline')
+          .digest('hex'),
+        projectId: PROJECT_ID,
+        publicationMarkerSha256: null,
+        repositoryPlanSha256: null,
+        requestFingerprint: '3'.repeat(64),
+      }),
+    }),
+    Object.freeze({
+      kind: 'project-membership-recovery' as const,
+      recordId: 'remove-restored',
+      revision: 1,
+      value: Object.freeze({
+        expectedMainOid: MAIN_OID,
+        expectedPersonalRefOid: MAIN_OID,
+        invitationId: null,
+        memberId: 'member-revoked',
+        operationId: 'remove-restored',
+        operationKind: 'remove-member' as const,
+        principalSha256: null,
+        projectId: PROJECT_ID,
+        publicationMarkerSha256: null,
+        repositoryPlanSha256: null,
+        requestFingerprint: '9'.repeat(64),
+      }),
+    }),
+    Object.freeze({
+      kind: 'secret-replay-tombstone' as const,
+      recordId: 'createProjectInvitation:member-manager:invitation-tombstone-key',
+      revision: 1,
+      value: Object.freeze({
+        actorMemberId: 'member-manager',
+        expiredAt: SECRET_REPLAY_EXPIRES_AT,
+        idempotencyKey: 'invitation-tombstone-key',
+        operation: 'createProjectInvitation' as const,
+        projectId: PROJECT_ID,
+        requestFingerprint: 'c'.repeat(64),
       }),
     }),
     Object.freeze({
@@ -725,6 +1252,35 @@ function minimumBackupRecords() {
         nonce: Buffer.alloc(24, 1).toString('base64url'),
         receiptKeyId: 'receipt-key-cloud-lan',
         tag: Buffer.alloc(16, 2).toString('base64url'),
+        transferId: TRANSFER_ID,
+      }),
+    }),
+    Object.freeze({
+      kind: 'protected-claim-envelope' as const,
+      recordId: `${TRANSFER_ID}:member-override`,
+      revision: 1,
+      value: Object.freeze({
+        associatedData: Object.freeze({
+          ...PROTECTED_ASSOCIATED_DATA,
+          claimSha256: '2'.repeat(64),
+          memberId: 'member-override',
+        }),
+        associatedDataSha256: createHash('sha256')
+          .update(encodeCollabProtectedClaimAssociatedData(Object.freeze({
+            ...PROTECTED_ASSOCIATED_DATA,
+            claimSha256: '2'.repeat(64),
+            memberId: 'member-override',
+          })))
+          .digest('hex'),
+        ciphertext: Buffer.from('protected-override-member').toString('base64url'),
+        encryptionAlgorithm: 'xchacha20-poly1305' as const,
+        expiresAt: EXPIRES_AT,
+        keyId: 'custody-key-cloud-lan',
+        keyVersion: 1,
+        memberId: 'member-override',
+        nonce: Buffer.alloc(24, 7).toString('base64url'),
+        receiptKeyId: 'receipt-key-cloud-lan',
+        tag: Buffer.alloc(16, 8).toString('base64url'),
         transferId: TRANSFER_ID,
       }),
     }),
@@ -798,13 +1354,13 @@ describe('PostgresEnvironmentRestorePersistence', () => {
             ORDER BY version DESC
             LIMIT 1`,
         );
-        const catalog = await client.query<{ readonly relation: string | null }>(
+        const membershipCatalog = await client.query<{ readonly relation: string | null }>(
           `SELECT to_regclass(
-             'claudian_cloud.project_terminal_continuity_catalog'
+             'claudian_cloud.project_invitations'
            )::text AS relation`,
         );
-        assert.deepEqual(version.rows, [{ version: 9 }]);
-        assert.deepEqual(catalog.rows, [{ relation: null }]);
+        assert.deepEqual(version.rows, [{ version: CURRENT_POSTGRES_SCHEMA_VERSION - 1 }]);
+        assert.deepEqual(membershipCatalog.rows, [{ relation: null }]);
       } finally {
         await client.end();
       }
@@ -1265,7 +1821,10 @@ describe('PostgresEnvironmentRestorePersistence', () => {
       const operationId = 'restore-terminal-continuity';
       const restoreEpoch = SOURCE_METADATA.restoreEpoch + 1;
       const records = minimumBackupRecords().filter(record => (
-        record.kind === 'lifecycle-journal'
+        (
+          record.kind === 'lifecycle-journal'
+          && record.value.operationKind === 'authority-transfer'
+        )
         || record.kind === 'protected-claim-envelope'
         || record.kind === 'terminal-principal'
         || record.kind === 'terminal-responder'

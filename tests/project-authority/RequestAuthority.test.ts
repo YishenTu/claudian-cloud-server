@@ -231,8 +231,11 @@ class MemoryCoordination implements ProjectRequestAuthorityCoordination {
         return Promise.resolve(event);
       },
       collaboration: this.collaboration.persistence,
-      findDevelopmentActorMember: (actorId: string) => Promise.resolve(
-        actorId === 'actor-a' ? 'member-a' : undefined,
+      findDevelopmentActorMember: (principalId: string) => Promise.resolve(
+        principalId === 'actor-a' ? 'member-a' : undefined,
+      ),
+      findPrincipalMember: (principalId: string) => Promise.resolve(
+        principalId === 'actor-a' ? 'member-a' : undefined,
       ),
       findMembership: (memberId: string) => Promise.resolve(
         memberId === 'member-a'
@@ -246,6 +249,9 @@ class MemoryCoordination implements ProjectRequestAuthorityCoordination {
           : undefined,
       ),
       getNonterminalDevelopmentBootstrapAttempt: () => Promise.resolve(undefined),
+      membership: {
+        getNonterminalJoin: () => Promise.resolve(undefined),
+      },
       portability: {
         getNonterminalLifecycleJournal: () => Promise.resolve(undefined),
       },

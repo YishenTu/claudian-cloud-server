@@ -10,11 +10,12 @@ import {
   type ProjectUploadPackAdvertisementOptions,
   type ProjectUploadPackOptions,
 } from '../../project-authority/reads/ProjectReadAuthority.js';
-import {
-  DevelopmentPrincipalError,
-  type DevelopmentPrincipalAdapter,
-} from '../../request-context/DevelopmentPrincipalAdapter.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import {
+  RequestPrincipalBinding,
+  RequestPrincipalBindingError,
+  type RequestPrincipalBindingOptions,
+} from '../../request-context/RequestPrincipalBinding.js';
 import { GitRepositoryError } from '../../repositories/GitRepositoryAuthority.js';
 import {
   GitSmartHttpRouteFailure,
@@ -38,12 +39,12 @@ export interface GitUploadPackReadAuthority {
   ): Promise<void>;
 }
 
-export interface GitUploadPackRoutesOptions {
+export interface GitUploadPackRoutesOptions
+  extends RequestPrincipalBindingOptions {
   readonly authority: GitUploadPackReadAuthority;
   readonly maximumRequestBytes: number;
   readonly maximumResponseBytes: number;
   readonly operationTimeoutMs: number;
-  readonly principalAdapter: DevelopmentPrincipalAdapter;
 }
 
 function authorityStatus(error: ProjectReadAuthorityError): number {
@@ -116,7 +117,7 @@ export class GitUploadPackRoutes {
   readonly #maximumRequestBytes: number;
   readonly #maximumResponseBytes: number;
   readonly #operationTimeoutMs: number;
-  readonly #principalAdapter: DevelopmentPrincipalAdapter;
+  readonly #principalBinding: RequestPrincipalBinding;
 
   constructor(options: GitUploadPackRoutesOptions) {
     if (
@@ -133,7 +134,7 @@ export class GitUploadPackRoutes {
     this.#maximumRequestBytes = options.maximumRequestBytes;
     this.#maximumResponseBytes = options.maximumResponseBytes;
     this.#operationTimeoutMs = options.operationTimeoutMs;
-    this.#principalAdapter = options.principalAdapter;
+    this.#principalBinding = new RequestPrincipalBinding(options);
   }
 
   handle(request: IncomingMessage, response: ServerResponse): boolean {
@@ -170,13 +171,9 @@ export class GitUploadPackRoutes {
     try {
       let principal: IngressPrincipal;
       try {
-        principal = this.#principalAdapter.bind({
-          headerValues: headerValues(request, 'x-claudian-development-actor'),
-          localAddress: request.socket.localAddress,
-          remoteAddress: request.socket.remoteAddress,
-        });
+        principal = this.#principalBinding.bind(request);
       } catch (error: unknown) {
-        if (error instanceof DevelopmentPrincipalError) {
+        if (error instanceof RequestPrincipalBindingError) {
           throw new GitSmartHttpRouteFailure(403);
         }
         throw error;

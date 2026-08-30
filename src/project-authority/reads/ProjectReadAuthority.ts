@@ -20,6 +20,7 @@ import type {
 } from '../../coordination/ProjectCoordination.js';
 import type { CollaborationSnapshot } from '../../coordination/CollaborationPersistence.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import { resolvePrincipalMember } from '../admission/resolvePrincipalMember.js';
 import type { RepositoryPlacementLease } from '../../repositories/RepositoryPlacement.js';
 
 export type ProjectReadAuthorityErrorCode =
@@ -309,11 +310,17 @@ export class ProjectReadAuthority {
     principal: IngressPrincipal,
     projectId: CollabProjectId,
   ): Promise<AdmissionFacts> {
-    const memberId = await scope.findDevelopmentActorMember(principal.actorId);
+    const memberId = await resolvePrincipalMember(scope, principal);
     if (memberId === undefined) return fail('project-not-found');
     const membership = await scope.findMembership(memberId);
     if (membership?.status !== 'active') return fail('project-not-found');
     if (await scope.getNonterminalDevelopmentBootstrapAttempt() !== undefined) {
+      return fail('recovery-required');
+    }
+    if (await scope.membership.getNonterminalJoin() !== undefined) {
+      return fail('recovery-required');
+    }
+    if (await scope.portability.getNonterminalLifecycleJournal() !== undefined) {
       return fail('recovery-required');
     }
     const project = await scope.getProject();
