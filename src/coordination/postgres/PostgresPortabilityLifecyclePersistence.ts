@@ -4158,9 +4158,6 @@ implements PortabilityLifecyclePersistence {
             WHERE project_id = $1
            UNION ALL SELECT 'secret_replay_tombstones', count(*)::text
              FROM claudian_cloud.secret_replay_tombstones WHERE project_id = $1
-           UNION ALL SELECT 'project_membership_idempotency_results', count(*)::text
-             FROM claudian_cloud.project_membership_idempotency_results
-            WHERE project_id = $1
            UNION ALL SELECT 'project_membership_idempotency_tombstones', count(*)::text
              FROM claudian_cloud.project_membership_idempotency_tombstones
             WHERE project_id = $1

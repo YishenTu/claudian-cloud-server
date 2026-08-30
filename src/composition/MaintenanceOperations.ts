@@ -14,7 +14,7 @@ import {
   serverConfigSource,
 } from '../config/MaintenanceCommandConfig.js';
 import { decodeMigrationConfig } from '../config/MigrationConfig.js';
-import { MAINTENANCE_POSTGRES_SCHEMA_COMPATIBILITY } from '../config/PostgresSchemaCompatibility.js';
+import { CURRENT_POSTGRES_SCHEMA_VERSION } from '../config/PostgresSchemaCompatibility.js';
 import {
   REPOSITORY_FORMAT_VERSION,
   SERVER_BUILD,
@@ -25,7 +25,6 @@ import {
   type ServerConfig,
 } from '../config/ServerConfig.js';
 import { PostgresEnvironmentRestorePersistence } from '../coordination/postgres/PostgresEnvironmentRestorePersistence.js';
-import { PostgresTerminalProjectContinuityCatalog } from '../coordination/postgres/PostgresTerminalProjectContinuityCatalog.js';
 import { EnvironmentBackupCommand } from '../environment-maintenance/commands/EnvironmentBackupCommand.js';
 import { EnvironmentBackupMetadataSource } from '../environment-maintenance/commands/EnvironmentBackupMetadataSource.js';
 import { EnvironmentBackupProjectCatalog } from '../environment-maintenance/commands/EnvironmentBackupProjectCatalog.js';
@@ -108,8 +107,7 @@ function environmentRestoreOwners(
     catalog,
     coordinator: new EnvironmentRestoreCoordinator({
       backup: new EnvironmentBackupCatalogVerifier({
-        coordinationSchemaCompatibility:
-          MAINTENANCE_POSTGRES_SCHEMA_COMPATIBILITY,
+        coordinationSchemaVersion: CURRENT_POSTGRES_SCHEMA_VERSION,
         repositoryFormatVersion: REPOSITORY_FORMAT_VERSION,
         serverBuild: SERVER_BUILD,
         source,
@@ -335,21 +333,10 @@ class Operations implements MaintenanceOperations {
     const input = decodeMaintenanceCommandConfig(this.#source, 'backup');
     const keyring = await loadClaimCustodyKeyring();
     await withRuntime(this.#source, async (runtime, config) => {
-      const { authorityVolumeId, schemaVersion } =
-        await runtime.verifyActiveAuthority();
+      const { schemaVersion } = await runtime.verifyActiveAuthority();
       const backupMetadata = await metadata(config, schemaVersion);
       const owners = backupExportOwners(runtime, backupMetadata, keyring);
       try {
-        const terminalCatalog = schemaVersion
-          === MAINTENANCE_POSTGRES_SCHEMA_COMPATIBILITY.minimumVersion
-          ? new PostgresTerminalProjectContinuityCatalog({
-              connectionString: decodeMigrationConfig(
-                migrationConfigSource(this.#source),
-              ).postgresUrl,
-              expectedAuthorityVolumeId: authorityVolumeId,
-              expectedSchemaVersion: schemaVersion,
-            })
-          : undefined;
         await new EnvironmentBackupCommand({
           backup: owners.backup,
           catalog: new FileEnvironmentBackupCatalogPublication({
@@ -358,7 +345,6 @@ class Operations implements MaintenanceOperations {
           metadata: backupMetadata,
           projects: new EnvironmentBackupProjectCatalog({
             coordination: runtime.coordination,
-            ...(terminalCatalog === undefined ? {} : { terminalCatalog }),
           }),
           recovery: {
             recoverAll: () => owners.dispatcher.recoverAll(runtime.coordination),
@@ -543,8 +529,7 @@ class Operations implements MaintenanceOperations {
     decodeMaintenanceCommandConfig(this.#source, 'verify-authority');
     const keyring = await loadClaimCustodyKeyring();
     await withRuntime(this.#source, async (runtime, config) => {
-      const { authorityVolumeId, schemaVersion } =
-        await runtime.verifyActiveAuthority();
+      const { schemaVersion } = await runtime.verifyActiveAuthority();
       const repository = new GitRepositoryAuthority({
         gitExecutable: config.repository.gitExecutable,
         operationTimeoutMs: config.repository.operationTimeoutMs,
@@ -562,20 +547,9 @@ class Operations implements MaintenanceOperations {
           repository,
         }).verifyAll(signal);
         const backupMetadata = await metadata(config, schemaVersion);
-        const terminalCatalog = schemaVersion
-          === MAINTENANCE_POSTGRES_SCHEMA_COMPATIBILITY.minimumVersion
-          ? new PostgresTerminalProjectContinuityCatalog({
-              connectionString: decodeMigrationConfig(
-                migrationConfigSource(this.#source),
-              ).postgresUrl,
-              expectedAuthorityVolumeId: authorityVolumeId,
-              expectedSchemaVersion: schemaVersion,
-            })
-          : undefined;
         await new ActiveClaimCustodyKeyReferenceGate({
           coordination: runtime.coordination,
           metadata: { read: () => Promise.resolve(backupMetadata) },
-          ...(terminalCatalog === undefined ? {} : { terminalCatalog }),
           verifier: keyReferenceVerifier(keyring),
         }).verifyAll(signal);
       } finally {

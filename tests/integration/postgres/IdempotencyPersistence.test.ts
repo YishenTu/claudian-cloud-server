@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { collabControlOperationCodec } from '@claudian-collab/protocol';
 import { Client } from 'pg';
 
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
@@ -56,6 +57,53 @@ async function seedProject(database: PostgresTestDatabase, projectId: string): P
 }
 
 describe('Collaboration idempotency persistence', () => {
+  it('stores a valid escaped Ticket response up to the protocol envelope limit', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await seedProject(database, 'project-a');
+      const store = coordination(database);
+      const body = '\\'.repeat(32 * 1024);
+      const response = collabControlOperationCodec('createTicket').decodeResponse({
+        ticket: {
+          acceptedRelations: { acceptedRelations: [] },
+          body,
+          comments: { comments: [] },
+          ticket: {
+            acceptedRelationCount: 0,
+            authorMemberId: 'member-a',
+            commentCount: 0,
+            createdAt: CREATED,
+            id: 'ticket-large',
+            number: 1,
+            revision: 1,
+            status: 'open',
+            title: 'Large escaped Ticket',
+            updatedAt: CREATED,
+          },
+        },
+      });
+      try {
+        const result = await store.withProjectScope('project-a', scope => (
+          scope.collaboration.idempotency.store({
+            createdAt: CREATED,
+            idempotencyKey: 'idempotency-large-ticket',
+            memberId: 'member-a',
+            operation: 'createTicket',
+            requestFingerprint: '0'.repeat(64),
+            response: response as unknown as Readonly<Record<string, unknown>>,
+          })
+        ));
+        assert.equal(result.kind, 'stored');
+        assert.equal(
+          (result.response.ticket as { readonly body: string }).body,
+          body,
+        );
+      } finally {
+        await store.close();
+      }
+    });
+  });
+
   it('returns exact replay and reports a changed normalized fingerprint', async () => {
     await withPostgresTestDatabase(async database => {
       await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();

@@ -311,7 +311,9 @@ CREATE TABLE claudian_cloud.idempotency_results (
   CONSTRAINT idempotency_results_fingerprint_format
     CHECK (request_fingerprint ~ '^[0-9a-f]{64}$'),
   CONSTRAINT idempotency_results_response_object
-    CHECK (jsonb_typeof(response_json) = 'object')
+    CHECK (jsonb_typeof(response_json) = 'object'),
+  CONSTRAINT idempotency_results_response_size
+    CHECK (octet_length(response_json::text) BETWEEN 2 AND 524288)
 );
 
 ALTER TABLE claudian_cloud.change_requests ENABLE ROW LEVEL SECURITY;
@@ -406,8 +408,10 @@ GRANT SELECT, INSERT, UPDATE
   TO claudian_cloud_runtime;
 GRANT SELECT, INSERT
   ON claudian_cloud.request_comments,
-     claudian_cloud.ticket_comments,
-     claudian_cloud.idempotency_results
+     claudian_cloud.ticket_comments
+  TO claudian_cloud_runtime;
+GRANT SELECT, INSERT, DELETE
+  ON claudian_cloud.idempotency_results
   TO claudian_cloud_runtime;
 GRANT SELECT, INSERT, UPDATE, DELETE
   ON claudian_cloud.request_ticket_relations

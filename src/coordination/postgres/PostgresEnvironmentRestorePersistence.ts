@@ -13,7 +13,6 @@ import {
 import { Client, type QueryResultRow } from 'pg';
 
 import {
-  MAINTENANCE_POSTGRES_SCHEMA_COMPATIBILITY,
   supportsPostgresSchemaVersion,
 } from '../../config/PostgresSchemaCompatibility.js';
 import { CoordinationError } from '../CoordinationError.js';
@@ -69,16 +68,6 @@ const CONTINUITY_KINDS = new Set<CollabProjectBackupRecord['kind']>([
   'transfer-receipt-key',
   'transfer-redemption-receipt',
   'transferred-membership-claim',
-]);
-const MEMBERSHIP_IDEMPOTENCY_OPERATIONS = new Set([
-  'acknowledgeManagerResponsibility',
-  'cancelManagerResponsibilityOffer',
-  'createManagerResponsibilityOffer',
-  'declineManagerResponsibility',
-  'demoteManager',
-  'promoteManager',
-  'revokeProjectInvitation',
-  'revokeTransferredMembershipClaim',
 ]);
 const SYNTHETIC_MEMBERSHIP_IDEMPOTENCY_OPERATIONS = new Set([
   'createCloudProject',
@@ -300,10 +289,7 @@ implements EnvironmentRestorePersistence {
       || !validIdentity(input.authorityVolumeId)
       || !validIdentity(input.authorityVolumeIdentity)
       || !validIdentity(input.operationId)
-      || !supportsPostgresSchemaVersion(
-        input.coordinationSchemaVersion,
-        MAINTENANCE_POSTGRES_SCHEMA_COMPATIBILITY,
-      )
+      || !supportsPostgresSchemaVersion(input.coordinationSchemaVersion)
       || !Number.isSafeInteger(input.restoreEpoch)
       || input.restoreEpoch <= 0
     ) fail('state-conflict');
@@ -366,7 +352,7 @@ implements EnvironmentRestorePersistence {
     try {
       await new PostgresMigrator({
         connectionString: this.#connectionString,
-      }).applyThrough(input.coordinationSchemaVersion, input.signal);
+      }).apply(input.signal);
     } catch (error: unknown) {
       if (error instanceof CoordinationError) throw error;
       if (input.signal.aborted) fail('cancelled');
@@ -402,7 +388,6 @@ implements EnvironmentRestorePersistence {
       || schemaCatalog.value.projectId !== input.project.projectId
       || !supportsPostgresSchemaVersion(
         schemaCatalog.value.coordinationSchemaVersion,
-        MAINTENANCE_POSTGRES_SCHEMA_COMPATIBILITY,
       )
       || authorityPair.value.projectId !== input.project.projectId
       || authorityPair.value.restoreEpoch + 1 !== input.restoreEpoch
@@ -804,26 +789,7 @@ implements EnvironmentRestorePersistence {
               ],
             );
           } else if (record.kind === 'idempotency-result') {
-            if (MEMBERSHIP_IDEMPOTENCY_OPERATIONS.has(record.value.operation)) {
-              await client.query(
-                `INSERT INTO claudian_cloud.project_membership_idempotency_results (
-                   project_id, actor_member_id, operation, idempotency_key,
-                   request_fingerprint, result_json, created_at
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-                 ON CONFLICT (
-                   project_id, actor_member_id, operation, idempotency_key
-                 ) DO NOTHING`,
-                [
-                  record.value.projectId,
-                  record.value.memberId,
-                  record.value.operation,
-                  record.value.idempotencyKey,
-                  record.value.requestFingerprint,
-                  record.value.responseJson,
-                  record.value.createdAt,
-                ],
-              );
-            } else if (!SYNTHETIC_MEMBERSHIP_IDEMPOTENCY_OPERATIONS.has(
+            if (!SYNTHETIC_MEMBERSHIP_IDEMPOTENCY_OPERATIONS.has(
               record.value.operation,
             )) {
               await client.query(

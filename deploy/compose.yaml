@@ -130,8 +130,6 @@ services:
     env_file:
       - path: ${CLAUDIAN_CLOUD_ENV_FILE:-/etc/claudian-cloud-server/server.env}
         required: true
-      - path: ${CLAUDIAN_CLOUD_MIGRATION_ENV_FILE:-/etc/claudian-cloud-server/migration.env}
-        required: true
     environment:
       CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID: ${CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID:-}
     command:
@@ -326,8 +324,6 @@ services:
     user: "10001:10001"
     env_file:
       - path: ${CLAUDIAN_CLOUD_ENV_FILE:-/etc/claudian-cloud-server/server.env}
-        required: true
-      - path: ${CLAUDIAN_CLOUD_MIGRATION_ENV_FILE:-/etc/claudian-cloud-server/migration.env}
         required: true
     environment:
       CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID: ${CLAUDIAN_CLOUD_MAINTENANCE_OPERATION_ID:-}

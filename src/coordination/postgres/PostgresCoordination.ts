@@ -95,11 +95,7 @@ import { PostgresProjectCheckpointPersistence } from './PostgresProjectCheckpoin
 import { PostgresCloudProjectCreationPersistence } from './PostgresCloudProjectCreationPersistence.js';
 import { PostgresProjectMembershipPersistence } from './PostgresProjectMembershipPersistence.js';
 import { POSTGRES_SCHEMAS } from './PostgresSchema.js';
-import {
-  RUNTIME_POSTGRES_SCHEMA_COMPATIBILITY,
-  supportsPostgresSchemaVersion,
-  type PostgresSchemaCompatibility,
-} from '../../config/PostgresSchemaCompatibility.js';
+import { supportsPostgresSchemaVersion } from '../../config/PostgresSchemaCompatibility.js';
 
 export interface PostgresCoordinationOptions {
   readonly onProjectEventCommitted?: (projectId: CollabProjectId) => void;
@@ -2079,10 +2075,7 @@ export class PostgresCoordination
       && current.generation === placement.generation;
   }
 
-  async verifySchemaCompatibility(
-    compatibility: PostgresSchemaCompatibility =
-      RUNTIME_POSTGRES_SCHEMA_COMPATIBILITY,
-  ): Promise<number> {
+  async verifySchemaCompatibility(): Promise<number> {
     this.#assertOpen();
     const deadline = Date.now() + this.#projectLockTimeoutMs;
     const checkedOut = await checkout(
@@ -2120,7 +2113,7 @@ export class PostgresCoordination
         checkedOut.markBroken,
       );
       const currentVersion = rows.at(-1)?.version;
-      if (!supportsPostgresSchemaVersion(currentVersion, compatibility)) {
+      if (!supportsPostgresSchemaVersion(currentVersion)) {
         throw new CoordinationError('schema-incompatible');
       }
       const expectedSchemas = POSTGRES_SCHEMAS.filter(

@@ -24,7 +24,7 @@ async function runMigration(
 ): Promise<ProcessResult> {
   const child = spawn(
     process.execPath,
-    ['--import', 'tsx', 'src/migrate.ts', ...arguments_],
+    ['--import', 'tsx', 'src/main.ts', 'maintenance', 'migration', ...arguments_],
     {
     cwd: process.cwd(),
     env: {
@@ -93,20 +93,10 @@ describe('migration process', () => {
     });
   });
 
-  it('exposes static target and exact compatibility probes without credentials', async () => {
+  it('rejects removed schema compatibility probes', async () => {
     assert.deepEqual(await runMigration(undefined, 'target'), {
-      exitCode: 0,
-      stderr: '',
-      stdout: '11\n',
-    });
-    assert.deepEqual(await runMigration(undefined, 'supports', '10'), {
-      exitCode: 0,
-      stderr: '',
-      stdout: '',
-    });
-    assert.deepEqual(await runMigration(undefined, 'supports', '9'), {
-      exitCode: 2,
-      stderr: '',
+      exitCode: 1,
+      stderr: 'claudian-cloud-server bootstrap failure\n',
       stdout: '',
     });
   });

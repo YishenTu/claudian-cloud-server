@@ -59,11 +59,7 @@ export interface EnvironmentBackupCatalogSource {
 }
 
 export interface EnvironmentBackupCatalogVerifierOptions {
-  readonly coordinationSchemaCompatibility?: Readonly<{
-    readonly maximumVersion: number;
-    readonly minimumVersion: number;
-  }>;
-  readonly coordinationSchemaVersion?: number;
+  readonly coordinationSchemaVersion: number;
   readonly repositoryFormatVersion: number;
   readonly serverBuild: string;
   readonly source: EnvironmentBackupCatalogSource;
@@ -403,39 +399,22 @@ function exactProjectBackup(
 
 export class EnvironmentBackupCatalogVerifier
 implements EnvironmentRestoreBackupPort {
-  readonly #coordinationSchemaCompatibility: Readonly<{
-    readonly maximumVersion: number;
-    readonly minimumVersion: number;
-  }>;
+  readonly #coordinationSchemaVersion: number;
   readonly #repositoryFormatVersion: number;
   readonly #serverBuild: string;
   readonly #source: EnvironmentBackupCatalogSource;
 
   constructor(options: EnvironmentBackupCatalogVerifierOptions) {
-    const compatibility = options.coordinationSchemaCompatibility
-      ?? (options.coordinationSchemaVersion === undefined
-        ? undefined
-        : Object.freeze({
-            maximumVersion: options.coordinationSchemaVersion,
-            minimumVersion: options.coordinationSchemaVersion,
-          }));
     if (
-      compatibility === undefined
-      || !Number.isSafeInteger(compatibility.minimumVersion)
-      || !Number.isSafeInteger(compatibility.maximumVersion)
-      || compatibility.minimumVersion <= 0
-      || compatibility.maximumVersion < compatibility.minimumVersion
-      || (
-        options.coordinationSchemaCompatibility !== undefined
-        && options.coordinationSchemaVersion !== undefined
-      )
+      !Number.isSafeInteger(options.coordinationSchemaVersion)
+      || options.coordinationSchemaVersion <= 0
       || !Number.isSafeInteger(options.repositoryFormatVersion)
       || options.repositoryFormatVersion <= 0
       || !IDENTITY_PATTERN.test(options.serverBuild)
       || typeof options.source.readCatalog !== 'function'
       || typeof options.source.verifyProjectBackup !== 'function'
     ) throw new TypeError('environment-backup-catalog.options-invalid');
-    this.#coordinationSchemaCompatibility = Object.freeze({ ...compatibility });
+    this.#coordinationSchemaVersion = options.coordinationSchemaVersion;
     this.#repositoryFormatVersion = options.repositoryFormatVersion;
     this.#serverBuild = options.serverBuild;
     this.#source = options.source;
@@ -461,10 +440,7 @@ implements EnvironmentRestoreBackupPort {
         input.expectedCatalogSha256,
       );
       if (
-        document.coordinationSchemaVersion
-          < this.#coordinationSchemaCompatibility.minimumVersion
-        || document.coordinationSchemaVersion
-          > this.#coordinationSchemaCompatibility.maximumVersion
+        document.coordinationSchemaVersion !== this.#coordinationSchemaVersion
         || document.repositoryFormatVersion !== this.#repositoryFormatVersion
         || document.minimumServerBuild !== this.#serverBuild
         || document.maximumServerBuild !== this.#serverBuild

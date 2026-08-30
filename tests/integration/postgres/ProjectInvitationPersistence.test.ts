@@ -451,6 +451,69 @@ describe('Postgres Project invitation persistence', () => {
     });
   });
 
+  it('stores membership operation results in the shared idempotency relation', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await seed(database);
+      const store = coordination(database);
+      try {
+        const lease = await store.acquireProjectLease(PROJECT_ID);
+        try {
+          assert.equal((await lease.withProjectScope(scope => (
+            scope.membership.createInvitation(INPUT)
+          ))).status, 'created');
+          assert.equal((await lease.withProjectScope(scope => (
+            scope.membership.revokeInvitation({
+              actorMemberId: MEMBER_ID,
+              expectedInvitationRevision: 1,
+              expectedManagerSetGeneration: 1,
+              idempotencyKey: 'revoke_shared_result_key',
+              invitationId: INPUT.invitationId,
+              projectId: PROJECT_ID,
+              requestFingerprint: 'd'.repeat(64),
+              revokedAt: '2026-08-30T03:00:00.000Z',
+            })
+          ))).status, 'revoked');
+        } finally {
+          await lease.close();
+        }
+      } finally {
+        await store.close();
+      }
+
+      const client = new Client({ connectionString: database.migrationUrl });
+      try {
+        await client.connect();
+        await client.query('BEGIN');
+        await client.query(
+          "SELECT set_config('claudian_cloud.project_id', $1, true)",
+          [PROJECT_ID],
+        );
+        const result = await client.query<{
+          readonly legacy_relation: string | null;
+          readonly operation: string;
+        }>(
+          `SELECT to_regclass(
+                    'claudian_cloud.project_membership_idempotency_results'
+                  )::text AS legacy_relation,
+                  operation
+             FROM claudian_cloud.idempotency_results
+            WHERE project_id = $1
+              AND member_id = $2
+              AND idempotency_key = 'revoke_shared_result_key'`,
+          [PROJECT_ID, MEMBER_ID],
+        );
+        assert.deepEqual(result.rows, [{
+          legacy_relation: null,
+          operation: 'revokeProjectInvitation',
+        }]);
+        await client.query('ROLLBACK');
+      } finally {
+        await client.end();
+      }
+    });
+  });
+
   it('persists the forward-only Join phases and atomically activates membership', async () => {
     await withPostgresTestDatabase(async database => {
       await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
@@ -997,11 +1060,11 @@ describe('Postgres Project invitation persistence', () => {
                (SELECT count(*) FROM claudian_cloud.manager_responsibility_offers
                  WHERE project_id = $1)::text AS offers,
                (SELECT count(*)
-                  FROM claudian_cloud.project_membership_idempotency_results
+                  FROM claudian_cloud.idempotency_results
                  WHERE project_id = $1
                    AND operation <> 'demoteManager')::text AS offer_results,
                (SELECT count(*)
-                  FROM claudian_cloud.project_membership_idempotency_results
+                  FROM claudian_cloud.idempotency_results
                  WHERE project_id = $1
                    AND operation = 'demoteManager')::text AS demote_results,
                (SELECT count(*)

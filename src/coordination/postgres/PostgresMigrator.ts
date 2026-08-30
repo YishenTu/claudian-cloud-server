@@ -25,7 +25,8 @@ export type PostgresMigrationErrorCode =
   | 'schema-dirty'
   | 'schema-drift'
   | 'schema-gap'
-  | 'schema-newer';
+  | 'schema-newer'
+  | 'schema-upgrade-unsupported';
 
 export class PostgresMigrationError extends Error {
   readonly code: PostgresMigrationErrorCode;
@@ -390,59 +391,51 @@ function verifyAppliedMigrations(
   return expectedVersion;
 }
 
-async function applyMigration(
+async function applyCleanSchema(
   client: Client,
-  migration: MigrationDefinition,
+  migrations: readonly MigrationDefinition[],
+  assertActive: () => void,
 ): Promise<void> {
-  try {
-    await client.query('BEGIN');
-    await client.query(
-      `INSERT INTO claudian_cloud.schema_migrations (
-         version,
-         name,
-         checksum,
-         state,
-         applied_at
-       ) VALUES ($1, $2, $3, 'applying', NULL)`,
-      [migration.version, migration.name, migration.checksum],
-    );
-    await client.query(migration.sql);
-    await client.query(
-      `UPDATE claudian_cloud.schema_migrations
-          SET state = 'applied', applied_at = clock_timestamp()
-        WHERE version = $1 AND state = 'applying'`,
-      [migration.version],
-    );
-    await client.query('COMMIT');
-  } catch {
-    try {
-      await client.query('ROLLBACK');
-    } catch {
-      // Closing the client releases any transaction still owned by the session.
-    }
-    fail('migration-failed', migration.version);
-  }
-}
-
-async function ensureMigrationMetadata(client: Client): Promise<void> {
+  let activeVersion: number | undefined;
   try {
     await client.query('BEGIN');
     await client.query(METADATA_SQL);
+    for (const migration of migrations) {
+      assertActive();
+      activeVersion = migration.version;
+      await client.query(
+        `INSERT INTO claudian_cloud.schema_migrations (
+           version,
+           name,
+           checksum,
+           state,
+           applied_at
+         ) VALUES ($1, $2, $3, 'applying', NULL)`,
+        [migration.version, migration.name, migration.checksum],
+      );
+      await client.query(migration.sql);
+      await client.query(
+        `UPDATE claudian_cloud.schema_migrations
+            SET state = 'applied', applied_at = clock_timestamp()
+          WHERE version = $1 AND state = 'applying'`,
+        [migration.version],
+      );
+    }
     await client.query('COMMIT');
-  } catch {
+  } catch (error: unknown) {
     try {
       await client.query('ROLLBACK');
     } catch {
       // Closing the client releases any transaction still owned by the session.
     }
-    fail('migration-failed');
+    if (error instanceof PostgresMigrationError) throw error;
+    fail('migration-failed', activeVersion);
   }
 }
 
 async function readMigrationRows(
   client: Client,
-  allowAbsent: boolean,
-): Promise<readonly MigrationRow[]> {
+): Promise<readonly MigrationRow[] | undefined> {
   const metadata = await client.query<{
     readonly migration_relation: string | null;
     readonly schema_name: string | null;
@@ -453,8 +446,7 @@ async function readMigrationRows(
   );
   const state = metadata.rows[0];
   if (state?.schema_name === null) {
-    if (allowAbsent) return Object.freeze([]);
-    fail('schema-drift');
+    return undefined;
   }
   if (state?.migration_relation === null) fail('schema-drift');
   const existing = await client.query<MigrationRow>(
@@ -475,7 +467,6 @@ export class PostgresMigrator {
   async #run(
     apply: boolean,
     signal?: AbortSignal,
-    targetVersion = CURRENT_POSTGRES_SCHEMA_VERSION,
   ): Promise<PostgresMigrationPlan> {
     const client = new Client({
       application_name: 'claudian-cloud-migration',
@@ -503,14 +494,6 @@ export class PostgresMigrator {
     if (signal?.aborted === true) onAbort();
     try {
       const allMigrations = await loadMigrations();
-      if (
-        !Number.isSafeInteger(targetVersion)
-        || targetVersion < 1
-        || targetVersion > CURRENT_POSTGRES_SCHEMA_VERSION
-      ) fail('schema-drift');
-      const migrations = allMigrations.filter(
-        migration => migration.version <= targetVersion,
-      );
       assertActive();
       await client.connect();
       connected = true;
@@ -522,23 +505,26 @@ export class PostgresMigrator {
       );
       locked = true;
       assertActive();
-      if (apply) await ensureMigrationMetadata(client);
-      const existing = await readMigrationRows(client, !apply);
-      const nextVersion = verifyAppliedMigrations(existing, migrations);
-      const currentVersion = nextVersion - 1;
-      if (apply) {
-        for (const migration of migrations) {
-          if (migration.version >= nextVersion) {
-            assertActive();
-            await applyMigration(client, migration);
-          }
+      const existing = await readMigrationRows(client);
+      if (existing === undefined) {
+        if (apply) {
+          await applyCleanSchema(client, allMigrations, assertActive);
         }
+        return Object.freeze({
+          currentVersion: apply ? CURRENT_POSTGRES_SCHEMA_VERSION : 0,
+          targetVersion: CURRENT_POSTGRES_SCHEMA_VERSION,
+        });
       }
+      if (existing.length === 0) fail('schema-drift');
+      const nextVersion = verifyAppliedMigrations(existing, allMigrations);
+      const currentVersion = nextVersion - 1;
+      if (
+        currentVersion !== 0
+        && currentVersion !== CURRENT_POSTGRES_SCHEMA_VERSION
+      ) fail('schema-upgrade-unsupported', currentVersion);
       return Object.freeze({
-        currentVersion: apply
-          ? targetVersion
-          : currentVersion,
-        targetVersion,
+        currentVersion,
+        targetVersion: CURRENT_POSTGRES_SCHEMA_VERSION,
       });
     } catch (error: unknown) {
       if (error instanceof PostgresMigrationError) throw error;
@@ -563,13 +549,6 @@ export class PostgresMigrator {
 
   async apply(signal?: AbortSignal): Promise<void> {
     await this.#run(true, signal);
-  }
-
-  async applyThrough(
-    targetVersion: number,
-    signal?: AbortSignal,
-  ): Promise<void> {
-    await this.#run(true, signal, targetVersion);
   }
 
   preflight(signal?: AbortSignal): Promise<PostgresMigrationPlan> {

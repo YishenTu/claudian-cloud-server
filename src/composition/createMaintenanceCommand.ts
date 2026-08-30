@@ -6,7 +6,6 @@ import {
 } from '../environment-maintenance/commands/MaintenanceCommandRegistry.js';
 import {
   runMigrationMaintenanceCommand,
-  type MigrationMaintenanceCommandResult,
 } from '../environment-maintenance/commands/MigrationMaintenanceCommand.js';
 import {
   createMaintenanceOperations,
@@ -23,7 +22,7 @@ export interface MaintenanceCommandRuntime {
   run(
     arguments_: readonly string[],
     signal: AbortSignal,
-  ): Promise<MigrationMaintenanceCommandResult>;
+  ): Promise<void>;
 }
 
 function operationHandler(
@@ -40,9 +39,8 @@ function operationHandler(
 export function createMaintenanceCommand(
   options: CreateMaintenanceCommandOptions,
 ): MaintenanceCommandRuntime {
-  let migrationResult: MigrationMaintenanceCommandResult = 'complete';
   const migration: MaintenanceCommandHandler = async input => {
-    migrationResult = await runMigrationMaintenanceCommand({
+    await runMigrationMaintenanceCommand({
       arguments: input.arguments,
       signal: input.signal,
       source: options.source,
@@ -68,10 +66,8 @@ export function createMaintenanceCommand(
     async run(
       arguments_: readonly string[],
       signal: AbortSignal,
-    ): Promise<MigrationMaintenanceCommandResult> {
-      migrationResult = 'complete';
+    ): Promise<void> {
       await registry.run(arguments_, signal);
-      return migrationResult;
     },
   });
 }

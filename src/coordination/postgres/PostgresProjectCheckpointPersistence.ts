@@ -552,7 +552,6 @@ implements ProjectCheckpointPersistence {
       }));
     }
 
-    await this.#readMembershipIdempotency(records);
     await this.#readMembershipIdempotencyTombstones(records);
     const cursors = await this.#query<{
       readonly current_sequence: string;
@@ -717,53 +716,6 @@ implements ProjectCheckpointPersistence {
         }),
       }),
     );
-  }
-
-  async #readMembershipIdempotency(
-    records: BoundedCheckpointRecords,
-  ): Promise<void> {
-    for await (const row of this.#queryRows<{
-      readonly actor_member_id: string;
-      readonly created_at: Date;
-      readonly idempotency_key: string;
-      readonly operation: CollabControlOperation;
-      readonly request_fingerprint: string;
-      readonly result_json: string;
-    }>(
-      `SELECT actor_member_id, created_at, idempotency_key, operation,
-              request_fingerprint, result_json
-         FROM claudian_cloud.project_membership_idempotency_results
-        WHERE project_id = $1
-        ORDER BY actor_member_id, operation, idempotency_key`,
-      [this.#projectId],
-      records,
-    )) {
-      let responseJson: string;
-      try {
-        responseJson = JSON.stringify(
-          collabControlOperationCodec(row.operation).decodeResponse(
-            parsedJson(row.result_json),
-          ),
-        );
-      } catch {
-        return dependencyFailure();
-      }
-      const value = Object.freeze({
-        createdAt: iso(row.created_at),
-        idempotencyKey: row.idempotency_key,
-        memberId: row.actor_member_id,
-        operation: row.operation,
-        projectId: this.#projectId,
-        requestFingerprint: row.request_fingerprint,
-        responseJson,
-      });
-      records.push(Object.freeze({
-        kind: 'idempotency-result',
-        recordId: collabProjectBackupIdempotencyRecordId(value),
-        revision: 1,
-        value,
-      }));
-    }
   }
 
   async #readMembershipIdempotencyTombstones(

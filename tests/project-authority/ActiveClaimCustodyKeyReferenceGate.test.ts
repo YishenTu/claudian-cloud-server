@@ -27,7 +27,10 @@ describe('ActiveClaimCustodyKeyReferenceGate', () => {
           nextCursor: undefined,
           placements: [],
         }),
-        listTerminalProjectContinuity: () => assert.fail('unexpected runtime list'),
+        listTerminalProjectContinuity: () => Promise.resolve({
+          nextCursor: undefined,
+          projectIds: [projectId],
+        }),
       } as never,
       metadata: {
         read: () => Promise.resolve({
@@ -43,15 +46,6 @@ describe('ActiveClaimCustodyKeyReferenceGate', () => {
         verify: value => {
           verified.push(value);
           return Promise.resolve();
-        },
-      },
-      terminalCatalog: {
-        list: input => {
-          assert.ok(input.signal instanceof AbortSignal);
-          return Promise.resolve({
-            nextCursor: undefined,
-            projectIds: [projectId],
-          });
         },
       },
     });

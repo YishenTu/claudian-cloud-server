@@ -1,17 +1,3 @@
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM claudian_cloud.project_lifecycle_journals WHERE kind = 'leave'
-  ) OR EXISTS (
-    SELECT 1 FROM claudian_cloud.leave_former_principal_replays
-  ) THEN
-    RAISE EXCEPTION USING
-      ERRCODE = '55000',
-      MESSAGE = 'pre-3.3 Leave lifecycle state is unsupported';
-  END IF;
-END;
-$$;
-
 ALTER TABLE claudian_cloud.recovery_candidates
   DROP CONSTRAINT recovery_candidates_kind,
   ADD CONSTRAINT recovery_candidates_kind
@@ -424,37 +410,6 @@ CREATE TABLE claudian_cloud.secret_replay_tombstones (
     CHECK (request_fingerprint ~ '^[0-9a-f]{64}$')
 );
 
-CREATE TABLE claudian_cloud.project_membership_idempotency_results (
-  project_id varchar(64) NOT NULL,
-  actor_member_id varchar(64) NOT NULL,
-  operation text NOT NULL,
-  idempotency_key varchar(128) NOT NULL,
-  request_fingerprint char(64) NOT NULL,
-  result_json text NOT NULL,
-  created_at timestamptz NOT NULL,
-  PRIMARY KEY (project_id, actor_member_id, operation, idempotency_key),
-  CONSTRAINT project_membership_idempotency_results_actor
-    FOREIGN KEY (project_id, actor_member_id)
-    REFERENCES claudian_cloud.project_memberships(project_id, member_id),
-  CONSTRAINT project_membership_idempotency_results_operation
-    CHECK (operation IN (
-      'revokeProjectInvitation',
-      'revokeTransferredMembershipClaim',
-      'createManagerResponsibilityOffer',
-      'acknowledgeManagerResponsibility',
-      'declineManagerResponsibility',
-      'cancelManagerResponsibilityOffer',
-      'promoteManager',
-      'demoteManager'
-    )),
-  CONSTRAINT project_membership_idempotency_results_key
-    CHECK (idempotency_key ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'),
-  CONSTRAINT project_membership_idempotency_results_fingerprint
-    CHECK (request_fingerprint ~ '^[0-9a-f]{64}$'),
-  CONSTRAINT project_membership_idempotency_results_result
-    CHECK (octet_length(result_json) BETWEEN 2 AND 65536)
-);
-
 CREATE TABLE claudian_cloud.project_membership_idempotency_tombstones (
   project_id varchar(64) NOT NULL,
   actor_member_id varchar(64) NOT NULL,
@@ -752,10 +707,6 @@ ALTER TABLE claudian_cloud.secret_replay_tombstones
   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE claudian_cloud.secret_replay_tombstones
   FORCE ROW LEVEL SECURITY;
-ALTER TABLE claudian_cloud.project_membership_idempotency_results
-  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE claudian_cloud.project_membership_idempotency_results
-  FORCE ROW LEVEL SECURITY;
 ALTER TABLE claudian_cloud.project_membership_idempotency_tombstones
   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE claudian_cloud.project_membership_idempotency_tombstones
@@ -793,10 +744,6 @@ CREATE POLICY secret_replay_tombstones_project_scope
   ON claudian_cloud.secret_replay_tombstones
   USING (project_id = nullif(current_setting('claudian_cloud.project_id', true), ''))
   WITH CHECK (project_id = nullif(current_setting('claudian_cloud.project_id', true), ''));
-CREATE POLICY project_membership_idempotency_results_project_scope
-  ON claudian_cloud.project_membership_idempotency_results
-  USING (project_id = nullif(current_setting('claudian_cloud.project_id', true), ''))
-  WITH CHECK (project_id = nullif(current_setting('claudian_cloud.project_id', true), ''));
 CREATE POLICY project_membership_idempotency_tombstones_project_scope
   ON claudian_cloud.project_membership_idempotency_tombstones
   USING (project_id = nullif(current_setting('claudian_cloud.project_id', true), ''))
@@ -823,7 +770,6 @@ REVOKE ALL ON
   claudian_cloud.cloud_project_join_journals,
   claudian_cloud.protected_invitation_envelopes,
   claudian_cloud.secret_replay_tombstones,
-  claudian_cloud.project_membership_idempotency_results,
   claudian_cloud.project_membership_idempotency_tombstones,
   claudian_cloud.manager_responsibility_offers,
   claudian_cloud.project_member_removal_journals,
@@ -835,7 +781,6 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
   claudian_cloud.cloud_project_join_journals,
   claudian_cloud.protected_invitation_envelopes,
   claudian_cloud.secret_replay_tombstones,
-  claudian_cloud.project_membership_idempotency_results,
   claudian_cloud.project_membership_idempotency_tombstones,
   claudian_cloud.manager_responsibility_offers,
   claudian_cloud.project_member_removal_journals,
@@ -892,8 +837,6 @@ BEGIN
   DELETE FROM claudian_cloud.manager_responsibility_offers
    WHERE project_id = requested_project_id;
   DELETE FROM claudian_cloud.project_membership_idempotency_tombstones
-   WHERE project_id = requested_project_id;
-  DELETE FROM claudian_cloud.project_membership_idempotency_results
    WHERE project_id = requested_project_id;
   DELETE FROM claudian_cloud.secret_replay_tombstones
    WHERE project_id = requested_project_id;

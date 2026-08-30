@@ -1,8 +1,8 @@
 # Claudian Cloud Server Architecture
 
-Status: roadmap Steps 1–10 and the mandatory pre-Step-11 gates are implemented and verified; the Step 11 portability and operational-durability contracts are accepted and ready for implementation.
+Status: roadmap Steps 1–12 are implemented; the clean-environment baseline and simplification audit are the mandatory pre-Step-13 gate.
 
-Last reconciled: 2026-08-25
+Last reconciled: 2026-08-31
 
 ## 1. Purpose
 
@@ -13,7 +13,7 @@ coordination state available independently of any participant device.
 This document defines the initial architecture, ownership boundaries,
 multi-Project isolation model, storage contracts, concurrency and recovery
 semantics, deployment shape, capacity target, and evolution path. It is
-decision-complete for the implemented private Cloud slice and the accepted Step 11 authority-transfer, terminal-lifecycle, checkpoint, restore, deletion, schema-upgrade, and capacity target. Cloud-native Project and membership administration, ordinary-user UI, and final parity remain downstream. Trusted ingress and managed commercial systems remain outside this repository.
+decision-complete for the implemented private Cloud slice, authority transfer, terminal lifecycle, checkpoint, clean restore, deletion, current-schema initialization, capacity target, and Cloud-native Project and membership administration. Ordinary-user UI and final parity remain downstream. Trusted ingress and managed commercial systems remain outside this repository.
 
 Repository-level constraints in `AGENTS.md` and the locked decisions in §3 are
 authoritative.
@@ -102,7 +102,7 @@ virtual machine or persistent container per Project.
 21. **Claim custody is recoverable without plaintext backup.** Cutover requires durable source custody of exactly one accepted raw claim-batch revision and exact target acknowledgement. Batch acknowledgement never scrubs. A revision may rotate only after authoritative proof that custody was not committed, and rotation atomically invalidates every older target hash. Per-Member scrubbing requires an exact target-signed redemption receipt forwarded by the same former Member. Cloud stores source-held raw claims as protected envelopes; backup contains ciphertext and public key references but no plaintext or private key.
 22. **Environment restore is not Project recovery.** Project cross-store operations use the canonical Project lease and Project recovery catalog. Clean restore into empty stores uses one private environment journal and holds global readiness closed until every Project and terminal responder verifies.
 23. **Operator access is not Project authorization.** Maintenance may resume only a deletion journal already created by Manager-authorized Retire or Cloud-to-LAN handoff. It cannot delete an active Project or create terminal intent.
-24. **Schema upgrades are forward-only.** Each migration and its applied record commit in one transaction. A previous image may restart only before schema advancement or when it explicitly supports the advanced catalog; otherwise recovery is fixed-forward or a verified clean restore.
+24. **Cloud has one clean-environment schema baseline.** Empty-database initialization installs the complete checksum-pinned current catalog atomically. Runtime and maintenance accept only that exact catalog; an old or partial prefix is never upgraded in place and must be discarded or restored into a separate empty environment.
 
 ## 4. System context and trust boundaries
 
@@ -1169,7 +1169,7 @@ Deletion is the idempotent journal in §12.7. Participant-local copies are never
 2. enforce deployment-profile safety constraints;
 3. initialize safe logging and process-level failure handling;
 4. validate the exact claim-custody keyring path, type, owner, mode, and referenced keys when the selected profile serves protected claims;
-5. connect with the runtime PostgreSQL role, verify the declared schema interval, and reconcile the database/authority-volume identity;
+5. connect with the runtime PostgreSQL role, verify the exact current schema, and reconcile the database/authority-volume identity;
 6. recover or reject the private environment-restore journal while global readiness remains closed;
 7. verify repository root ownership, containment, capacity, Git version, and
    required capabilities;
@@ -1178,7 +1178,7 @@ Deletion is the idempotent journal in §12.7. Participant-local copies are never
 10. enumerate the bounded active-placement and terminal-responder catalogs, re-enter each Project under its canonical lock, and verify authority generation, live Git integrity, exact allowed refs, tombstones, and protected-claim continuity;
 11. start HTTP admission and publish readiness.
 
-Production schema migration is a separate one-shot command using the migration role and one global advisory lock. Each checksum-pinned migration body plus applied record commits in one transaction; gaps, drift, unsupported versions, and nontransactional statements fail closed. The supported deployment sequence verifies the candidate, drains and stops runtime, verifies a pre-upgrade backup, preflights compatibility, migrates once, starts the candidate, and waits for recovery/integrity/readiness. Previous-image restart is permitted only before schema advancement or when that image explicitly supports the advanced catalog; otherwise recovery is fixed-forward or a verified clean restore.
+Clean initialization is a separate one-shot command using the migration role and one global advisory lock. On an empty database, the complete checksum-pinned catalog and all applied records commit in one transaction. The exact completed current catalog is a no-op; partial history, gaps, drift, unsupported versions, and nontransactional statements fail closed. Current-schema code updates build one immutable candidate, stop runtime, verify the candidate against unchanged authority, complete environment and Project recovery, then start that exact image. A verification failure before recovery may reopen the unchanged previous image; after recovery starts, failure remains closed and never invokes an in-place migration or rollback.
 
 ### 19.2 Shutdown
 
@@ -1241,7 +1241,7 @@ Ticket numbers, descriptions, and Member names, then prove:
   times out; a different-Project writer proceeds;
 - backup, entitlement, membership, Ticket, Publish, and Accept paths all use the
   same canonical Project advisory-key implementation and fixed lock order;
-- migration rollback or forward-recovery policy is exercised as applicable.
+- clean initialization is atomic, exact-current replay is a no-op, and every partial or drifted schema history is rejected.
 
 ### 20.4 Git integration tests
 
@@ -1297,7 +1297,7 @@ Shipped-entry tests also prove:
   deterministic same-intent replay remains available where policy permits;
 - transport disconnect and forced shutdown eventually reap every Git child and checkpoint stream;
 - `resume-delete` rejects active Projects and any request without the exact existing Project-authorized deletion journal;
-- schema crash tests cover before, during, and after advancement and never restart an incompatible previous image.
+- deployment tests prove immutable candidate selection, previous-image restart only before recovery, and fail-closed behavior after recovery begins.
 
 ## 21. Completed local sequence and remaining rollout
 
@@ -1322,7 +1322,7 @@ Before Step 11, one mandatory readiness gate repairs the production Obsidian Clo
 
 The remaining numbered roadmap sequence is:
 
-11. implement supported LAN-to-Cloud and Cloud-to-LAN authority transfer, Cloud Leave and Retire authority semantics, upgrade and schema migration, backup, verified clean restore, export, deletion, and measured capacity;
+11. implement supported LAN-to-Cloud and Cloud-to-LAN authority transfer, Cloud Leave and Retire authority semantics, atomic clean-schema initialization, backup, verified clean restore, export, deletion, and measured capacity;
 12. implement Cloud-native Project creation, invitation, Join, post-activation membership, role administration, last-Manager succession, personal-ref establishment, and ordinary Leave;
 13. expose the accepted Cloud lifecycle through Claudian's capability-gated ordinary-user UI and recovery paths; and
 14. prove complete LAN/Cloud semantic parity and the reproducible self-host delivery with the production Claudian UI and retained two-Mac Gomami environment.
@@ -1336,7 +1336,7 @@ The local milestone advanced through six ordered proof gates: `G5` bootstrap and
 
 The completed local-milestone merge order was: the original shared protocol producer in Claudian; Cloud foundation; the original Cloud protocol consumer; Cloud bootstrap; Claudian bootstrap; Cloud read plane; Claudian read/binding; Cloud personal write; Cloud collaboration; Claudian Publish; Cloud Accept; and Claudian final integration. After `GI`, the separate ownership migration published the standalone protocol release and converted Claudian and Cloud into exact registry consumers. Steps 9 and 10 then passed on the merged exact consumers. Every future branch starts from the latest merged `origin/main`; neither consumer uses unmerged protocol source, and capability advertisement occurs only after the complete authority path and its gate evidence exist.
 
-Schema evolution is one serial, checksum-verified lane: `0002_development_bootstrap.sql`, `0003_project_read_events.sql`, `0004_collaboration.sql`, `0005_accept_recovery.sql`, then Step 11 `0006_portability_lifecycle.sql`. The task that introduces each migration also owns its checksum/schema registry entry, least-privilege grants, forced-RLS policy, and real PostgreSQL evidence. Gates freeze that ordered catalog; they do not become a second migration owner.
+The clean schema baseline is one serial, checksum-verified catalog from `0001_foundation.sql` through `0011_cloud_project_membership.sql`. Empty-database initialization applies the full catalog atomically; an existing database must already contain that exact completed history. Each schema change owns its checksum registry entry, least-privilege grants, forced-RLS policy, and real PostgreSQL evidence. Gates freeze that ordered catalog; they do not become a second migration owner.
 
 Shared contract files, compatibility policy, and releases belong to the standalone protocol repository. Claudian and Cloud own their consumer package manifests and lockfiles; no later transport tranche edits those manifests opportunistically. Published `3.3.1` is the implemented baseline. Step 11 followed a producer-first order for exact `3.2.1` with wire v6, Cloud binding v2, and backup coordination format v2. Step 12 then published exact `3.3.0`, retained wire v6 and Cloud binding v2, and directly replaced the pre-production backup format with v3 before either consumer converged. The corrective `3.3.1` patch added the backup-v3 tombstone required for bounded Manager-responsibility compaction without changing wire or binding versions. The exact pin alone advertises nothing; each new capability is advertised only after its complete server and client path passes.
 

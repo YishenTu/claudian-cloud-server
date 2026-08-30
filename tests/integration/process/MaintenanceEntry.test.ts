@@ -30,12 +30,12 @@ function run(
 }
 
 describe('maintenance source entry', () => {
-  it('routes the migration target probe without constructing the server', () => {
+  it('rejects the removed migration target probe without constructing the server', () => {
     const result = run(['maintenance', 'migration', 'target']);
 
-    assert.equal(result.status, 0);
-    assert.match(result.stdout, /^[1-9][0-9]*\n$/u);
-    assert.equal(result.stderr, '');
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /claudian-cloud-server bootstrap failure/u);
   });
 
   it('reports unknown maintenance input through the sanitized bootstrap reporter', () => {
