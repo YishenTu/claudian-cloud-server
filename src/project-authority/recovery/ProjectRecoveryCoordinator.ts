@@ -32,8 +32,12 @@ export interface ProjectRecoveryCoordinatorOptions {
   readonly accept: ProjectRecoveryPort;
   readonly activation: ProjectRecoveryPort;
   readonly catalog: RecoveryCandidateCatalog;
+  readonly creation?: ProjectRecoveryPort;
   readonly isolation: ProjectRecoveryIsolationCoordination;
   readonly lifecycle?: ProjectLifecycleRecoveryPort;
+  readonly leave?: ProjectRecoveryPort;
+  readonly membership?: ProjectRecoveryPort;
+  readonly removal?: ProjectRecoveryPort;
 }
 
 export interface ProjectRecoveryIsolationCoordination {
@@ -72,21 +76,37 @@ export class ProjectRecoveryCoordinator implements ProjectRecoveryPort {
   readonly #accept: ProjectRecoveryPort;
   readonly #activation: ProjectRecoveryPort;
   readonly #catalog: RecoveryCandidateCatalog;
+  readonly #creation: ProjectRecoveryPort | undefined;
   readonly #isolation: ProjectRecoveryIsolationCoordination;
   readonly #lifecycle: ProjectLifecycleRecoveryPort | undefined;
+  readonly #leave: ProjectRecoveryPort | undefined;
+  readonly #membership: ProjectRecoveryPort | undefined;
+  readonly #removal: ProjectRecoveryPort | undefined;
   #closed = false;
 
   constructor(options: ProjectRecoveryCoordinatorOptions) {
     this.#accept = options.accept;
     this.#activation = options.activation;
     this.#catalog = options.catalog;
+    this.#creation = options.creation;
     this.#isolation = options.isolation;
     this.#lifecycle = options.lifecycle;
+    this.#leave = options.leave;
+    this.#membership = options.membership;
+    this.#removal = options.removal;
   }
 
   async recoverProject(projectId: CollabProjectId): Promise<void> {
     this.#assertOpen();
     try {
+      await this.#creation?.recoverProject(projectId);
+      this.#assertOpen();
+      await this.#membership?.recoverProject(projectId);
+      this.#assertOpen();
+      await this.#leave?.recoverProject(projectId);
+      this.#assertOpen();
+      await this.#removal?.recoverProject(projectId);
+      this.#assertOpen();
       await this.#activation.recoverProject(projectId);
       this.#assertOpen();
       await this.#accept.recoverProject(projectId);
@@ -133,6 +153,22 @@ export class ProjectRecoveryCoordinator implements ProjectRecoveryPort {
     switch (kind) {
       case 'accept': return this.#accept;
       case 'activation': return this.#activation;
+      case 'create-project': {
+        if (this.#creation === undefined) return unsupportedRecoveryKind(kind);
+        return this.#creation;
+      }
+      case 'join-project': {
+        if (this.#membership === undefined) return unsupportedRecoveryKind(kind);
+        return this.#membership;
+      }
+      case 'remove-member': {
+        if (this.#removal === undefined) return unsupportedRecoveryKind(kind);
+        return this.#removal;
+      }
+      case 'leave': {
+        if (this.#leave === undefined) return unsupportedRecoveryKind(kind);
+        return this.#leave;
+      }
     }
     return unsupportedRecoveryKind(kind);
   }
@@ -141,12 +177,22 @@ export class ProjectRecoveryCoordinator implements ProjectRecoveryPort {
     switch (candidate.kind) {
       case 'accept':
       case 'activation':
+      case 'create-project':
+      case 'join-project':
+      case 'remove-member':
         return this.#owner(candidate.kind).recoverProject(candidate.projectId);
+      case 'leave':
+        if (this.#leave !== undefined) {
+          return this.#leave.recoverProject(candidate.projectId);
+        }
+        if (this.#lifecycle === undefined) return unsupportedRecoveryKind(
+          candidate.kind,
+        );
+        return this.#lifecycle.recoverCandidate(candidate);
       case 'authority-transfer':
       case 'backup':
       case 'delete':
       case 'export':
-      case 'leave':
       case 'retire':
         if (this.#lifecycle === undefined) return unsupportedRecoveryKind(
           candidate.kind,

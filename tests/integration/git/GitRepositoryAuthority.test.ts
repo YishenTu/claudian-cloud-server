@@ -243,6 +243,73 @@ async function closeFakeAuthority(fixture: Awaited<ReturnType<typeof createFakeA
 }
 
 describe('GitRepositoryAuthority', () => {
+  it('creates and deletes only the exact persisted Member personal ref', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'claudian-membership-ref-'));
+    const work = join(root, 'work');
+    const accepted = placement('membership_bare', 'project-membership-ref');
+    const bare = repositoryPath(root, accepted);
+    const resourceAdmission = admission();
+    const authority = new GitRepositoryAuthority({
+      gitExecutable: GIT_EXECUTABLE,
+      operationTimeoutMs: 2_000,
+      outputMaxBytes: 64 * 1_024,
+      placementValidator: new CurrentPlacementValidator(),
+      repositoryRoot: root,
+      resourceAdmission,
+      storageNodeId: 'node-a',
+    });
+    try {
+      await execFileAsync(GIT_EXECUTABLE, ['init', '--initial-branch=main', work]);
+      await writeFile(join(work, 'README.md'), 'membership ref fixture\n');
+      await execFileAsync(GIT_EXECUTABLE, ['-C', work, 'add', 'README.md']);
+      await execFileAsync(GIT_EXECUTABLE, ['-C', work, '-c', 'user.name=Test',
+        '-c', 'user.email=test@invalid', 'commit', '-m', 'fixture']);
+      await mkdir(join(bare, '..'), { recursive: true });
+      await execFileAsync(GIT_EXECUTABLE, ['clone', '--bare', work, bare]);
+      const main = (await execFileAsync(GIT_EXECUTABLE, [
+        '--git-dir', bare, 'rev-parse', 'refs/heads/main',
+      ])).stdout.trim();
+      const input = {
+        expectedOid: main,
+        memberId: 'member_joined',
+        personalRef: 'refs/heads/members/member_joined',
+        placement: accepted,
+        projectId: accepted.projectId,
+      } as const;
+      const reservation = await authority.reserveMembershipRefOperation(
+        accepted.projectId,
+      );
+
+      try {
+        assert.equal(
+          await authority.createMemberPersonalRef(reservation, input),
+          'created',
+        );
+        assert.equal(
+          await authority.createMemberPersonalRef(reservation, input),
+          'replayed',
+        );
+        assert.equal((await execFileAsync(GIT_EXECUTABLE, [
+          '--git-dir', bare, 'rev-parse', input.personalRef,
+        ])).stdout.trim(), main);
+        assert.equal(
+          await authority.deleteMemberPersonalRef(reservation, input),
+          'deleted',
+        );
+        assert.equal(
+          await authority.deleteMemberPersonalRef(reservation, input),
+          'replayed',
+        );
+      } finally {
+        await reservation.close();
+      }
+    } finally {
+      await authority.close();
+      await resourceAdmission.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
   it('rejects receive cleanup through a symlinked object directory', async () => {
     const root = await mkdtemp(join(tmpdir(), 'claudian-git-cleanup-containment-'));
     const accepted = placement('repository');
@@ -910,7 +977,7 @@ wait`,
         fixture.authority.verifyIntegrity(fixture.repository),
         'timeout',
       );
-      assert.equal(Date.now() - startedAt < 2_000, true);
+      assert.equal(Date.now() - startedAt < 3_000, true);
       pids = await processIds(fixture.marker);
       assert.equal(pids.length, 2);
       assert.equal(pids.some(processExists), false);

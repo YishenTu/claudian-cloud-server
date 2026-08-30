@@ -59,6 +59,10 @@ import type {
   TerminalProjectContinuityCatalog,
   TerminalProjectContinuityPage,
 } from '../ProjectCoordination.js';
+import type {
+  CloudProjectCreationLease,
+  CloudProjectCreationPersistence,
+} from '../CloudProjectCreationPersistence.js';
 export type {
   AcquireProjectLeaseOptions,
   ActiveRepositoryPlacementPage,
@@ -88,6 +92,8 @@ import { PostgresAcceptPersistence } from './PostgresAcceptPersistence.js';
 import { PostgresCollaborationPersistence } from './PostgresCollaborationPersistence.js';
 import { PostgresPortabilityLifecyclePersistence } from './PostgresPortabilityLifecyclePersistence.js';
 import { PostgresProjectCheckpointPersistence } from './PostgresProjectCheckpointPersistence.js';
+import { PostgresCloudProjectCreationPersistence } from './PostgresCloudProjectCreationPersistence.js';
+import { PostgresProjectMembershipPersistence } from './PostgresProjectMembershipPersistence.js';
 import { POSTGRES_SCHEMAS } from './PostgresSchema.js';
 import {
   RUNTIME_POSTGRES_SCHEMA_COMPATIBILITY,
@@ -191,9 +197,12 @@ const RECOVERY_CANDIDATE_KINDS: ReadonlySet<RecoveryCandidateKind> = new Set([
   'activation',
   'authority-transfer',
   'backup',
+  'create-project',
   'delete',
   'export',
+  'join-project',
   'leave',
+  'remove-member',
   'retire',
 ]);
 const PROJECT_SERVICE_STATES: ReadonlySet<ProjectServiceState> = new Set([
@@ -591,6 +600,7 @@ class PostgresProjectScope
   readonly collaboration: PostgresCollaborationPersistence;
   readonly portability: PostgresPortabilityLifecyclePersistence;
   readonly checkpoint: PostgresProjectCheckpointPersistence;
+  readonly membership: PostgresProjectMembershipPersistence;
   readonly #client: PoolClient;
   readonly #markBroken: MarkBroken;
   readonly #projectId: CollabProjectId;
@@ -627,6 +637,7 @@ class PostgresProjectScope
       projectId,
       query,
     );
+    this.membership = new PostgresProjectMembershipPersistence(projectId, query);
     this.#client = client;
     this.#projectId = projectId;
     this.#markBroken = markBroken;
@@ -1260,6 +1271,38 @@ async function runProjectTransaction<T>(
   }
 }
 
+async function runCloudProjectCreationTransaction<T>(
+  client: PoolClient,
+  projectId: CollabProjectId,
+  operation: (persistence: CloudProjectCreationPersistence) => Promise<T>,
+  markBroken: MarkBroken,
+): Promise<T> {
+  let transactionStarted = false;
+  try {
+    await safeQuery(client, 'BEGIN', [], markBroken);
+    transactionStarted = true;
+    await safeQuery(
+      client,
+      "SELECT set_config('claudian_cloud.project_id', $1, true)",
+      [projectId],
+      markBroken,
+    );
+    const persistence = new PostgresCloudProjectCreationPersistence(
+      <Row extends QueryResultRow>(text: string, values: readonly unknown[]) => (
+        safeQuery<Row>(client, text, values, markBroken)
+      ),
+      projectId,
+    );
+    const value = await operation(persistence);
+    await safeQuery(client, 'COMMIT', [], markBroken);
+    transactionStarted = false;
+    return value;
+  } catch (error: unknown) {
+    if (transactionStarted) await rollback(client, markBroken);
+    throw error;
+  }
+}
+
 function projectReadScope(scope: PostgresProjectScope): ProjectReadScope {
   const accept = Object.freeze({
     get: operationId => scope.accept.get(operationId),
@@ -1322,6 +1365,14 @@ function projectReadScope(scope: PostgresProjectScope): ProjectReadScope {
     getProjectEventSequence: () => scope.getProjectEventSequence(),
     getRepositoryPlacement: () => scope.getRepositoryPlacement(),
     listActiveSnapshotMemberships: () => scope.listActiveSnapshotMemberships(),
+    membership: Object.freeze({
+      getNonterminalJoin: () => scope.membership.getNonterminalJoin(),
+    }),
+    portability: Object.freeze({
+      getNonterminalLifecycleJournal: () => (
+        scope.portability.getNonterminalLifecycleJournal()
+      ),
+    }),
     readProjectEvents: options => scope.readProjectEvents(options),
   } satisfies ProjectReadScope);
 }
@@ -1437,6 +1488,31 @@ class PostgresPinnedProjectLease implements PinnedProjectLease {
       return await transaction;
     } finally {
       options.signal?.removeEventListener('abort', onAbort);
+      this.#transactionActive = false;
+      this.#activeOperation = undefined;
+    }
+  }
+
+  async withCreationScope<T>(
+    operation: (persistence: CloudProjectCreationPersistence) => Promise<T>,
+  ): Promise<T> {
+    if (this.#closed) throw new CoordinationError('closed');
+    if (this.#checkedOutClient.isBroken()) throw dependencyFailure();
+    if (this.#transactionActive) throw new CoordinationError('lease-busy');
+    this.#transactionActive = true;
+    const transaction = runCloudProjectCreationTransaction(
+      this.#client,
+      this.#projectId,
+      operation,
+      this.#checkedOutClient.markBroken,
+    );
+    this.#activeOperation = transaction.then(
+      () => undefined,
+      () => undefined,
+    );
+    try {
+      return await transaction;
+    } finally {
       this.#transactionActive = false;
       this.#activeOperation = undefined;
     }
@@ -1643,6 +1719,15 @@ export class PostgresCoordination
     projectId: CollabProjectId,
     options: AcquireProjectLeaseOptions = {},
   ): Promise<PinnedProjectLease> {
+    if (this.#closed) return Promise.reject(new CoordinationError('closed'));
+    const lockKey = ensureProjectId(projectId);
+    return this.#acquirePinnedLease(projectId, lockKey, options.signal);
+  }
+
+  acquireCloudProjectCreationLease(
+    projectId: CollabProjectId,
+    options: AcquireProjectLeaseOptions = {},
+  ): Promise<CloudProjectCreationLease> {
     if (this.#closed) return Promise.reject(new CoordinationError('closed'));
     const lockKey = ensureProjectId(projectId);
     return this.#acquirePinnedLease(projectId, lockKey, options.signal);
@@ -2153,7 +2238,7 @@ export class PostgresCoordination
     projectId: CollabProjectId,
     lockKey: bigint,
     signal: AbortSignal | undefined,
-  ): Promise<PinnedProjectLease> {
+  ): Promise<PostgresPinnedProjectLease> {
     const deadline = Date.now() + this.#projectLockTimeoutMs;
     const checkedOut = await checkout(
       this.#pinnedPool,

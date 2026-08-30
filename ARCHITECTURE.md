@@ -94,7 +94,7 @@ virtual machine or persistent container per Project.
 15. **Placement generation is an execution fence.** Every repository operation
     carries a server-derived placement lease. Stale generations and demoted
     nodes fail closed; placement is not merely routing metadata.
-16. **Collab has three independent version authorities.** The implemented registry baseline is `@claudian-collab/protocol@3.2.1`, canonical wire version `6`, and Cloud binding version `2`, while Claudian LAN Project control remains independently at version `9`. No adapter infers compatibility from package SemVer alone or couples a Cloud change to the LAN binding.
+16. **Collab has three independent version authorities.** The implemented registry baseline is `@claudian-collab/protocol@3.3.1`, canonical wire version `6`, and Cloud binding version `2`, while Claudian LAN Project control remains independently at version `9`. No adapter infers compatibility from package SemVer alone or couples a Cloud change to the LAN binding.
 17. **Durable phase records are singular authorities.** Activation, cancellation, client binding, and Accept each have one named journal or transition record. Membership, placement, repository directories, refs, indexes, and marker files are observations used to advance or reject that journal; none becomes a parallel phase authority.
 18. **Authority generation fences authority movement.** Existing authorities begin at generation `1`; a supported transfer activates the target at exactly `source + 1`. Pre-cutover cancellation must prove the target has not accepted relinquishment. At or after the one-way source fence, every recovery owner moves forward and the source can never become writable again.
 19. **One semantic checkpoint serves portability.** A versioned manifest, canonical logical coordination stream, and exact Git bundle share profile-specific allowlists for authority transfer, backup, and export. PostgreSQL rows, SQLite images, credentials, CA private keys, working trees, and operational refs are never the portable contract.
@@ -193,9 +193,11 @@ trusted IngressPrincipal
 The deployment operator owns endpoint reachability, entry-access policy, caller
 authentication, and credential validation. Its trusted ingress is the only
 supported external path to Cloud Server. The production request-context adapter
-receives the caller identity established by that ingress and constructs an
-immutable `IngressPrincipal` containing a stable opaque Account or actor ID and
-optional device or session attribution. The ingress-to-server identity channel
+receives one already-established strict assertion and constructs an immutable
+`IngressPrincipal` containing a stable opaque `principalId`, optional opaque
+`deviceCredentialId`, and `operator-protected-channel` provenance with an
+opaque provider ID. It rejects unknown identity, authorization, header,
+address, and socket fields. The ingress-to-server identity channel
 is not a client-writable Cloud protocol field. Preventing direct backend access
 and forged ingress identity is a deployment requirement, not Cloud domain
 policy. The private-development exception is defined in §10.1.
@@ -489,7 +491,7 @@ Git command execution remains internal to `GitRepositoryAuthority`. The isolated
 
 ## 8. Protocol ownership and compatibility
 
-The standalone `claudian-collab-protocol` repository produces `@claudian-collab/protocol`. The Cloud Server depends on the exact `3.2.1` npm registry release. That release carries canonical wire version `6`, Cloud binding version `2`, and backup coordination format version `2`; its npm lock entry records the immutable registry artifact integrity used by local development, CI, and deployments. Package SemVer, canonical wire version, Cloud binding version, backup coordination format version, and the independently owned LAN version are never substituted for one another.
+The standalone `claudian-collab-protocol` repository produces `@claudian-collab/protocol`. The Cloud Server depends on the exact `3.3.1` npm registry release. That release carries canonical wire version `6`, Cloud binding version `2`, and backup coordination format version `3`; its npm lock entry records the immutable registry artifact integrity used by local development, CI, and deployments. Package SemVer, canonical wire version, Cloud binding version, backup coordination format version, and the independently owned LAN version are never substituted for one another.
 
 The package exposes curated boundaries only:
 
@@ -1336,7 +1338,7 @@ The completed local-milestone merge order was: the original shared protocol prod
 
 Schema evolution is one serial, checksum-verified lane: `0002_development_bootstrap.sql`, `0003_project_read_events.sql`, `0004_collaboration.sql`, `0005_accept_recovery.sql`, then Step 11 `0006_portability_lifecycle.sql`. The task that introduces each migration also owns its checksum/schema registry entry, least-privilege grants, forced-RLS policy, and real PostgreSQL evidence. Gates freeze that ordered catalog; they do not become a second migration owner.
 
-Shared contract files, compatibility policy, and releases belong to the standalone protocol repository. Claudian and Cloud own their consumer package manifests and lockfiles; no later transport tranche edits those manifests opportunistically. Published `3.2.1` is the implemented baseline. Step 11 followed a producer-first order: exact `@claudian-collab/protocol@3.2.1` with wire v6, Cloud binding v2, and backup coordination format v2 was published and independently verified before Cloud pinned it for O1. The exact pin alone advertises nothing; each new capability is advertised only after its complete server and client path passes.
+Shared contract files, compatibility policy, and releases belong to the standalone protocol repository. Claudian and Cloud own their consumer package manifests and lockfiles; no later transport tranche edits those manifests opportunistically. Published `3.3.1` is the implemented baseline. Step 11 followed a producer-first order for exact `3.2.1` with wire v6, Cloud binding v2, and backup coordination format v2. Step 12 then published exact `3.3.0`, retained wire v6 and Cloud binding v2, and directly replaced the pre-production backup format with v3 before either consumer converged. The corrective `3.3.1` patch added the backup-v3 tombstone required for bounded Manager-responsibility compaction without changing wire or binding versions. The exact pin alone advertises nothing; each new capability is advertised only after its complete server and client path passes.
 
 ## 22. Explicit non-goals
 

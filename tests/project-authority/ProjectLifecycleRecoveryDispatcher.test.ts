@@ -85,10 +85,14 @@ class MemoryLifecycleCoordination {
       ): Promise<T> => operation({
         accept: { getNonterminal: () => Promise.resolve(undefined) },
         findDevelopmentActorMember: () => Promise.resolve(undefined),
+        findPrincipalMember: () => Promise.resolve(undefined),
         findMembership: () => Promise.resolve(undefined),
         getNonterminalDevelopmentBootstrapAttempt: () => Promise.resolve(
           undefined,
         ),
+        membership: {
+          getNonterminalJoin: () => Promise.resolve(undefined),
+        },
         portability: {
           getLifecycleJournal: (operationId: string) => Promise.resolve(
             this.current?.operationId === operationId
@@ -473,6 +477,18 @@ describe('ProjectLifecycleRecoveryDispatcher', () => {
         projectId: 'project-b',
         scheduledAt: CREATED_AT,
       },
+      {
+        kind: 'create-project' as const,
+        operationId: 'operation-create',
+        projectId: 'project-c',
+        scheduledAt: CREATED_AT,
+      },
+      {
+        kind: 'join-project' as const,
+        operationId: 'operation-join',
+        projectId: 'project-d',
+        scheduledAt: CREATED_AT,
+      },
     ];
     const calls: string[] = [];
     const coordinator = new ProjectRecoveryCoordinator({
@@ -489,6 +505,12 @@ describe('ProjectLifecycleRecoveryDispatcher', () => {
           nextCursor: undefined,
         }),
       },
+      creation: {
+        recoverProject: projectId => {
+          calls.push(`create:${projectId}`);
+          return Promise.resolve();
+        },
+      },
       isolation: {
         acquireProjectLease: () => Promise.reject(
           new Error('unexpected-isolation'),
@@ -501,12 +523,20 @@ describe('ProjectLifecycleRecoveryDispatcher', () => {
         },
         recoverProject: () => Promise.resolve(),
       },
+      membership: {
+        recoverProject: projectId => {
+          calls.push(`join:${projectId}`);
+          return Promise.resolve();
+        },
+      },
     });
 
     await coordinator.recoverAll();
     assert.deepEqual(calls, [
       'lifecycle:backup:operation-backup',
       'accept:project-b',
+      'create:project-c',
+      'join:project-d',
     ]);
     coordinator.close();
   });

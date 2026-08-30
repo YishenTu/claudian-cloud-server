@@ -19,6 +19,16 @@ import { DevelopmentBootstrapProfile } from '../onboarding/development/Developme
 import { DevelopmentBootstrapExpiryReconciler } from '../onboarding/development/DevelopmentBootstrapExpiryReconciler.js';
 import type { SafeLogger } from '../observability/SafeLogger.js';
 import { ProjectAcceptCoordinator } from '../project-authority/acceptance/ProjectAcceptCoordinator.js';
+import { CloudProjectCreationCoordinator } from '../project-authority/creation/CloudProjectCreationCoordinator.js';
+import { CloudProjectJoinCoordinator } from '../project-authority/membership/CloudProjectJoinCoordinator.js';
+import { ProjectInvitationAuthority } from '../project-authority/membership/ProjectInvitationAuthority.js';
+import { ProjectMembershipAdministrationAuthority } from '../project-authority/membership/ProjectMembershipAdministrationAuthority.js';
+import { ProjectMemberRemovalCoordinator } from '../project-authority/membership/ProjectMemberRemovalCoordinator.js';
+import { ProjectMembershipExpiryReconciler } from '../project-authority/membership/ProjectMembershipExpiryReconciler.js';
+import { LeaveCoordinator } from '../project-authority/lifecycle/leave/LeaveCoordinator.js';
+import { TransferredMembershipClaimAuthority } from '../project-authority/membership/TransferredMembershipClaimAuthority.js';
+import { ProjectWriteAdmission } from '../project-authority/admission/ProjectWriteAdmission.js';
+import { ProtectedSecretCustody } from '../project-authority/lifecycle/ProtectedSecretCustody.js';
 import { ProjectActivationCoordinator } from '../project-authority/lifecycle/ProjectActivationCoordinator.js';
 import { ProjectReadAuthority } from '../project-authority/reads/ProjectReadAuthority.js';
 import { ProjectRequestAuthority } from '../project-authority/requests/ProjectRequestAuthority.js';
@@ -43,6 +53,8 @@ import {
   RepositoryPublication,
   RepositoryPublicationError,
 } from '../repositories/RepositoryPublication.js';
+import { EmptyProjectRepositoryAuthority } from '../repositories/EmptyProjectRepositoryAuthority.js';
+import { RepositoryCheckpointAuthority } from '../repositories/RepositoryCheckpointAuthority.js';
 import { DevelopmentPrincipalAdapter } from '../request-context/DevelopmentPrincipalAdapter.js';
 import { BootstrapUploadAdmission } from '../resource-admission/BootstrapUploadAdmission.js';
 import { ProjectEventAdmission } from '../resource-admission/ProjectEventAdmission.js';
@@ -53,6 +65,8 @@ import { DevelopmentBootstrapRoutes } from '../server/DevelopmentBootstrapRoutes
 import { ProjectSnapshotRoutes } from '../server/control/ProjectSnapshotRoutes.js';
 import { ProjectCollaborationRoutes } from '../server/control/ProjectCollaborationRoutes.js';
 import { ProjectLifecycleRoutes } from '../server/control/ProjectLifecycleRoutes.js';
+import { CloudProjectMembershipRoutes } from '../server/control/CloudProjectMembershipRoutes.js';
+import type { TrustedProjectPrincipalBinding } from '../server/control/ProjectJsonTransport.js';
 import { ProjectEventRoutes } from '../server/events/ProjectEventRoutes.js';
 import { GitUploadPackRoutes } from '../server/git/GitUploadPackRoutes.js';
 import { GitReceivePackRoutes } from '../server/git/GitReceivePackRoutes.js';
@@ -92,6 +106,7 @@ export interface CreateApplicationOptions {
   readonly keyring?: ClaimCustodyKeyringConfig;
   readonly lifecycle?: CloudLifecycleRuntime;
   readonly logger: SafeLogger;
+  readonly trustedPrincipal?: TrustedProjectPrincipalBinding;
 }
 
 type ApplicationState =
@@ -165,6 +180,15 @@ class CloudApplication implements Application {
   readonly #config: ServerConfig;
   readonly #coordination: PostgresCoordination;
   readonly #acceptCoordinator: ProjectAcceptCoordinator;
+  readonly #creationCoordinator: CloudProjectCreationCoordinator;
+  readonly #joinCoordinator: CloudProjectJoinCoordinator;
+  readonly #invitationAuthority: ProjectInvitationAuthority | undefined;
+  readonly #membershipAdministrationAuthority: ProjectMembershipAdministrationAuthority;
+  readonly #memberRemovalCoordinator: ProjectMemberRemovalCoordinator;
+  readonly #membershipExpiryReconciler: ProjectMembershipExpiryReconciler;
+  readonly #leaveCoordinator: LeaveCoordinator;
+  readonly #transferredMembershipClaimAuthority: TransferredMembershipClaimAuthority | undefined;
+  readonly #membershipWriteAdmission: ProjectWriteAdmission;
   readonly #activationCoordinator: ProjectActivationCoordinator;
   readonly #activeRepositoryIntegrity: ActiveRepositoryIntegrityGate;
   readonly #activeKeyReferences: ActiveClaimCustodyKeyReferenceGate | undefined;
@@ -184,7 +208,9 @@ class CloudApplication implements Application {
   readonly #projectPersonalRefAuthority: ProjectPersonalRefAuthority;
   readonly #projectTicketAuthority: ProjectTicketAuthority;
   readonly #repositoryAuthority: GitRepositoryAuthority;
+  readonly #emptyProjectRepository: EmptyProjectRepositoryAuthority;
   readonly #repositoryPublication: RepositoryPublication;
+  readonly #membershipRepositoryMaintenance: RepositoryCheckpointAuthority;
   readonly #recoveryCoordinator: ProjectRecoveryCoordinator;
   readonly #resourceAdmission: ResourceAdmission;
   readonly #startupController = new AbortController();
@@ -232,6 +258,29 @@ class CloudApplication implements Application {
           options.config.developmentBootstrap.maxRepositoryBytes,
         maximumTreeEntries: COLLAB_LIMITS.maxChangedPaths,
       },
+      repositoryRoot: options.config.repository.root,
+      resourceAdmission: this.#resourceAdmission,
+      storageNodeId: options.config.repository.storageNodeId,
+    });
+    this.#emptyProjectRepository = new EmptyProjectRepositoryAuthority({
+      gitExecutable: options.config.repository.gitExecutable,
+      operationTimeoutMs: options.config.repository.operationTimeoutMs,
+      outputMaxBytes: options.config.repository.outputMaxBytes,
+      repositoryRoot: options.config.repository.root,
+      resourceAdmission: this.#resourceAdmission,
+      storageNodeId: options.config.repository.storageNodeId,
+    });
+    this.#membershipRepositoryMaintenance = new RepositoryCheckpointAuthority({
+      gitExecutable: options.config.repository.gitExecutable,
+      maximumBlobBytes: COLLAB_LIMITS.maxBlobBytes,
+      maximumBundleBytes: options.config.developmentBootstrap.maxBundleBytes,
+      maximumExpandedTreeEntries: 100_000,
+      maximumRepositoryBytes: options.config.developmentBootstrap.maxRepositoryBytes,
+      maximumTreeEntries: COLLAB_LIMITS.maxChangedPaths,
+      operationRoot: options.config.developmentBootstrap.stagingRoot,
+      operationTimeoutMs: options.config.repository.operationTimeoutMs,
+      outputMaxBytes: options.config.repository.outputMaxBytes,
+      placementValidator: this.#coordination,
       repositoryRoot: options.config.repository.root,
       resourceAdmission: this.#resourceAdmission,
       storageNodeId: options.config.repository.storageNodeId,
@@ -295,14 +344,60 @@ class CloudApplication implements Application {
       coordination: this.#coordination,
       repository: this.#repositoryAuthority,
     });
+    this.#creationCoordinator = new CloudProjectCreationCoordinator({
+      coordination: this.#coordination,
+      repository: this.#emptyProjectRepository,
+      storageNodeId: options.config.repository.storageNodeId,
+    });
+    this.#joinCoordinator = new CloudProjectJoinCoordinator({
+      coordination: this.#coordination,
+      repository: this.#repositoryAuthority,
+    });
+    this.#memberRemovalCoordinator = new ProjectMemberRemovalCoordinator({
+      coordination: this.#coordination,
+      repository: this.#membershipRepositoryMaintenance,
+    });
+    this.#leaveCoordinator = new LeaveCoordinator({
+      coordination: this.#coordination,
+      repository: this.#membershipRepositoryMaintenance,
+    });
     this.#recoveryCoordinator = new ProjectRecoveryCoordinator({
       accept: this.#acceptCoordinator,
       activation: this.#activationCoordinator,
       catalog: this.#coordination,
+      creation: this.#creationCoordinator,
       isolation: this.#coordination,
+      leave: this.#leaveCoordinator,
+      membership: this.#joinCoordinator,
+      removal: this.#memberRemovalCoordinator,
       ...(options.lifecycle === undefined
         ? {}
         : { lifecycle: options.lifecycle.recovery }),
+    });
+    this.#membershipWriteAdmission = new ProjectWriteAdmission({
+      coordination: this.#coordination,
+      recovery: this.#recoveryCoordinator,
+    });
+    const protectedSecretCustody = options.keyring === undefined
+      ? undefined
+      : new ProtectedSecretCustody({
+          activeKeyId: options.keyring.activeEncryptionKeyId,
+          keys: options.keyring.encryptionKeys,
+        });
+    this.#invitationAuthority = protectedSecretCustody === undefined
+      ? undefined
+      : new ProjectInvitationAuthority({
+        custody: protectedSecretCustody,
+        writeAdmission: this.#membershipWriteAdmission,
+      });
+    this.#transferredMembershipClaimAuthority = protectedSecretCustody === undefined
+      ? undefined
+      : new TransferredMembershipClaimAuthority({
+        custody: protectedSecretCustody,
+        writeAdmission: this.#membershipWriteAdmission,
+      });
+    this.#membershipAdministrationAuthority = new ProjectMembershipAdministrationAuthority({
+      writeAdmission: this.#membershipWriteAdmission,
     });
     this.#projectRequestAuthority = new ProjectRequestAuthority({
       coordination: this.#coordination,
@@ -344,12 +439,19 @@ class CloudApplication implements Application {
             activeKeyId: options.keyring.activeEncryptionKeyId,
             keys: options.keyring.encryptionKeys,
           }),
+          membershipCustody: new ProtectedSecretCustody({
+            activeKeyId: options.keyring.activeEncryptionKeyId,
+            keys: options.keyring.encryptionKeys,
+          }),
           keyring: options.keyring,
         }),
       });
     this.#bootstrapExpiryReconciler = new DevelopmentBootstrapExpiryReconciler({
       catalog: this.#coordination,
       settlement: this.#activationCoordinator,
+    });
+    this.#membershipExpiryReconciler = new ProjectMembershipExpiryReconciler({
+      coordination: this.#coordination,
     });
     const bootstrapProfile = new DevelopmentBootstrapProfile({
       attemptTtlMs: options.config.developmentBootstrap.attemptTtlMs,
@@ -359,7 +461,6 @@ class CloudApplication implements Application {
       uploadGate: developmentBootstrapUploadGate,
     });
     const enabledCapabilities = new Set<CollabCloudCapability>([
-        'development-bootstrap',
         'accept',
         'git-receive-pack-personal-ref',
         'git-upload-pack',
@@ -368,9 +469,25 @@ class CloudApplication implements Application {
         'requests',
         'tickets',
       ] as const);
+    if (options.trustedPrincipal === undefined) {
+      enabledCapabilities.add('development-bootstrap');
+    }
     if (options.lifecycle !== undefined) {
       enabledCapabilities.add('authority-transfer');
       enabledCapabilities.add('project-retirement');
+    }
+    if (options.trustedPrincipal !== undefined) {
+      enabledCapabilities.add('cloud-project-create');
+      enabledCapabilities.add('cloud-project-join');
+      enabledCapabilities.add('cloud-project-leave');
+      enabledCapabilities.add('cloud-project-manager-responsibility');
+      enabledCapabilities.add('cloud-project-membership');
+      if (this.#invitationAuthority !== undefined) {
+        enabledCapabilities.add('cloud-project-invitations');
+      }
+      if (this.#transferredMembershipClaimAuthority !== undefined) {
+        enabledCapabilities.add('cloud-imported-membership-claims');
+      }
     }
     const capabilitiesRoute = new CloudCapabilitiesRoute({
       enabledCapabilities,
@@ -395,20 +512,29 @@ class CloudApplication implements Application {
         maxRepositoryBytes: options.config.developmentBootstrap.maxRepositoryBytes,
       },
     });
-    const principalAdapter = new DevelopmentPrincipalAdapter({
-      profile: 'loopback-development',
-    });
-    const bootstrapRoutes = new DevelopmentBootstrapRoutes({
-      maximumJsonBytes: COLLAB_LIMITS.maxJsonPayloadUtf8Bytes,
-      principalAdapter,
-      profile: bootstrapProfile,
-    });
+    const principalBinding = options.trustedPrincipal === undefined
+      ? {
+        principalAdapter: new DevelopmentPrincipalAdapter({
+          profile: 'loopback-development',
+        }),
+      }
+      : { trustedPrincipal: options.trustedPrincipal };
+    const principalAdapter = 'principalAdapter' in principalBinding
+      ? principalBinding.principalAdapter
+      : undefined;
+    const bootstrapRoutes = principalAdapter === undefined
+      ? undefined
+      : new DevelopmentBootstrapRoutes({
+        maximumJsonBytes: COLLAB_LIMITS.maxJsonPayloadUtf8Bytes,
+        principalAdapter,
+        profile: bootstrapProfile,
+      });
     const lifecycleControl = options.lifecycle?.control;
     const projectSnapshotRoutes = new ProjectSnapshotRoutes({
       authority: this.#projectReadAuthority,
       maximumJsonBytes: COLLAB_LIMITS.maxJsonPayloadUtf8Bytes,
       operationTimeoutMs: options.config.repository.operationTimeoutMs,
-      principalAdapter,
+      ...principalBinding,
       ...(lifecycleControl === undefined
         ? {}
         : { retirementTerminal: lifecycleControl }),
@@ -417,17 +543,35 @@ class CloudApplication implements Application {
       acceptAuthority: this.#acceptCoordinator,
       maximumJsonBytes: COLLAB_LIMITS.maxJsonPayloadUtf8Bytes,
       operationTimeoutMs: options.config.repository.operationTimeoutMs,
-      principalAdapter,
+      ...principalBinding,
       requestAuthority: this.#projectRequestAuthority,
       ticketAuthority: this.#projectTicketAuthority,
     });
+    const cloudProjectMembershipRoutes = options.trustedPrincipal === undefined
+      ? undefined
+      : new CloudProjectMembershipRoutes({
+        administration: this.#membershipAdministrationAuthority,
+        creation: this.#creationCoordinator,
+        join: this.#joinCoordinator,
+        leave: this.#leaveCoordinator,
+        maximumJsonBytes: COLLAB_LIMITS.maxJsonPayloadUtf8Bytes,
+        operationTimeoutMs: options.config.repository.operationTimeoutMs,
+        removal: this.#memberRemovalCoordinator,
+        ...(this.#invitationAuthority === undefined
+          ? {}
+          : { invitation: this.#invitationAuthority }),
+        ...(this.#transferredMembershipClaimAuthority === undefined
+          ? {}
+          : { claims: this.#transferredMembershipClaimAuthority }),
+        ...principalBinding,
+      });
     const projectLifecycleRoutes = options.lifecycle === undefined
       ? undefined
       : new ProjectLifecycleRoutes({
         control: options.lifecycle.control,
         maximumJsonBytes: COLLAB_LIMITS.maxJsonPayloadUtf8Bytes,
         operationTimeoutMs: options.config.repository.operationTimeoutMs,
-        principalAdapter,
+        ...principalBinding,
       });
     const authorityTransferArtifactRoutes = options.lifecycle === undefined
       ? undefined
@@ -440,13 +584,13 @@ class CloudApplication implements Application {
             COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxRepositoryBundleBytes,
         },
         operationTimeoutMs: options.config.developmentBootstrap.uploadDeadlineMs,
-        principalAdapter,
+        ...principalBinding,
       });
     this.#projectEventRoutes = new ProjectEventRoutes({
       admission: this.#projectEventAdmission,
       authority: this.#projectReadAuthority,
       maximumBufferedBytes: options.config.repository.outputMaxBytes,
-      principalAdapter,
+      ...principalBinding,
       wakeup: this.#projectEventWakeup,
     });
     const gitUploadPackRoutes = new GitUploadPackRoutes({
@@ -454,22 +598,25 @@ class CloudApplication implements Application {
       maximumRequestBytes: options.config.repository.outputMaxBytes,
       maximumResponseBytes: options.config.developmentBootstrap.maxRepositoryBytes,
       operationTimeoutMs: options.config.repository.operationTimeoutMs,
-      principalAdapter,
+      ...principalBinding,
     });
     const gitReceivePackRoutes = new GitReceivePackRoutes({
       authority: this.#projectPersonalRefAuthority,
       maximumRequestBytes: COLLAB_CLOUD_BINDING_LIMITS.maxGitReceivePackBytes,
       maximumResponseBytes: options.config.repository.outputMaxBytes,
       operationTimeoutMs: options.config.repository.operationTimeoutMs,
-      principalAdapter,
+      ...principalBinding,
     });
     this.#httpServer = new HttpServer({
       config: options.config.http,
       isReady: () => this.#state === 'ready',
       routes: [
         capabilitiesRoute,
-        bootstrapRoutes,
+        ...(bootstrapRoutes === undefined ? [] : [bootstrapRoutes]),
         projectSnapshotRoutes,
+        ...(cloudProjectMembershipRoutes === undefined
+          ? []
+          : [cloudProjectMembershipRoutes]),
         projectCollaborationRoutes,
         ...(projectLifecycleRoutes === undefined ? [] : [projectLifecycleRoutes]),
         ...(authorityTransferArtifactRoutes === undefined
@@ -526,6 +673,7 @@ class CloudApplication implements Application {
       await this.#recoveryCoordinator.recoverAll();
       await this.#lifecycle?.reconcileAll();
       await this.#bootstrapExpiryReconciler.reconcileAll();
+      await this.#membershipExpiryReconciler.reconcileAll();
       phase = 'keyring';
       await this.#activeKeyReferences?.verifyAll(
         this.#startupController.signal,
@@ -541,6 +689,7 @@ class CloudApplication implements Application {
       this.#address = address;
       this.#state = 'ready';
       this.#bootstrapExpiryReconciler.start();
+      this.#membershipExpiryReconciler.start();
       this.#lifecycle?.start();
       this.#logger.info('server.listening', { port: address.port });
       return address;
@@ -612,6 +761,11 @@ class CloudApplication implements Application {
     const readClose = this.#projectReadAuthority.close();
     const requestClose = this.#projectRequestAuthority.close();
     const acceptClose = this.#acceptCoordinator.close();
+    const creationClose = this.#creationCoordinator.close();
+    const joinClose = this.#joinCoordinator.close();
+    const memberRemovalClose = this.#memberRemovalCoordinator.close();
+    const leaveClose = this.#leaveCoordinator.close();
+    const membershipWriteClose = this.#membershipWriteAdmission.close();
     const personalRefClose = this.#projectPersonalRefAuthority.close();
     const ticketClose = this.#projectTicketAuthority.close();
     results.push(await settleBefore(eventClose, deadline));
@@ -619,17 +773,28 @@ class CloudApplication implements Application {
     results.push(await settleBefore(readClose, deadline));
     results.push(await settleBefore(requestClose, deadline));
     results.push(await settleBefore(acceptClose, deadline));
+    results.push(await settleBefore(creationClose, deadline));
+    results.push(await settleBefore(joinClose, deadline));
+    results.push(await settleBefore(memberRemovalClose, deadline));
+    results.push(await settleBefore(leaveClose, deadline));
+    results.push(await settleBefore(membershipWriteClose, deadline));
     results.push(await settleBefore(personalRefClose, deadline));
     results.push(await settleBefore(ticketClose, deadline));
     results.push(await settleBefore(httpClose, deadline));
     results.push(await settleBefore(lifecycleClose, deadline));
     results.push(await settleBefore(this.#bootstrapExpiryReconciler.close(), deadline));
+    results.push(await settleBefore(this.#membershipExpiryReconciler.close(), deadline));
     results.push(await settleBefore(this.#activationCoordinator.close(), deadline));
+    results.push(await settleBefore(
+      this.#membershipRepositoryMaintenance.close(),
+      deadline,
+    ));
     results.push(await settleBefore(this.#bundleImporter.close(), deadline));
     results.push(await settleBefore(this.#bootstrapUploadAdmission.close(), deadline));
     this.#repositoryPublication.close();
     results.push(await settleBefore(this.#bootstrapRepositoryIntegrity.close(), deadline));
     results.push(await settleBefore(this.#repositoryAuthority.close(), deadline));
+    results.push(await settleBefore(this.#emptyProjectRepository.close(), deadline));
     results.push(await settleBefore(this.#resourceAdmission.close(), deadline));
     results.push(await settleBefore(this.#coordination.close(), deadline));
 

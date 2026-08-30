@@ -14,6 +14,7 @@ import type {
 } from '../../coordination/ProjectCoordination.js';
 import { CoordinationError } from '../../coordination/CoordinationError.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import { resolvePrincipalMember } from './resolvePrincipalMember.js';
 import type { RepositoryPlacementLease } from '../../repositories/RepositoryPlacement.js';
 
 export type ProjectWriteAdmissionErrorCode =
@@ -228,12 +229,14 @@ export class ProjectWriteAdmission {
           return Object.freeze({
             accept: await scope.accept.getNonterminal(),
             bootstrap: await scope.getNonterminalDevelopmentBootstrapAttempt(),
+            join: await scope.membership.getNonterminalJoin(),
             lifecycle,
           });
         });
         if (
           recoveryState.bootstrap !== undefined
           || recoveryState.accept !== undefined
+          || recoveryState.join !== undefined
           || recoveryState.lifecycle !== undefined
         ) {
           if (
@@ -249,7 +252,7 @@ export class ProjectWriteAdmission {
             scope => this.#authorize(scope, principal, projectId),
           );
           const write = Object.freeze({
-            actorId: principal.actorId,
+            actorId: principal.principalId,
             expectedMainOid: facts.expectedMainOid,
             memberId: facts.memberId,
             membershipRevision: facts.membershipRevision,
@@ -350,10 +353,13 @@ export class ProjectWriteAdmission {
   }
 
   async #authorizeMember(
-    scope: Pick<ProjectReadScope, 'findDevelopmentActorMember' | 'findMembership'>,
+    scope: Pick<
+      ProjectReadScope,
+      'findDevelopmentActorMember' | 'findMembership' | 'findPrincipalMember'
+    >,
     principal: IngressPrincipal,
   ): Promise<AuthorizedMemberFacts> {
-    const memberId = await scope.findDevelopmentActorMember(principal.actorId);
+    const memberId = await resolvePrincipalMember(scope, principal);
     if (memberId === undefined) return fail('authorization-denied');
     const membership = await scope.findMembership(memberId);
     if (membership?.status !== 'active') return fail('authorization-denied');
@@ -375,6 +381,7 @@ export class ProjectWriteAdmission {
     const accept = await scope.accept.getNonterminal();
     if (
       await scope.getNonterminalDevelopmentBootstrapAttempt() !== undefined
+      || await scope.membership.getNonterminalJoin() !== undefined
       || (
         accept !== undefined
         && accept.operationId !== acceptOperationId

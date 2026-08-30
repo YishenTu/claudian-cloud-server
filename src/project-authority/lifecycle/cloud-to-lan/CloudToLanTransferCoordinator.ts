@@ -1357,6 +1357,10 @@ implements ProjectLifecycleRecoveryOwner {
         project?.serviceState !== 'read-only-transition'
         || project.authorityGeneration !== exact.journal.expectedAuthorityGeneration
       ) return fail('state-conflict');
+      await scope.membership.relinquishCloudMembershipAuthorities({
+        relinquishedAt: persistedProof.committedAt,
+        retainedOutgoingTransferId: exact.recovery.transferId,
+      });
       await scope.portability.advanceAuthorityTransferRecoveryEvidence({
         expectedUpdatedAt: exact.recovery.updatedAt,
         relinquishmentProof: persistedProof,

@@ -11,6 +11,7 @@ import type {
   ProjectReadScope,
 } from '../../coordination/ProjectCoordination.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import { resolvePrincipalMember } from './resolvePrincipalMember.js';
 import type { RepositoryPlacementLease } from '../../repositories/RepositoryPlacement.js';
 
 export type ProjectCollaborationReadAdmissionErrorCode =
@@ -187,11 +188,17 @@ export class ProjectCollaborationReadAdmission {
     principal: IngressPrincipal,
     projectId: CollabProjectId,
   ): Promise<AuthorizedFacts> {
-    const memberId = await scope.findDevelopmentActorMember(principal.actorId);
+    const memberId = await resolvePrincipalMember(scope, principal);
     if (memberId === undefined) return fail('authorization-denied');
     const membership = await scope.findMembership(memberId);
     if (membership?.status !== 'active') return fail('authorization-denied');
     if (await scope.getNonterminalDevelopmentBootstrapAttempt() !== undefined) {
+      return fail('recovery-required');
+    }
+    if (await scope.membership.getNonterminalJoin() !== undefined) {
+      return fail('recovery-required');
+    }
+    if (await scope.portability.getNonterminalLifecycleJournal() !== undefined) {
       return fail('recovery-required');
     }
     const project = await scope.getProject();

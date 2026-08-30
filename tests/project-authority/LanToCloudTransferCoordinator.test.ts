@@ -16,6 +16,7 @@ import {
 } from '@claudian-collab/protocol';
 
 import { CoordinationError } from '../../src/coordination/CoordinationError.js';
+import type { EffectiveTransferredMembershipClaim } from '../../src/coordination/ProjectMembershipPersistence.js';
 import type {
   AdvanceProjectLifecycleJournalInput,
   AuthorityTransferRecoveryEvidenceInput,
@@ -380,8 +381,10 @@ class MemoryCoordination {
   closeCalls = 0;
   projectScopeBarrier: Promise<void> | undefined;
   projectScopeSignal: AbortSignal | undefined;
+  projectServiceStateOverride: 'active' | 'deleting' | undefined;
   readonly portability = new MemoryPortability();
   readonly members: readonly ProjectMembershipRecord[];
+  effectiveClaimOverride: EffectiveTransferredMembershipClaim | undefined;
   failMembershipEnumeration = false;
   targetOccupied = false;
 
@@ -393,6 +396,25 @@ class MemoryCoordination {
       role: index === 0 ? 'manager' as const : 'member' as const,
       status: 'active' as const,
     })));
+  }
+
+  installClaimOverride(claim: string): void {
+    const original = this.portability.claims.get(OFFLINE_MEMBER_ID);
+    assert.ok(original);
+    this.effectiveClaimOverride = Object.freeze({
+      checkpointSha256: original.checkpointSha256,
+      claimGeneration: 1,
+      claimSha256: sha256(claim),
+      expiresAt: EXPIRES_AT,
+      kind: 'override',
+      memberId: OFFLINE_MEMBER_ID,
+      operationIntentId: null,
+      redemptionReceiptId: null,
+      state: 'active',
+      targetPrincipalId: null,
+      transferId: TRANSFER_ID,
+      updatedAt: CREATED_AT,
+    });
   }
 
   async acquireProjectLease(
@@ -417,6 +439,42 @@ class MemoryCoordination {
     const scope = {
       accept: undefined as never,
       collaboration: undefined as never,
+      ...(this.effectiveClaimOverride === undefined ? {} : {
+        membership: {
+          resolveEffectiveTransferredMembershipClaim: (
+            transferId: string,
+            claimSha256: string,
+          ) => Promise.resolve(
+            this.effectiveClaimOverride?.transferId === transferId
+              && this.effectiveClaimOverride.claimSha256 === claimSha256
+              ? this.effectiveClaimOverride
+              : undefined,
+          ),
+          redeemTransferredMembershipClaimOverride: (input: {
+            operationIntentId: string;
+            receipt: CollabTransferredMembershipRedemptionReceipt;
+            targetPrincipalId: string;
+            updatedAt: string;
+          }) => {
+            const current = this.effectiveClaimOverride;
+            assert.ok(current);
+            this.effectiveClaimOverride = Object.freeze({
+              ...current,
+              operationIntentId: input.operationIntentId,
+              redemptionReceiptId: input.receipt.receiptId,
+              state: 'redeemed',
+              targetPrincipalId: input.targetPrincipalId,
+              updatedAt: input.updatedAt,
+            });
+            this.portability.bind(
+              input.targetPrincipalId,
+              current.memberId,
+              input.updatedAt,
+            );
+            return Promise.resolve(input.receipt);
+          },
+        },
+      }),
       portability: this.portability as unknown as PortabilityLifecyclePersistence,
       getProject: () => Promise.resolve(this.targetOccupied || this.portability.staged
         ? Object.freeze({
@@ -428,7 +486,10 @@ class MemoryCoordination {
         managerSetGeneration: 1,
         projectId: PROJECT_ID,
         projectName: this.portability.staged ? 'Project A' : 'Existing Project',
-        serviceState: this.portability.staged ? 'maintenance' as const : 'active' as const,
+        serviceState: this.projectServiceStateOverride
+          ?? (this.portability.journal?.phase === 'completed'
+            ? 'active' as const
+            : this.portability.staged ? 'maintenance' as const : 'active' as const),
       }) : undefined),
       listMemberships: () => this.failMembershipEnumeration
         ? Promise.reject(new Error('membership-enumeration-not-allowed'))
@@ -1164,6 +1225,17 @@ describe('LanToCloudTransferCoordinator', () => {
       },
     });
     assert.deepEqual(redemptionReplay, redemption);
+    test.coordination.projectServiceStateOverride = 'deleting';
+    await assertCode(test.restart().claimMembership({
+      principalId: OFFLINE_PRINCIPAL_ID,
+      request: {
+        claim,
+        idempotencyKey: 'intent-claim',
+        projectId: PROJECT_ID,
+        transferId: TRANSFER_ID,
+      },
+    }), 'recovery-required');
+    test.coordination.projectServiceStateOverride = undefined;
     assert.equal(
       test.coordination.portability.bindings.get(OFFLINE_PRINCIPAL_ID)?.memberId,
       OFFLINE_MEMBER_ID,
@@ -1177,6 +1249,51 @@ describe('LanToCloudTransferCoordinator', () => {
         transferId: TRANSFER_ID,
       },
     }), 'authorization-denied');
+  });
+
+  it('routes claim redemption through the one effective Manager override authority', async () => {
+    const test = fixture();
+    const { batch } = await publishTransfer(test);
+    await test.coordinator.commitRelinquishment({
+      principalId: HOST_PRINCIPAL_ID,
+      request: {
+        idempotencyKey: 'intent-override-relinquish',
+        projectId: PROJECT_ID,
+        proof: relinquishmentProof(
+          batch.batchRevision,
+          batch.batchSha256,
+          batch.checkpointSha256,
+        ),
+        transferId: TRANSFER_ID,
+      },
+    });
+    const originalClaim = batch.claims[0]?.claim;
+    assert.ok(originalClaim);
+    const overrideClaim = Buffer.alloc(32, 12).toString('base64url');
+    test.coordination.installClaimOverride(overrideClaim);
+    await assertCode(test.coordinator.claimMembership({
+      principalId: OFFLINE_PRINCIPAL_ID,
+      request: {
+        claim: originalClaim,
+        idempotencyKey: 'intent-original-after-override',
+        projectId: PROJECT_ID,
+        transferId: TRANSFER_ID,
+      },
+    }), 'authorization-denied');
+    const receipt = await test.coordinator.claimMembership({
+      principalId: OFFLINE_PRINCIPAL_ID,
+      request: {
+        claim: overrideClaim,
+        idempotencyKey: 'intent-override-claim',
+        projectId: PROJECT_ID,
+        transferId: TRANSFER_ID,
+      },
+    });
+    assert.equal(receipt.claimSha256, sha256(overrideClaim));
+    assert.equal(
+      test.coordination.portability.bindings.get(OFFLINE_PRINCIPAL_ID)?.memberId,
+      OFFLINE_MEMBER_ID,
+    );
   });
 
   it('commits the canonical empty batch for a Host-only Project', async () => {

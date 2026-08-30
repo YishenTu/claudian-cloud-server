@@ -15,11 +15,11 @@ import { withPostgresTestDatabase } from '../../helpers/PostgresTestDatabase.js'
 const PROJECT_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
 describe('PostgresTerminalProjectContinuityCatalog', () => {
-  it('enumerates a schema-9 tombstone after its responder is absent', async () => {
+  it('enumerates a predecessor-schema tombstone after its responder is absent', async () => {
     await withPostgresTestDatabase(async database => {
       await new PostgresMigrator({
         connectionString: database.migrationUrl,
-      }).applyThrough(9);
+      }).applyThrough(10);
       const seed = new Client({ connectionString: database.migrationUrl });
       try {
         await seed.connect();
@@ -63,7 +63,7 @@ describe('PostgresTerminalProjectContinuityCatalog', () => {
       const catalog = new PostgresTerminalProjectContinuityCatalog({
         connectionString: database.migrationUrl,
         expectedAuthorityVolumeId: database.authorityVolumeId,
-        expectedSchemaVersion: 9,
+        expectedSchemaVersion: 10,
       });
       assert.deepEqual(await catalog.list({
         limit: 100,
@@ -83,14 +83,10 @@ describe('PostgresTerminalProjectContinuityCatalog', () => {
       });
       let records: readonly TerminalProjectContinuityRecord[] = [];
       try {
-        await assert.rejects(
-          coordination.listTerminalProjectContinuity(),
-          error => {
-            assert.ok(error instanceof Error);
-            assert.equal(error.message, 'coordination.error.schema-incompatible');
-            return true;
-          },
-        );
+        assert.deepEqual(await coordination.listTerminalProjectContinuity(), {
+          nextCursor: undefined,
+          projectIds: [PROJECT_ID],
+        });
         const lease = await coordination.acquireProjectLease(PROJECT_ID);
         try {
           records = await lease.withProjectScope(scope => (
@@ -115,12 +111,12 @@ describe('PostgresTerminalProjectContinuityCatalog', () => {
           connectionString: target.migrationUrl,
         });
         const signal = new AbortController().signal;
-        const operationId = 'restore-schema-nine-terminal';
+        const operationId = 'restore-predecessor-terminal';
         await restore.createDatabase({
           authorityId: 'authority-source',
           authorityVolumeId: target.authorityVolumeId,
           authorityVolumeIdentity: 'authority-volume-target',
-          coordinationSchemaVersion: 9,
+          coordinationSchemaVersion: 10,
           operationId,
           restoreEpoch: 2,
           signal,
@@ -136,7 +132,7 @@ describe('PostgresTerminalProjectContinuityCatalog', () => {
           catalog: {
             authorityId: 'authority-source',
             authorityVolumeIdentity: 'authority-volume-source',
-            coordinationSchemaVersion: 9,
+            coordinationSchemaVersion: 10,
             createdAt: '2026-08-29T00:00:00.000Z',
             maximumServerBuild: 'cloud-build-one',
             minimumServerBuild: 'cloud-build-one',
@@ -159,19 +155,19 @@ describe('PostgresTerminalProjectContinuityCatalog', () => {
     });
   });
 
-  it('rejects a migration credential for another schema-9 authority', async () => {
+  it('rejects a migration credential for another predecessor authority', async () => {
     await withPostgresTestDatabase(async authority => {
       await new PostgresMigrator({
         connectionString: authority.migrationUrl,
-      }).applyThrough(9);
+      }).applyThrough(10);
       await withPostgresTestDatabase(async foreign => {
         await new PostgresMigrator({
           connectionString: foreign.migrationUrl,
-        }).applyThrough(9);
+        }).applyThrough(10);
         const catalog = new PostgresTerminalProjectContinuityCatalog({
           connectionString: foreign.migrationUrl,
           expectedAuthorityVolumeId: authority.authorityVolumeId,
-          expectedSchemaVersion: 9,
+          expectedSchemaVersion: 10,
         });
 
         await assert.rejects(catalog.list({

@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto';
 
 import {
+  CollabError,
+  collabControlOperationCodec,
   collabMemberRef,
-  isCollabGitOid,
-  isCollabOpaqueId,
-  isCollabProjectId,
   type CollabIsoTimestamp,
   type CollabMemberId,
   type CollabProjectId,
+  type LeaveProjectRequest,
+  type LeaveProjectResponse,
 } from '@claudian-collab/protocol';
 
 import { CoordinationError } from '../../../coordination/CoordinationError.js';
@@ -15,7 +16,22 @@ import type {
   LeaveFormerPrincipalReplayRecord,
   ProjectLifecycleJournalRecord,
 } from '../../../coordination/PortabilityLifecyclePersistence.js';
-import type { PinnedProjectLease } from '../../../coordination/ProjectCoordination.js';
+import type {
+  AcquireProjectLeaseOptions,
+  PinnedProjectLease,
+  ProjectMembershipRecord,
+  ProjectScope,
+} from '../../../coordination/ProjectCoordination.js';
+import type { IngressPrincipal } from '../../../request-context/IngressPrincipal.js';
+import {
+  OperationDrain,
+  OperationDrainClosedError,
+} from '../../OperationDrain.js';
+import {
+  ProjectRecoveryError,
+  type ProjectRecoveryPort,
+} from '../../admission/ProjectWriteAdmission.js';
+import { hasNonterminalProjectMutation } from '../../admission/hasNonterminalProjectMutation.js';
 import {
   RepositoryCheckpointError,
   type ExactPersonalRefPort,
@@ -47,23 +63,13 @@ export class LeaveCoordinatorError extends Error {
   }
 }
 
-export interface LeaveProjectRequest {
-  readonly expectedPersonalRefOid: string;
-  readonly idempotencyKey: string;
-  readonly projectId: CollabProjectId;
-}
-
-export interface LeaveProjectResult {
-  readonly kind: 'member-left';
-  readonly leftAt: CollabIsoTimestamp;
-  readonly memberId: CollabMemberId;
-  readonly projectId: CollabProjectId;
-}
-
 export interface LeaveCoordinatorOptions {
   readonly clock?: () => Date;
   readonly coordination: Readonly<{
-    acquireProjectLease(projectId: CollabProjectId): Promise<PinnedProjectLease>;
+    acquireProjectLease(
+      projectId: CollabProjectId,
+      options?: AcquireProjectLeaseOptions,
+    ): Promise<PinnedProjectLease>;
   }>;
   readonly repository: ExactPersonalRefPort;
 }
@@ -88,20 +94,21 @@ function operationId(
 }
 
 function canonicalRequest(request: LeaveProjectRequest): LeaveProjectRequest {
-  if (
-    !isCollabProjectId(request.projectId)
-    || !isCollabOpaqueId(request.idempotencyKey)
-    || !isCollabGitOid(request.expectedPersonalRefOid)
-  ) return fail('state-conflict');
-  return Object.freeze({
-    expectedPersonalRefOid: request.expectedPersonalRefOid,
-    idempotencyKey: request.idempotencyKey,
-    projectId: request.projectId,
-  });
+  const decoded = collabControlOperationCodec('leaveProject').decodeRequest(request);
+  if (decoded.status !== 'ok') throw decoded.error;
+  return decoded.value;
 }
 
 function requestFingerprint(request: LeaveProjectRequest): string {
-  return sha256(JSON.stringify(request));
+  return sha256(JSON.stringify({
+    expectedManagerSetGeneration: request.expectedManagerSetGeneration,
+    expectedMembershipRevision: request.expectedMembershipRevision,
+    expectedOfferRevision: request.expectedOfferRevision,
+    expectedPersonalRefOid: request.expectedPersonalRefOid,
+    idempotencyKey: request.idempotencyKey,
+    managerResponsibilityOfferId: request.managerResponsibilityOfferId,
+    projectId: request.projectId,
+  }));
 }
 
 function timestamp(clock: () => Date, after?: CollabIsoTimestamp): CollabIsoTimestamp {
@@ -114,18 +121,49 @@ function timestamp(clock: () => Date, after?: CollabIsoTimestamp): CollabIsoTime
 }
 
 function resultFor(
-  projectId: CollabProjectId,
   replay: LeaveFormerPrincipalReplayRecord,
-): LeaveProjectResult {
-  return Object.freeze({
-    kind: 'member-left',
-    leftAt: replay.createdAt,
-    memberId: replay.memberId,
-    projectId,
+): LeaveProjectResponse {
+  return replay.response;
+}
+
+function publicFailure(error: unknown): never {
+  if (error instanceof CollabError) throw error;
+  if (error instanceof LeaveCoordinatorError) {
+    if (error.code === 'authorization-denied') {
+      throw new CollabError({
+        code: 'authorization-denied',
+        safeContext: { reason: 'leave-project-denied' },
+      });
+    }
+    if (
+      error.code === 'manager-succession-required'
+      || error.code === 'state-conflict'
+      || error.code === 'recovery-required'
+    ) {
+      throw new CollabError({
+        code: 'authority-not-synchronized',
+        safeContext: { reason: 'leave-project-expected-state' },
+      });
+    }
+  }
+  if (error instanceof RepositoryCheckpointError && (
+    error.code === 'repository-invalid'
+    || error.code === 'placement-rejected'
+  )) {
+    throw new CollabError({
+      code: 'personal-ref-diverged',
+      safeContext: { reason: 'leave-project-personal-ref' },
+    });
+  }
+  throw new CollabError({
+    code: 'operation-failed',
+    recoveryActions: ['retry'],
+    safeContext: { reason: 'leave-project-unavailable' },
   });
 }
 
 function mapDependency(error: unknown): never {
+  if (error instanceof OperationDrainClosedError) return fail('closed');
   if (error instanceof LeaveCoordinatorError) throw error;
   if (error instanceof CoordinationError) {
     if (error.code === 'closed') return fail('closed');
@@ -142,11 +180,12 @@ function mapDependency(error: unknown): never {
   return fail('dependency-failed');
 }
 
-export class LeaveCoordinator implements ProjectLifecycleRecoveryOwner {
+export class LeaveCoordinator
+implements ProjectLifecycleRecoveryOwner, ProjectRecoveryPort {
   readonly #clock: () => Date;
   readonly #coordination: LeaveCoordinatorOptions['coordination'];
+  readonly #operations = new OperationDrain();
   readonly #repository: ExactPersonalRefPort;
-  #closed = false;
 
   constructor(options: LeaveCoordinatorOptions) {
     this.#clock = options.clock ?? (() => new Date());
@@ -154,43 +193,106 @@ export class LeaveCoordinator implements ProjectLifecycleRecoveryOwner {
     this.#repository = options.repository;
   }
 
-  close(): void {
-    this.#closed = true;
+  close(): Promise<void> {
+    return this.#operations.close();
   }
 
   reserveRecovery(
     projectId: CollabProjectId,
   ): Promise<ExactRepositoryOperationReservation> {
-    if (this.#closed) return Promise.reject(new LeaveCoordinatorError('closed'));
+    if (this.#operations.closed) {
+      return Promise.reject(new LeaveCoordinatorError('closed'));
+    }
     return this.#repository.reserveExactRepositoryOperation(projectId);
   }
 
-  async leave(input: Readonly<{
-    readonly principalId: string;
-    readonly request: LeaveProjectRequest;
-  }>): Promise<LeaveProjectResult> {
-    if (this.#closed) return fail('closed');
-    if (!PRINCIPAL_PATTERN.test(input.principalId)) return fail('authorization-denied');
-    const request = canonicalRequest(input.request);
+  recoverProject(projectId: CollabProjectId): Promise<void> {
+    return this.#operations.run({}, signal => this.#recoverProject(
+      projectId,
+      signal,
+    )).catch((error: unknown) => {
+      if (error instanceof OperationDrainClosedError) {
+        throw new ProjectRecoveryError('closed');
+      }
+      throw error;
+    });
+  }
+
+  async #recoverProject(projectId: CollabProjectId, signal: AbortSignal): Promise<void> {
+    let reservation: ExactRepositoryOperationReservation | undefined;
+    let lease: PinnedProjectLease | undefined;
+    try {
+      reservation = await this.#repository.reserveExactRepositoryOperation(
+        projectId,
+        signal,
+      );
+      lease = await this.#coordination.acquireProjectLease(projectId, { signal });
+      const journal = await lease.withProjectScope(scope => (
+        scope.portability.getNonterminalLifecycleJournal()
+      ));
+      if (journal?.kind !== 'leave') return;
+      await this.#recover({
+        journal,
+        lease,
+        repositoryReservation: reservation,
+      }, signal);
+    } catch (error: unknown) {
+      if (error instanceof ProjectRecoveryError) throw error;
+      throw new ProjectRecoveryError(
+        error instanceof LeaveCoordinatorError && error.code === 'closed'
+          ? 'closed'
+          : 'recovery-required',
+      );
+    } finally {
+      await lease?.close().catch(() => undefined);
+      await reservation?.close().catch(() => undefined);
+    }
+  }
+
+  leave(
+    principal: IngressPrincipal,
+    input: LeaveProjectRequest,
+    options: Readonly<{ readonly signal?: AbortSignal }> = {},
+  ): Promise<LeaveProjectResponse> {
+    return this.#operations.run(options, signal => this.#leave(
+      principal,
+      input,
+      { signal },
+    )).catch(publicFailure);
+  }
+
+  async #leave(
+    principal: IngressPrincipal,
+    input: LeaveProjectRequest,
+    options: Readonly<{ readonly signal: AbortSignal }>,
+  ): Promise<LeaveProjectResponse> {
+    if (!PRINCIPAL_PATTERN.test(principal.principalId)) {
+      return publicFailure(new LeaveCoordinatorError('authorization-denied'));
+    }
+    const request = canonicalRequest(input);
     const fingerprint = requestFingerprint(request);
     let reservation: ExactRepositoryOperationReservation;
     let lease: PinnedProjectLease;
     try {
       reservation = await this.#repository.reserveExactRepositoryOperation(
         request.projectId,
+        options.signal,
       );
     } catch (error: unknown) {
-      return mapDependency(error);
+      return publicFailure(error);
     }
     try {
-      lease = await this.#coordination.acquireProjectLease(request.projectId);
+      lease = await this.#coordination.acquireProjectLease(
+        request.projectId,
+        { signal: options.signal },
+      );
     } catch (error: unknown) {
       await reservation.close().catch(() => undefined);
-      return mapDependency(error);
+      return publicFailure(error);
     }
     try {
       const callerBinding = await lease.withProjectScope(scope => (
-        scope.portability.findProjectPrincipalBinding(input.principalId)
+        scope.portability.findProjectPrincipalBinding(principal.principalId)
       ));
       if (callerBinding === undefined) return fail('authorization-denied');
       const leaveOperationId = operationId(
@@ -202,9 +304,13 @@ export class LeaveCoordinator implements ProjectLifecycleRecoveryOwner {
         scope.portability.getLifecycleJournal(leaveOperationId)
       ));
       if (journal === undefined) {
+        if (await lease.withProjectScope(hasNonterminalProjectMutation, options)) {
+          return fail('recovery-required');
+        }
+        const preparedAt = timestamp(this.#clock);
         const preparation = await lease.withProjectScope(async scope => {
           const binding = await scope.portability.findProjectPrincipalBinding(
-            input.principalId,
+            principal.principalId,
           );
           if (binding?.state !== 'active') return fail('authorization-denied');
           const membership = await scope.findMembership(binding.memberId);
@@ -214,13 +320,10 @@ export class LeaveCoordinator implements ProjectLifecycleRecoveryOwner {
             membership?.status !== 'active'
             || placement?.active !== true
             || project?.serviceState !== 'active'
-          ) return fail('authorization-denied');
-          if (membership.role === 'manager') {
-            const memberships = await scope.listMemberships();
-            if (memberships.filter(value => (
-              value.status === 'active' && value.role === 'manager'
-            )).length <= 1) return fail('manager-succession-required');
-          }
+            || membership.revision !== BigInt(request.expectedMembershipRevision)
+            || project.managerSetGeneration !== request.expectedManagerSetGeneration
+          ) return fail('state-conflict');
+          await this.#validateSuccession(scope, membership, request, preparedAt);
           return Object.freeze({
             memberId: membership.memberId,
             membershipRevision: membership.revision,
@@ -236,7 +339,7 @@ export class LeaveCoordinator implements ProjectLifecycleRecoveryOwner {
         });
         journal = await lease.withProjectScope(async scope => {
           const binding = await scope.portability.findProjectPrincipalBinding(
-            input.principalId,
+            principal.principalId,
           );
           const membership = binding === undefined
             ? undefined
@@ -258,14 +361,11 @@ export class LeaveCoordinator implements ProjectLifecycleRecoveryOwner {
               !== preparation.projectAuthorityGeneration
             || project.authorityStateRevision
               !== preparation.projectAuthorityStateRevision
+            || project.managerSetGeneration !== request.expectedManagerSetGeneration
+            || membership.revision !== BigInt(request.expectedMembershipRevision)
           ) return fail('state-conflict');
-          if (membership.role === 'manager') {
-            const memberships = await scope.listMemberships();
-            if (memberships.filter(value => (
-              value.status === 'active' && value.role === 'manager'
-            )).length <= 1) return fail('manager-succession-required');
-          }
-          const createdAt = timestamp(this.#clock);
+          await this.#validateSuccession(scope, membership, request, preparedAt);
+          const createdAt = preparedAt;
           await scope.portability.putLifecycleJournal({
             actorMemberId: membership.memberId,
             createdAt,
@@ -280,6 +380,14 @@ export class LeaveCoordinator implements ProjectLifecycleRecoveryOwner {
             requestFingerprint: fingerprint,
             scheduledAt: createdAt,
           });
+          await scope.portability.putLeaveProjectRequestFacts({
+            expectedManagerSetGeneration: request.expectedManagerSetGeneration,
+            expectedMembershipRevision: request.expectedMembershipRevision,
+            expectedOfferRevision: request.expectedOfferRevision,
+            managerResponsibilityOfferId: request.managerResponsibilityOfferId,
+            operationId: leaveOperationId,
+            projectId: request.projectId,
+          });
           const stored = await scope.portability.getLifecycleJournal(leaveOperationId);
           if (stored === undefined) return fail('dependency-failed');
           return stored;
@@ -289,30 +397,40 @@ export class LeaveCoordinator implements ProjectLifecycleRecoveryOwner {
       await this.#authorizeCaller(
         lease,
         journal,
-        input.principalId,
+        principal.principalId,
         request,
         fingerprint,
       );
       return await this.#continue(
         lease,
         journal,
-        input.principalId,
+        principal.principalId,
         request,
         fingerprint,
         reservation,
+        options.signal,
       );
     } catch (error: unknown) {
-      return mapDependency(error);
+      return publicFailure(error);
     } finally {
       await lease.close().catch(() => undefined);
       await reservation.close().catch(() => undefined);
     }
   }
 
-  async recover(
+  recover(
     input: RecoverProjectLifecycleInput,
   ): Promise<ProjectLifecycleRecoveryOutcome> {
-    if (this.#closed) return fail('closed');
+    return this.#operations.run({}, signal => this.#recover(
+      input,
+      signal,
+    )).catch(mapDependency);
+  }
+
+  async #recover(
+    input: RecoverProjectLifecycleInput,
+    signal: AbortSignal,
+  ): Promise<ProjectLifecycleRecoveryOutcome> {
     try {
       if (input.journal.kind !== 'leave' || input.journal.actorMemberId === undefined) {
         return fail('state-conflict');
@@ -320,11 +438,19 @@ export class LeaveCoordinator implements ProjectLifecycleRecoveryOwner {
       if (input.journal.expectedPersonalRefOid === undefined) {
         return fail('recovery-required');
       }
-      const request = Object.freeze({
+      const facts = await input.lease.withProjectScope(scope => (
+        scope.portability.getLeaveProjectRequestFacts(input.journal.operationId)
+      ));
+      if (facts === undefined) return fail('recovery-required');
+      const request = canonicalRequest(Object.freeze({
+        expectedManagerSetGeneration: facts.expectedManagerSetGeneration,
+        expectedMembershipRevision: facts.expectedMembershipRevision,
+        expectedOfferRevision: facts.expectedOfferRevision,
         expectedPersonalRefOid: input.journal.expectedPersonalRefOid,
         idempotencyKey: input.journal.idempotencyKey,
+        managerResponsibilityOfferId: facts.managerResponsibilityOfferId,
         projectId: input.journal.projectId,
-      });
+      }));
       if (requestFingerprint(request) !== input.journal.requestFingerprint) {
         return fail('recovery-required');
       }
@@ -337,11 +463,55 @@ export class LeaveCoordinator implements ProjectLifecycleRecoveryOwner {
         request,
         input.journal.requestFingerprint,
         reservation as ExactRepositoryOperationReservation,
+        signal,
       );
       return 'settled';
     } catch (error: unknown) {
       return mapDependency(error);
     }
+  }
+
+  async #validateSuccession(
+    scope: ProjectScope,
+    membership: ProjectMembershipRecord,
+    request: LeaveProjectRequest,
+    now: string,
+  ): Promise<void> {
+    const memberships = await scope.listMemberships();
+    const activeManagerCount = memberships.filter(value => (
+      value.status === 'active' && value.role === 'manager'
+    )).length;
+    if (membership.role !== 'manager' || activeManagerCount > 1) {
+      if (
+        request.managerResponsibilityOfferId !== null
+        || request.expectedOfferRevision !== null
+      ) return fail('state-conflict');
+      return;
+    }
+    if (
+      activeManagerCount !== 1
+      || request.managerResponsibilityOfferId === null
+    ) return fail('manager-succession-required');
+    const offer = await scope.membership.getManagerResponsibilityOffer({
+      actorMemberId: membership.memberId,
+      actorRole: 'manager',
+      now,
+      offerId: request.managerResponsibilityOfferId,
+    });
+    if (
+      offer === undefined
+      || offer.sourceManagerMemberId !== membership.memberId
+      || offer.purpose !== 'manager-leave'
+      || offer.state !== 'acknowledged'
+      || offer.revision !== request.expectedOfferRevision
+      || offer.managerSetGenerationAtOffer !== request.expectedManagerSetGeneration
+    ) return fail('manager-succession-required');
+    const successor = await scope.findMembership(offer.targetMemberId);
+    if (
+      successor?.status !== 'active'
+      || successor.role !== 'member'
+      || successor.revision !== BigInt(offer.targetMembershipRevisionAtOffer)
+    ) return fail('manager-succession-required');
   }
 
   async #continue(
@@ -351,7 +521,8 @@ export class LeaveCoordinator implements ProjectLifecycleRecoveryOwner {
     request: LeaveProjectRequest,
     fingerprint: string,
     reservation: ExactRepositoryOperationReservation,
-  ): Promise<LeaveProjectResult> {
+    signal?: AbortSignal,
+  ): Promise<LeaveProjectResponse> {
     if (initial.actorMemberId === undefined) return fail('recovery-required');
     let journal = initial;
     if (journal.state === 'completed' && journal.phase === 'completed') {
@@ -360,7 +531,7 @@ export class LeaveCoordinator implements ProjectLifecycleRecoveryOwner {
         : await this.#authorizedReplay(
             lease, journal, principalId, request, fingerprint,
           );
-      return resultFor(request.projectId, replay);
+      return resultFor(replay);
     }
     if (
       journal.state === 'cancelled'
@@ -378,6 +549,7 @@ export class LeaveCoordinator implements ProjectLifecycleRecoveryOwner {
         expectedOid: request.expectedPersonalRefOid,
         personalRef: collabMemberRef(leavingMemberId),
         placement,
+        ...(signal === undefined ? {} : { signal }),
       });
       await lease.withProjectScope(async scope => {
         const membership = await scope.findMembership(journal.actorMemberId as CollabMemberId);
@@ -390,21 +562,21 @@ export class LeaveCoordinator implements ProjectLifecycleRecoveryOwner {
           ))?.principalId;
           if (exactPrincipalId === undefined) return fail('recovery-required');
         }
-        const leftAt = timestamp(this.#clock, journal.updatedAt);
+        const leftAt = journal.scheduledAt;
         const settlement = await scope.portability.settleLeaveMembership({
-          expectedMembershipRevision: membership.revision,
+          expectedManagerSetGeneration: request.expectedManagerSetGeneration,
+          expectedMembershipRevision: BigInt(request.expectedMembershipRevision),
+          expectedOfferRevision: request.expectedOfferRevision,
           leftAt,
+          managerResponsibilityOfferId: request.managerResponsibilityOfferId,
           memberId: membership.memberId,
           operationId: journal.operationId,
         });
-        if (settlement === 'last-manager') {
-          await scope.portability.advanceLifecycleJournal({
-            expectedPhase: 'prepared', expectedState: 'active',
-            nextPhase: 'manager-succession-required', nextState: 'cancelled',
-            operationId: journal.operationId, scheduledAt: journal.scheduledAt,
-            updatedAt: leftAt,
-          });
-          return fail('manager-succession-required');
+        if (settlement.status === 'last-manager') {
+          return fail('recovery-required');
+        }
+        if (settlement.status === 'stale' || settlement.response === undefined) {
+          return fail('state-conflict');
         }
         await scope.portability.putLeaveFormerPrincipalReplay({
           createdAt: leftAt,
@@ -415,12 +587,20 @@ export class LeaveCoordinator implements ProjectLifecycleRecoveryOwner {
           operationId: journal.operationId,
           principalId: exactPrincipalId,
           requestFingerprint: fingerprint,
+          response: settlement.response,
         });
         await scope.appendProjectEvent({
           kind: 'membership.updated',
           occurredAt: leftAt,
           payload: { memberId: membership.memberId },
         });
+        if (settlement.response.promotedSuccessorMemberId !== null) {
+          await scope.appendProjectEvent({
+            kind: 'membership.updated',
+            occurredAt: leftAt,
+            payload: { memberId: settlement.response.promotedSuccessorMemberId },
+          });
+        }
         await scope.portability.advanceLifecycleJournal({
           expectedPhase: 'prepared', expectedState: 'active',
           nextPhase: 'membership-left', nextState: 'active',
@@ -442,6 +622,7 @@ export class LeaveCoordinator implements ProjectLifecycleRecoveryOwner {
           expectedOid: request.expectedPersonalRefOid,
           personalRef: collabMemberRef(leavingMemberId),
           placement,
+          ...(signal === undefined ? {} : { signal }),
         });
       } catch (error: unknown) {
         if (
@@ -475,7 +656,7 @@ export class LeaveCoordinator implements ProjectLifecycleRecoveryOwner {
         : await this.#authorizedReplay(
             lease, journal, principalId, request, fingerprint,
           );
-      const result = resultFor(request.projectId, replay);
+      const result = resultFor(replay);
       const digest = sha256(JSON.stringify(result));
       const completedAt = timestamp(this.#clock, journal.updatedAt);
       await lease.withProjectScope(async scope => {

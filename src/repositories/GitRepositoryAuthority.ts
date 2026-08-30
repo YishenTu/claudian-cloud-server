@@ -37,6 +37,11 @@ import {
   type ProjectAcceptRepositoryReservation,
   type ProjectAcceptResultPlan,
 } from '../project-authority/acceptance/ProjectAcceptRepository.js';
+import type {
+  ProjectMembershipRefInput,
+  ProjectMembershipRepository,
+  ProjectMembershipRepositoryReservation,
+} from '../project-authority/membership/ProjectMembershipRepository.js';
 import {
   GitReceivePackPolicy,
   GitReceivePackPolicyError,
@@ -418,6 +423,13 @@ interface AcceptReservationState {
   readonly projectId: CollabProjectId;
 }
 
+interface MembershipRefReservationState {
+  active: boolean;
+  readonly child: GitChildPermit;
+  inUse: boolean;
+  readonly projectId: CollabProjectId;
+}
+
 const RECEIVE_POLICY_METADATA_MAX_BYTES = 48 * 1_024 * 1_024;
 const ACCEPT_TREE_OUTPUT_MAX_BYTES = 112 * 1_024 * 1_024;
 const ACCEPT_MAX_EXPANDED_TREE_ENTRIES = 100_000;
@@ -524,13 +536,21 @@ class AcceptTreePolicyParser {
   }
 }
 
-export class GitRepositoryAuthority implements ProjectAcceptRepository {
+export class GitRepositoryAuthority
+implements ProjectAcceptRepository, ProjectMembershipRepository {
   readonly #acceptReservations = new WeakMap<
     ProjectAcceptRepositoryReservation,
     AcceptReservationState
   >();
   readonly #activeAcceptReservations = new Set<AcceptReservationState>();
+  readonly #activeMembershipRefReservations = new Set<
+    MembershipRefReservationState
+  >();
   readonly #activeReceiveReservations = new Set<ReceiveReservationState>();
+  readonly #membershipRefReservations = new WeakMap<
+    ProjectMembershipRepositoryReservation,
+    MembershipRefReservationState
+  >();
   readonly #pathPolicy: RepositoryPathPolicy;
   readonly #receiveAdmission: GitReceiveAdmission | undefined;
   readonly #receivePolicy: GitReceivePackPolicy | undefined;
@@ -587,6 +607,11 @@ export class GitRepositoryAuthority implements ProjectAcceptRepository {
         state.child.release();
       }
       this.#activeAcceptReservations.clear();
+      for (const state of this.#activeMembershipRefReservations) {
+        state.active = false;
+        state.child.release();
+      }
+      this.#activeMembershipRefReservations.clear();
       this.#closePromise = Promise.allSettled([
         this.#supervisor.close(),
         this.#receiveAdmission?.close() ?? Promise.resolve(),
@@ -612,6 +637,96 @@ export class GitRepositoryAuthority implements ProjectAcceptRepository {
       throw new GitRepositoryError('git-unavailable');
     }
     return Object.freeze({ status: 'supported' as const });
+  }
+
+  createMemberPersonalRef(
+    reservation: ProjectMembershipRepositoryReservation,
+    input: ProjectMembershipRefInput,
+  ): Promise<'created' | 'replayed'> {
+    return this.#runMembershipRefOperation(
+      reservation,
+      input,
+      async (repositoryPath, before) => {
+      if (before.get(COLLAB_MAIN_REF) !== input.expectedOid) {
+        throw new GitRepositoryError('repository-corrupt');
+      }
+      const existing = before.get(input.personalRef);
+      if (existing !== undefined) {
+        if (existing !== input.expectedOid) {
+          throw new GitRepositoryError('repository-corrupt');
+        }
+        return 'replayed';
+      }
+      await this.#assertCommit(repositoryPath, input.expectedOid, input.signal);
+      try {
+        await this.#supervisor.runCommand({
+          arguments: [
+            'update-ref',
+            input.personalRef,
+            input.expectedOid,
+            '0'.repeat(input.expectedOid.length),
+          ],
+          captureOutput: false,
+          cwd: repositoryPath,
+          failureCode: 'repository-corrupt',
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
+        });
+      } catch (error: unknown) {
+        if (!(error instanceof GitProcessError)) throw error;
+        const raced = await this.#readRefs(repositoryPath, input.signal);
+        if (raced.get(input.personalRef) === input.expectedOid) return 'replayed';
+        throw error;
+      }
+      const after = await this.#readRefs(repositoryPath, input.signal);
+      if (
+        after.size !== before.size + 1
+        || after.get(input.personalRef) !== input.expectedOid
+        || [...before].some(([name, oid]) => after.get(name) !== oid)
+      ) throw new GitRepositoryError('repository-corrupt');
+      return 'created';
+      },
+    );
+  }
+
+  deleteMemberPersonalRef(
+    reservation: ProjectMembershipRepositoryReservation,
+    input: ProjectMembershipRefInput,
+  ): Promise<'deleted' | 'replayed'> {
+    return this.#runMembershipRefOperation(
+      reservation,
+      input,
+      async (repositoryPath, before) => {
+      if (before.get(COLLAB_MAIN_REF) === undefined) {
+        throw new GitRepositoryError('repository-corrupt');
+      }
+      const existing = before.get(input.personalRef);
+      if (existing === undefined) return 'replayed';
+      if (existing !== input.expectedOid) {
+        throw new GitRepositoryError('repository-corrupt');
+      }
+      await this.#supervisor.runCommand({
+        arguments: [
+          'update-ref',
+          '-d',
+          input.personalRef,
+          input.expectedOid,
+        ],
+        captureOutput: false,
+        cwd: repositoryPath,
+        failureCode: 'repository-corrupt',
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+      });
+      const after = await this.#readRefs(repositoryPath, input.signal);
+      if (
+        after.size !== before.size - 1
+        || after.has(input.personalRef)
+        || [...before].some(([name, oid]) => (
+          name === input.personalRef ? false : after.get(name) !== oid
+        ))
+      ) throw new GitRepositoryError('repository-corrupt');
+      return 'deleted';
+      },
+    );
   }
 
   async verifyIntegrity(
@@ -1166,6 +1281,45 @@ export class GitRepositoryAuthority implements ProjectAcceptRepository {
     return reservation;
   }
 
+  async reserveMembershipRefOperation(
+    projectId: CollabProjectId,
+    options: Readonly<{ readonly signal?: AbortSignal }> = {},
+  ): Promise<ProjectMembershipRepositoryReservation> {
+    this.#assertOpen();
+    let child: GitChildPermit;
+    try {
+      child = await this.#resourceAdmission.acquireGitChild({
+        classification: 'write',
+        projectId,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      });
+    } catch (error: unknown) {
+      if (error instanceof ResourceAdmissionError) throw mapAdmissionError(error);
+      throw new GitRepositoryError('process-failed');
+    }
+    const reservation: ProjectMembershipRepositoryReservation = Object.freeze({
+      close: (): Promise<void> => {
+        const state = this.#membershipRefReservations.get(reservation);
+        if (state?.active === true) {
+          state.active = false;
+          this.#activeMembershipRefReservations.delete(state);
+          state.child.release();
+        }
+        return Promise.resolve();
+      },
+      projectId,
+    });
+    const state: MembershipRefReservationState = {
+      active: true,
+      child,
+      inUse: false,
+      projectId,
+    };
+    this.#membershipRefReservations.set(reservation, state);
+    this.#activeMembershipRefReservations.add(state);
+    return reservation;
+  }
+
   advertiseReceivePack(
     reservation: GitReceivePackReservation,
     placement: RepositoryPlacementLease,
@@ -1528,6 +1682,55 @@ export class GitRepositoryAuthority implements ProjectAcceptRepository {
         throw new ProjectAcceptRepositoryError('unavailable');
       }
       throw new ProjectAcceptRepositoryError('unavailable');
+    } finally {
+      state.inUse = false;
+    }
+  }
+
+  async #runMembershipRefOperation<T>(
+    reservation: ProjectMembershipRepositoryReservation,
+    input: ProjectMembershipRefInput,
+    operation: (
+      repositoryPath: string,
+      refs: ReadonlyMap<string, CollabGitOid>,
+    ) => Promise<T>,
+  ): Promise<T> {
+    this.#assertOpen();
+    const state = this.#membershipRefReservations.get(reservation);
+    if (
+      state?.active !== true
+      || state.inUse
+      || state.projectId !== input.projectId
+      || reservation.projectId !== input.projectId
+      || input.personalRef !== collabMemberRef(input.memberId)
+      || input.placement.projectId !== input.projectId
+      || !isCollabGitOid(input.expectedOid)
+    ) throw new GitRepositoryError('placement-rejected');
+    let placement: RepositoryPlacementLease;
+    try {
+      placement = createRepositoryPlacementLease(input.placement);
+    } catch (error: unknown) {
+      if (error instanceof RepositoryPlacementError) throw mapPlacementError(error);
+      throw new GitRepositoryError('placement-rejected');
+    }
+    state.inUse = true;
+    try {
+      this.#assertOpen();
+      assertNotAborted(input.signal);
+      const resolved = await this.#pathPolicy.resolveExisting(placement);
+      await this.#pathPolicy.revalidate(placement);
+      await this.#supervisor.verifyBareRepository(
+        resolved.repositoryPath,
+        input.signal,
+      );
+      const before = await this.#readRefs(resolved.repositoryPath, input.signal);
+      await this.#pathPolicy.revalidate(placement);
+      return await operation(resolved.repositoryPath, before);
+    } catch (error: unknown) {
+      if (error instanceof GitRepositoryError) throw error;
+      if (error instanceof RepositoryPlacementError) throw mapPlacementError(error);
+      if (error instanceof GitProcessError) throw mapProcessError(error);
+      throw new GitRepositoryError('process-failed');
     } finally {
       state.inUse = false;
     }

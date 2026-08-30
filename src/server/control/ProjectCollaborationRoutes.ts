@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import {
   COLLAB_AUTHORITY_TRANSFER_OPERATIONS,
+  COLLAB_PROJECT_MEMBERSHIP_OPERATIONS,
   COLLAB_PROJECT_RETIREMENT_OPERATIONS,
   collabControlOperationCodec,
   matchCollabCloudRoute,
@@ -12,45 +13,44 @@ import {
 import type { ProjectAcceptCoordinator } from '../../project-authority/acceptance/ProjectAcceptCoordinator.js';
 import type { ProjectRequestAuthority } from '../../project-authority/requests/ProjectRequestAuthority.js';
 import type { ProjectTicketAuthority } from '../../project-authority/tickets/ProjectTicketAuthority.js';
-import type { DevelopmentPrincipalAdapter } from '../../request-context/DevelopmentPrincipalAdapter.js';
 import {
   ProjectJsonRouteFailure,
   ProjectJsonTransport,
   projectProtocolFailure,
   type ProjectJsonRequestContext,
+  type ProjectJsonTransportOptions,
 } from './ProjectJsonTransport.js';
 
-type InactiveLifecycleOperation =
+type RoutedElsewhereOperation =
   | typeof COLLAB_AUTHORITY_TRANSFER_OPERATIONS[number]
+  | typeof COLLAB_PROJECT_MEMBERSHIP_OPERATIONS[number]
   | typeof COLLAB_PROJECT_RETIREMENT_OPERATIONS[number];
 
 type ActiveCollaborationOperation = Exclude<
   CollabControlOperation,
-  'getProjectSnapshot' | InactiveLifecycleOperation
+  'getProjectSnapshot' | RoutedElsewhereOperation
 >;
 
-const INACTIVE_LIFECYCLE_OPERATION_SET: ReadonlySet<string> = new Set([
+const ROUTED_ELSEWHERE_OPERATION_SET: ReadonlySet<string> = new Set([
   ...COLLAB_AUTHORITY_TRANSFER_OPERATIONS,
+  ...COLLAB_PROJECT_MEMBERSHIP_OPERATIONS,
   ...COLLAB_PROJECT_RETIREMENT_OPERATIONS,
 ]);
 
 function isActiveCollaborationOperation(
   operation: CollabControlOperation,
 ): operation is ActiveCollaborationOperation {
-  return !INACTIVE_LIFECYCLE_OPERATION_SET.has(operation);
+  return !ROUTED_ELSEWHERE_OPERATION_SET.has(operation);
 }
 
 function unsupportedOperation(operation: never): never {
   throw new TypeError(`project-collaboration-routes.unsupported.${String(operation)}`);
 }
 
-export interface ProjectCollaborationRoutesOptions {
+export interface ProjectCollaborationRoutesOptions
+  extends ProjectJsonTransportOptions {
   readonly acceptAuthority: ProjectAcceptCoordinator;
-  readonly maximumJsonBytes: number;
-  readonly operationTimeoutMs: number;
-  readonly principalAdapter: DevelopmentPrincipalAdapter;
   readonly requestAuthority: ProjectRequestAuthority;
-  readonly requestIdFactory?: () => string;
   readonly ticketAuthority: ProjectTicketAuthority;
 }
 

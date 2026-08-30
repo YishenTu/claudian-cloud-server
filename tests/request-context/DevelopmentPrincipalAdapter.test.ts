@@ -24,10 +24,11 @@ describe('DevelopmentPrincipalAdapter', () => {
   it('binds one exact loopback assertion to an immutable principal', () => {
     const principal = bind();
     assert.deepEqual(principal, {
-      actorId: 'member_1',
-      profile: 'loopback-development',
+      principalId: 'member_1',
+      provenance: { kind: 'private-development' },
     });
     assert.equal(Object.isFrozen(principal), true);
+    assert.equal(Object.isFrozen(principal.provenance), true);
   });
 
   it('rejects missing, duplicate, malformed, nondevelopment, and nonloopback assertions', () => {
@@ -58,6 +59,6 @@ describe('DevelopmentPrincipalAdapter', () => {
     assert.equal(bind({
       localAddress: '::1',
       remoteAddress: '::ffff:127.0.0.1',
-    }).actorId, 'member_1');
+    }).principalId, 'member_1');
   });
 });

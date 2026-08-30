@@ -29,6 +29,7 @@ import type {
 } from '../../coordination/DevelopmentBootstrapPersistence.js';
 import type { ProjectRecord } from '../../coordination/ProjectPersistence.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import { createDevelopmentIngressPrincipal } from '../../request-context/IngressPrincipal.js';
 import {
   DevelopmentBootstrapUploadGateError,
   type DevelopmentBootstrapUploadGate,
@@ -220,7 +221,10 @@ export class DevelopmentBootstrapProfile {
     request: BeginDevelopmentBootstrapRequest,
   ): Promise<DevelopmentBootstrapAttemptStatus> {
     const manifest = decodeDevelopmentBootstrapManifest(request.manifest);
-    if (principal.actorId !== manifest.comparison.sourceHostMemberId) {
+    if (
+      principal.provenance.kind !== 'private-development'
+      || principal.principalId !== manifest.comparison.sourceHostMemberId
+    ) {
       fail('authorization-denied');
     }
     const manifestJson = encodeDevelopmentBootstrapManifestCanonicalJson(manifest);
@@ -238,7 +242,7 @@ export class DevelopmentBootstrapProfile {
           if (
             existing.manifestJson !== manifestJson
             || existing.manifestSha256 !== manifestDigest
-            || existing.sourceHostMemberId !== principal.actorId
+            || existing.sourceHostMemberId !== principal.principalId
           ) {
             fail('state-conflict');
           }
@@ -475,7 +479,7 @@ export class DevelopmentBootstrapProfile {
       fail('state-conflict');
     }
     await this.#settlement.activate({
-      actorId: principal.actorId,
+      actorId: principal.principalId,
       attemptId: request.attemptId,
       manifestSha256: request.manifestSha256,
       projectId: loaded.record.projectId,
@@ -498,7 +502,7 @@ export class DevelopmentBootstrapProfile {
       fail('state-conflict');
     }
     await this.#settlement.cancel({
-      actorId: principal.actorId,
+      actorId: principal.principalId,
       attemptId: request.attemptId,
       projectId: loaded.record.projectId,
     });
@@ -555,12 +559,13 @@ export class DevelopmentBootstrapProfile {
     hostOnly: boolean,
   ): void {
     const accepted = loaded.manifest.comparison.members.some(
-      member => member.memberId === principal.actorId,
+      member => member.memberId === principal.principalId,
     );
     if (
-      !accepted
+      principal.provenance.kind !== 'private-development'
+      || !accepted
       || (hostOnly
-        && principal.actorId !== loaded.manifest.comparison.sourceHostMemberId)
+        && principal.principalId !== loaded.manifest.comparison.sourceHostMemberId)
     ) {
       fail('authorization-denied');
     }
@@ -573,7 +578,7 @@ export class DevelopmentBootstrapProfile {
   ): void {
     if (
       report.attemptId !== loaded.record.attemptId
-      || report.reporterMemberId !== principal.actorId
+      || report.reporterMemberId !== principal.principalId
     ) {
       fail('authorization-denied');
     }
@@ -620,10 +625,7 @@ export class DevelopmentBootstrapProfile {
       this.#validateReport(
         loaded,
         report,
-        Object.freeze({
-          actorId: stored.reporterMemberId,
-          profile: 'loopback-development' as const,
-        }),
+        createDevelopmentIngressPrincipal(stored.reporterMemberId),
       );
       if (sha256(canonicalReportJson(report)) !== stored.reportSha256) {
         fail('dependency-failed');

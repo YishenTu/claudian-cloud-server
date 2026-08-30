@@ -51,6 +51,7 @@ function activeLifecycle(): ProjectLifecycleJournalRecord {
 }
 
 class MemoryCoordination {
+  joinActive = false;
   lifecycle: ProjectLifecycleJournalRecord | undefined = activeLifecycle();
   leaseCount = 0;
   membershipAvailable = true;
@@ -103,6 +104,11 @@ class MemoryCoordination {
             storageNodeId: 'node-a',
           }),
         ),
+        membership: {
+          getNonterminalJoin: () => Promise.resolve(
+            this.joinActive ? ({ phase: 'membership-pending' } as never) : undefined,
+          ),
+        },
         portability: {
           getNonterminalLifecycleJournal: () => Promise.resolve(this.lifecycle),
         },
@@ -129,6 +135,32 @@ describe('ProjectWriteAdmission', () => {
           assert.equal(projectId, 'project-a');
           recoveryCount += 1;
           coordination.lifecycle = undefined;
+          return Promise.resolve();
+        },
+      },
+    });
+
+    assert.equal(await admission.run(
+      createDevelopmentIngressPrincipal('member-manager'),
+      'project-a',
+      write => Promise.resolve(write.projectId),
+    ), 'project-a');
+    assert.equal(recoveryCount, 1);
+    assert.equal(coordination.leaseCount, 2);
+    await admission.close();
+  });
+
+  it('recovers a nonterminal Join before admitting an ordinary write', async () => {
+    const coordination = new MemoryCoordination();
+    coordination.lifecycle = undefined;
+    coordination.joinActive = true;
+    let recoveryCount = 0;
+    const admission = new ProjectWriteAdmission({
+      coordination,
+      recovery: {
+        recoverProject: () => {
+          recoveryCount += 1;
+          coordination.joinActive = false;
           return Promise.resolve();
         },
       },

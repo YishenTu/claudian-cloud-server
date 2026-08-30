@@ -92,6 +92,7 @@ describe('Collaboration persistence', () => {
           { name: 'cloud-to-lan-transfer', state: 'applied', version: 8 },
           { name: 'terminal-project-lifecycle', state: 'applied', version: 9 },
           { name: 'terminal-continuity-catalog', state: 'applied', version: 10 },
+          { name: 'cloud-project-membership', state: 'applied', version: 11 },
         ]);
 
         const relations = [

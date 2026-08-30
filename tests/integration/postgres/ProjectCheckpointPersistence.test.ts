@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 import { describe, it } from 'node:test';
 
 import {
+  COLLAB_PROJECT_MEMBERSHIP_LIMITS,
+  collabControlOperationCodec,
   decodeCollabProjectBackupCheckpointCoordinationNdjson,
   encodeCollabProjectBackupCheckpointCoordinationNdjson,
   type CollabProjectBackupRecord,
@@ -114,6 +116,298 @@ const metadata = Object.freeze({
 });
 
 describe('Project checkpoint persistence', () => {
+  it('captures completed Removal recovery and exact replay continuity', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await seed(database);
+      const client = new Client({ connectionString: database.migrationUrl });
+      const store = coordination(database);
+      const responseJson = JSON.stringify(
+        collabControlOperationCodec('removeMember').decodeResponse({
+          discardedRequestId: null,
+          managerSetGeneration: 1,
+          memberId: 'member-revoked',
+          projectId: PROJECT_ID,
+          removedAt: EXPIRES_AT,
+          status: 'revoked',
+        }),
+      );
+      try {
+        await client.connect();
+        await client.query('BEGIN');
+        await client.query(
+          "SELECT set_config('claudian_cloud.project_id', $1, true)",
+          [PROJECT_ID],
+        );
+        await client.query(
+          `UPDATE claudian_cloud.projects
+              SET manager_set_generation = 1
+            WHERE project_id = $1`,
+          [PROJECT_ID],
+        );
+        await client.query(
+          `INSERT INTO claudian_cloud.project_lifecycle_journals (
+             project_id, operation_id, kind, direction, phase,
+             recovery_from_phase, state, expected_authority_generation,
+             actor_member_id, idempotency_key, request_fingerprint,
+             checkpoint_sha256, batch_revision, batch_sha256, result_sha256,
+             scheduled_at, created_at, updated_at, expected_personal_ref_oid
+           ) VALUES (
+             $1, 'removal-backup', 'remove-member', NULL, 'completed', NULL,
+             'completed', 4, 'member-manager', 'removal-key', $2, NULL, NULL,
+             NULL, $3, $4, $4, $5, $6
+           )`,
+          [
+            PROJECT_ID,
+            '1'.repeat(64),
+            createHash('sha256').update(responseJson).digest('hex'),
+            CREATED_AT,
+            EXPIRES_AT,
+            'a'.repeat(40),
+          ],
+        );
+        await client.query(
+          `INSERT INTO claudian_cloud.project_member_removal_journals (
+             project_id, operation_id, actor_member_id, target_member_id,
+             idempotency_key, request_fingerprint,
+             expected_target_membership_revision,
+             expected_manager_set_generation, expected_personal_ref_oid,
+             personal_ref, storage_node_id, repository_storage_key,
+             placement_generation, phase, response_json, prepared_at,
+             updated_at
+           ) VALUES (
+             $1, 'removal-backup', 'member-manager', 'member-revoked',
+             'removal-key', $2, 4, 1, $3,
+             'refs/heads/members/member-revoked', 'local',
+             'repository_checkpoint', 5, 'completed', $4, $5, $6
+           )`,
+          [
+            PROJECT_ID,
+            '1'.repeat(64),
+            'a'.repeat(40),
+            responseJson,
+            CREATED_AT,
+            EXPIRES_AT,
+          ],
+        );
+        await client.query('COMMIT');
+
+        const lease = await store.acquireProjectLease(PROJECT_ID);
+        try {
+          const records = await lease.withProjectScope(scope => (
+            scope.checkpoint.readProjectCheckpointRecords({
+              excludedOperationId: 'backup-one',
+              maximumCoordinationBytes: 1024 * 1024,
+              metadata,
+              profile: 'backup',
+              snapshotAt: EXPIRES_AT,
+            })
+          ), { snapshot: 'repeatable-read' });
+          const lifecycle = records.find(record => (
+            record.kind === 'lifecycle-journal'
+            && record.value.operationId === 'removal-backup'
+          ));
+          assert.ok(lifecycle?.kind === 'lifecycle-journal');
+          assert.equal(lifecycle.value.expectedPersonalRefOid, null);
+          assert.equal(records.some(record => (
+            record.kind === 'project-membership-recovery'
+            && record.value.operationId === 'removal-backup'
+            && record.value.expectedPersonalRefOid === 'a'.repeat(40)
+          )), true);
+          assert.equal(records.some(record => (
+            record.kind === 'idempotency-result'
+            && record.value.operation === 'removeMember'
+            && record.value.responseJson === responseJson
+          )), true);
+        } finally {
+          await lease.close();
+        }
+      } finally {
+        await client.end().catch(() => undefined);
+        await store.close();
+      }
+    });
+  });
+
+  it('captures Cloud membership replay state only in backup v3', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await seed(database);
+      const client = new Client({ connectionString: database.migrationUrl });
+      const store = coordination(database);
+      const invitationExpiresAt = new Date(
+        Date.parse(CREATED_AT) + COLLAB_PROJECT_MEMBERSHIP_LIMITS.invitationTtlMs,
+      ).toISOString();
+      const replayExpiresAt = new Date(
+        Date.parse(CREATED_AT) + COLLAB_PROJECT_MEMBERSHIP_LIMITS.secretReplayTtlMs,
+      ).toISOString();
+      const terminalAt = new Date(Date.parse(CREATED_AT) + 1_000).toISOString();
+      try {
+        await client.connect();
+        await client.query('BEGIN');
+        await client.query(
+          "SELECT set_config('claudian_cloud.project_id', $1, true)",
+          [PROJECT_ID],
+        );
+        await client.query(
+          `UPDATE claudian_cloud.projects
+              SET manager_set_generation = 1, service_state = 'active'
+            WHERE project_id = $1`,
+          [PROJECT_ID],
+        );
+        await client.query(
+          `INSERT INTO claudian_cloud.project_memberships (
+             project_id, member_id, display_name, role, status, revision,
+             created_at, updated_at, activated_at, revoked_at, left_at
+           ) VALUES ($1, 'member-active', 'Active Member', 'member', 'active', 2,
+                     $2, $2, $2, NULL, NULL)`,
+          [PROJECT_ID, CREATED_AT],
+        );
+        await client.query(
+          `INSERT INTO claudian_cloud.project_invitations (
+             project_id, invitation_id, issued_by_member_id, idempotency_key,
+             request_fingerprint, secret_sha256, state, revision, created_at,
+             expires_at, secret_replay_expires_at, terminal_at
+           ) VALUES ($1, 'invitation-backup', 'member-manager', 'invite-key',
+                     $2, $3, 'revoked', 2, $4, $5, $6, $7)`,
+          [
+            PROJECT_ID,
+            'c'.repeat(64),
+            'd'.repeat(64),
+            CREATED_AT,
+            invitationExpiresAt,
+            replayExpiresAt,
+            terminalAt,
+          ],
+        );
+        await client.query(
+          `INSERT INTO claudian_cloud.protected_invitation_envelopes (
+             project_id, invitation_id, encryption_algorithm, key_id,
+             key_version, nonce, ciphertext, tag, associated_data_sha256,
+             created_at, expires_at
+           ) VALUES ($1, 'invitation-backup', 'xchacha20-poly1305',
+                     'encryption-key', 3, $2, $3, $4, $5, $6, $7)`,
+          [
+            PROJECT_ID,
+            Buffer.alloc(24, 1).toString('base64url'),
+            Buffer.from('ciphertext').toString('base64url'),
+            Buffer.alloc(16, 2).toString('base64url'),
+            'e'.repeat(64),
+            CREATED_AT,
+            invitationExpiresAt,
+          ],
+        );
+        await client.query(
+          `INSERT INTO claudian_cloud.manager_responsibility_offers (
+             project_id, offer_id, source_manager_member_id, target_member_id,
+             purpose, state, revision, manager_set_generation_at_offer,
+             target_membership_revision_at_offer, idempotency_key,
+             request_fingerprint, offered_at, expires_at, acknowledged_at,
+             terminal_at
+           ) VALUES ($1, 'offer-backup', 'member-manager', 'member-active',
+                     'manager-promotion', 'offered', 1, 1, 2, 'offer-key',
+                     $2, $3, $4, NULL, NULL)`,
+          [PROJECT_ID, 'f'.repeat(64), CREATED_AT, invitationExpiresAt],
+        );
+        await client.query(
+          `INSERT INTO claudian_cloud.project_membership_idempotency_results (
+             project_id, actor_member_id, operation, idempotency_key,
+             request_fingerprint, result_json, created_at
+           ) VALUES ($1, 'member-manager', 'createManagerResponsibilityOffer',
+                     'offer-key', $2, $3, $4)`,
+          [
+            PROJECT_ID,
+            'f'.repeat(64),
+            JSON.stringify({
+              offer: {
+                acknowledgedAt: null,
+                expiresAt: invitationExpiresAt,
+                managerSetGenerationAtOffer: 1,
+                offeredAt: CREATED_AT,
+                offerId: 'offer-backup',
+                purpose: 'manager-promotion',
+                revision: 1,
+                sourceManagerMemberId: 'member-manager',
+                state: 'offered',
+                targetMemberId: 'member-active',
+                targetMembershipRevisionAtOffer: 2,
+                terminalAt: null,
+              },
+            }),
+            CREATED_AT,
+          ],
+        );
+        await client.query(
+          `INSERT INTO claudian_cloud.project_membership_idempotency_tombstones (
+             project_id, actor_member_id, operation, idempotency_key,
+             request_fingerprint, compacted_at
+           ) VALUES ($1, 'member-manager', 'cancelManagerResponsibilityOffer',
+                     'compacted-offer-key', $2, $3)`,
+          [PROJECT_ID, '9'.repeat(64), CREATED_AT],
+        );
+        await client.query('COMMIT');
+
+        const lease = await store.acquireProjectLease(PROJECT_ID);
+        try {
+          const backup = await lease.withProjectScope(scope => (
+            scope.checkpoint.readProjectCheckpointRecords({
+              excludedOperationId: 'backup-one',
+              maximumCoordinationBytes: 1024 * 1024,
+              metadata,
+              profile: 'backup',
+              snapshotAt: CREATED_AT,
+            })
+          ), { snapshot: 'repeatable-read' });
+          assert.equal(backup.some(record => (
+            record.kind === 'project-invitation'
+            && record.value.invitationId === 'invitation-backup'
+            && record.value.state === 'revoked'
+          )), true);
+          const envelope = backup.find(record => (
+            record.kind === 'protected-invitation-envelope'
+          ));
+          assert.ok(envelope?.kind === 'protected-invitation-envelope');
+          assert.equal(envelope.value.keyId, 'encryption-key');
+          assert.equal(backup.some(record => (
+            record.kind === 'manager-responsibility-offer'
+            && record.value.offerId === 'offer-backup'
+          )), true);
+          assert.equal(backup.some(record => (
+            record.kind === 'idempotency-result'
+            && record.value.operation === 'createManagerResponsibilityOffer'
+            && record.value.idempotencyKey === 'offer-key'
+          )), true);
+          assert.equal(backup.some(record => (
+            record.kind === 'membership-idempotency-tombstone'
+            && record.value.operation === 'cancelManagerResponsibilityOffer'
+            && record.value.idempotencyKey === 'compacted-offer-key'
+          )), true);
+
+          const exported = await lease.withProjectScope(scope => (
+            scope.checkpoint.readProjectCheckpointRecords({
+              excludedOperationId: 'export-one',
+              maximumCoordinationBytes: 1024 * 1024,
+              metadata,
+              profile: 'export',
+              snapshotAt: CREATED_AT,
+            })
+          ), { snapshot: 'repeatable-read' });
+          assert.equal(exported.some(record => (
+            record.kind === 'project-invitation'
+            || record.kind === 'protected-invitation-envelope'
+            || record.kind === 'manager-responsibility-offer'
+            || record.kind === 'membership-idempotency-tombstone'
+          )), false);
+        } finally {
+          await lease.close();
+        }
+      } finally {
+        await client.end().catch(() => undefined);
+        await store.close();
+      }
+    });
+  });
+
   it('fails before reading additional tables when the configured artifact ceiling is exceeded', async () => {
     await withPostgresTestDatabase(async database => {
       await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();

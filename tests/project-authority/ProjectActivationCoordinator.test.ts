@@ -257,6 +257,7 @@ class MemoryCoordination implements ProjectActivationCoordination {
       accept: undefined as never,
       checkpoint: undefined as never,
       collaboration: undefined as never,
+      membership: undefined as never,
       portability: undefined as never,
       advanceProjectAuthorityState: () => Promise.reject(
         new CoordinationError('state-conflict'),

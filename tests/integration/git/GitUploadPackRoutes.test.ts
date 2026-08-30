@@ -179,7 +179,7 @@ describe('GitUploadPackRoutes', () => {
     let expectedRefs: readonly { readonly name: string; readonly oid?: string }[] = [];
     let revalidations = 0;
     const authorize = (principal: IngressPrincipal): void => {
-      if (principal.actorId !== 'member-a') {
+      if (principal.principalId !== 'member-a') {
         throw new ProjectReadAuthorityError('authorization-denied');
       }
       revalidations += 1;

@@ -27,7 +27,10 @@ import {
   type DevelopmentBootstrapProfileScope,
   type DevelopmentBootstrapSettlementPort,
 } from '../../src/onboarding/development/DevelopmentBootstrapProfile.js';
-import type { IngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
+import {
+  createDevelopmentIngressPrincipal,
+  type IngressPrincipal,
+} from '../../src/request-context/IngressPrincipal.js';
 import { DevelopmentBootstrapUploadGate } from '../../src/project-authority/lifecycle/DevelopmentBootstrapUploadGate.js';
 import type {
   ImportGitBundleInput,
@@ -43,7 +46,7 @@ const MEMBER_TWO_OID = '3'.repeat(40);
 const BUNDLE_SHA256 = 'a'.repeat(64);
 
 function principal(actorId: 'member_1' | 'member_2' | 'member_3'): IngressPrincipal {
-  return Object.freeze({ actorId, profile: 'loopback-development' });
+  return createDevelopmentIngressPrincipal(actorId);
 }
 
 function comparison(overrides: Readonly<Record<string, unknown>> = {}) {

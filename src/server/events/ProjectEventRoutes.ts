@@ -14,11 +14,12 @@ import type {
 } from '../../project-authority/reads/ProjectReadAuthority.js';
 import { ProjectReadAuthorityError } from '../../project-authority/reads/ProjectReadAuthority.js';
 import type { ProjectEventWakeup } from '../../project-authority/reads/ProjectEventWakeup.js';
-import {
-  DevelopmentPrincipalError,
-  type DevelopmentPrincipalAdapter,
-} from '../../request-context/DevelopmentPrincipalAdapter.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import {
+  RequestPrincipalBinding,
+  RequestPrincipalBindingError,
+  type RequestPrincipalBindingOptions,
+} from '../../request-context/RequestPrincipalBinding.js';
 import type {
   ProjectEventAdmission,
   PendingProjectEventPermit,
@@ -34,12 +35,12 @@ export interface ProjectEventHandler {
   ): Promise<ProjectEventReadResult>;
 }
 
-export interface ProjectEventRoutesOptions {
+export interface ProjectEventRoutesOptions
+  extends RequestPrincipalBindingOptions {
   readonly admission: Pick<ProjectEventAdmission, 'acquirePending'>;
   readonly authority: ProjectEventHandler;
   readonly heartbeatMs?: number;
   readonly maximumBufferedBytes: number;
-  readonly principalAdapter: DevelopmentPrincipalAdapter;
   readonly wakeup: ProjectEventWakeup;
 }
 
@@ -48,18 +49,6 @@ class SlowConsumerError extends Error {}
 function releasePermit(permit: ProjectEventPermit | undefined): undefined {
   permit?.release();
   return undefined;
-}
-
-function headerValues(request: IncomingMessage, expectedName: string): readonly string[] {
-  const values: string[] = [];
-  for (let index = 0; index < request.rawHeaders.length; index += 2) {
-    const name = request.rawHeaders[index];
-    const value = request.rawHeaders[index + 1];
-    if (name?.toLocaleLowerCase('en-US') === expectedName && value !== undefined) {
-      values.push(value);
-    }
-  }
-  return values;
 }
 
 function rejectUpgrade(
@@ -97,7 +86,7 @@ export class ProjectEventRoutes {
   readonly #controllers = new Set<AbortController>();
   readonly #heartbeatMs: number;
   readonly #maximumBufferedBytes: number;
-  readonly #principalAdapter: DevelopmentPrincipalAdapter;
+  readonly #principalBinding: RequestPrincipalBinding;
   readonly #pending = new Set<Promise<void>>();
   readonly #pendingSockets = new Set<Duplex>();
   readonly #projectPolls = new Map<CollabProjectId, Promise<void>>();
@@ -127,7 +116,7 @@ export class ProjectEventRoutes {
     this.#authority = options.authority;
     this.#heartbeatMs = heartbeatMs;
     this.#maximumBufferedBytes = options.maximumBufferedBytes;
-    this.#principalAdapter = options.principalAdapter;
+    this.#principalBinding = new RequestPrincipalBinding(options);
     this.#wakeup = options.wakeup;
   }
 
@@ -158,13 +147,9 @@ export class ProjectEventRoutes {
     }
     let principal: IngressPrincipal;
     try {
-      principal = this.#principalAdapter.bind({
-        headerValues: headerValues(request, 'x-claudian-development-actor'),
-        localAddress: request.socket.localAddress,
-        remoteAddress: request.socket.remoteAddress,
-      });
+      principal = this.#principalBinding.bind(request);
     } catch (error: unknown) {
-      if (error instanceof DevelopmentPrincipalError) {
+      if (error instanceof RequestPrincipalBindingError) {
         rejectUpgrade(socket, 403);
         return true;
       }

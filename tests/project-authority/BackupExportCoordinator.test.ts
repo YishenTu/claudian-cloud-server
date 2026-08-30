@@ -197,7 +197,7 @@ function capturedCheckpoint(
         sha256: '4'.repeat(64),
       }),
     ]),
-    coordinationFormatVersion: 2 as const,
+    coordinationFormatVersion: 3 as const,
     createdAt: input.createdAt,
     expectedMainOid: MAIN_OID,
     gitObjectFormat: 'sha1' as const,
