@@ -294,6 +294,7 @@ describe('deployment', () => {
       );
       await rm(fixture.stateFile);
 
+      await rm(fixture.lockFile, { force: true });
       await mkdir(fixture.lockFile);
       const locked = run(fixture);
       assert.equal(locked.status, 1);
