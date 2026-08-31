@@ -52,7 +52,7 @@ export interface EnvironmentBackupCatalogSource {
     readonly project: EnvironmentRestoreProject;
     readonly signal: AbortSignal;
   }>): Promise<VerifiedEnvironmentProjectBackup>;
-  verifyTerminalProjectBackup?(input: Readonly<{
+  verifyTerminalProjectBackup(input: Readonly<{
     readonly signal: AbortSignal;
     readonly terminalProject: EnvironmentRestoreTerminalProject;
   }>): Promise<TerminalProjectContinuityArtifact>;
@@ -458,9 +458,6 @@ implements EnvironmentRestoreBackupPort {
       }
       for (const item of document.terminalProjects) {
         assertNotAborted(input.signal);
-        if (this.#source.verifyTerminalProjectBackup === undefined) {
-          fail('invalid-backup');
-        }
         const artifact = await this.#source.verifyTerminalProjectBackup({
           signal: input.signal,
           terminalProject: item,

@@ -516,6 +516,7 @@ function backupVerifier(): EnvironmentBackupCatalogVerifier {
     serverBuild: 'cloud-build-real',
     source: {
       readCatalog: () => Promise.resolve(catalogDocument()),
+      verifyTerminalProjectBackup: () => assert.fail('unexpected terminal backup'),
       verifyProjectBackup: input => Promise.resolve(Object.freeze({
         authorityGeneration: input.project.authorityGeneration,
         authorityId: 'cloud-authority-real',

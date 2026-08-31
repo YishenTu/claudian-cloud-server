@@ -56,14 +56,14 @@ export interface EnvironmentBackupProjectCatalogPort {
     readonly authorityGeneration: number;
     readonly placementGeneration: number;
   }>>;
-  listTerminal?(input: Readonly<{
+  listTerminal(input: Readonly<{
     readonly after?: CollabProjectId;
     readonly signal: AbortSignal;
   }>): Promise<Readonly<{
     readonly nextCursor: CollabProjectId | undefined;
     readonly projectIds: readonly CollabProjectId[];
   }>>;
-  readTerminalRecords?(projectId: CollabProjectId): Promise<
+  readTerminalRecords(projectId: CollabProjectId): Promise<
     readonly TerminalProjectContinuityRecord[]
   >;
 }
@@ -72,7 +72,7 @@ export interface EnvironmentBackupCatalogPublicationPort {
   publish(
     value: CreatedEnvironmentBackupCatalog,
   ): Promise<'published' | 'replayed'>;
-  publishTerminalProject?(
+  publishTerminalProject(
     value: TerminalProjectContinuityArtifact,
   ): Promise<'published' | 'replayed'>;
 }
@@ -227,16 +227,11 @@ export class EnvironmentBackupCommand {
       after = undefined;
       for (;;) {
         active(input.signal);
-        const page: Readonly<{
-          readonly nextCursor: CollabProjectId | undefined;
-          readonly projectIds: readonly CollabProjectId[];
-        }> = this.#projects.listTerminal === undefined
-          ? Object.freeze({ nextCursor: undefined, projectIds: [] })
-          : await this.#projects.listTerminal(
-            after === undefined
-              ? { signal: input.signal }
-              : { after, signal: input.signal },
-          );
+        const page = await this.#projects.listTerminal(
+          after === undefined
+            ? { signal: input.signal }
+            : { after, signal: input.signal },
+        );
         let previous = after;
         for (const projectId of page.projectIds) {
           if (
@@ -260,10 +255,6 @@ export class EnvironmentBackupCommand {
       const terminalEntries = [];
       for (const projectId of terminalProjects) {
         active(input.signal);
-        if (
-          this.#projects.readTerminalRecords === undefined
-          || this.#catalog.publishTerminalProject === undefined
-        ) return fail('state-conflict');
         const records = await this.#projects.readTerminalRecords(projectId);
         await this.#terminalRecords.verify(records);
         const artifact = createTerminalProjectContinuityArtifact(

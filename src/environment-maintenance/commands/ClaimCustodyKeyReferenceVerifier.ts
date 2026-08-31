@@ -6,9 +6,6 @@ import {
 import type {
   BackupExportCheckpointSource,
 } from '../../project-authority/checkpoint/BackupExportCoordinator.js';
-import type {
-  ProjectCheckpointCoordinator,
-} from '../../project-authority/checkpoint/ProjectCheckpointCoordinator.js';
 import { unframeBackupProtectedSecretEnvelope } from '../../coordination/backupProtectedSecretEnvelope.js';
 import type { ProtectedSecretCustody } from '../../project-authority/lifecycle/ProtectedSecretCustody.js';
 import { encodeInvitationAssociatedData } from '../../project-authority/membership/ProjectInvitationAuthority.js';
@@ -237,46 +234,5 @@ implements BackupExportCheckpointSource {
     const snapshot = await this.#source.snapshot(input);
     await this.#verifier.verify(snapshot.records);
     return snapshot;
-  }
-}
-
-type PublishedCheckpoint = Pick<
-  ProjectCheckpointCoordinator,
-  'readPublishedOutboundRecords' | 'reserveOutbound' | 'verifyOutboundOperation'
->;
-
-export class KeyReferenceCheckingPublishedCheckpoint
-implements PublishedCheckpoint {
-  readonly #checkpoint: PublishedCheckpoint;
-  readonly #verifier: Pick<ClaimCustodyKeyReferenceVerifier, 'verify'>;
-
-  constructor(options: Readonly<{
-    readonly checkpoint: PublishedCheckpoint;
-    readonly verifier: Pick<ClaimCustodyKeyReferenceVerifier, 'verify'>;
-  }>) {
-    this.#checkpoint = options.checkpoint;
-    this.#verifier = options.verifier;
-  }
-
-  reserveOutbound(
-    ...arguments_: Parameters<PublishedCheckpoint['reserveOutbound']>
-  ): ReturnType<PublishedCheckpoint['reserveOutbound']> {
-    return this.#checkpoint.reserveOutbound(...arguments_);
-  }
-
-  verifyOutboundOperation(
-    ...arguments_: Parameters<PublishedCheckpoint['verifyOutboundOperation']>
-  ): ReturnType<PublishedCheckpoint['verifyOutboundOperation']> {
-    return this.#checkpoint.verifyOutboundOperation(...arguments_);
-  }
-
-  async readPublishedOutboundRecords(
-    ...arguments_: Parameters<PublishedCheckpoint['readPublishedOutboundRecords']>
-  ): ReturnType<PublishedCheckpoint['readPublishedOutboundRecords']> {
-    const records = await this.#checkpoint.readPublishedOutboundRecords(
-      ...arguments_,
-    );
-    await this.#verifier.verify(records);
-    return records;
   }
 }

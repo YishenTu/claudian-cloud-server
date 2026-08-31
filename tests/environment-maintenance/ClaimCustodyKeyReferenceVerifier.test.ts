@@ -4,7 +4,6 @@ import { describe, it } from 'node:test';
 import {
   ClaimCustodyKeyReferenceVerifier,
   KeyReferenceCheckingBackupExportSource,
-  KeyReferenceCheckingPublishedCheckpoint,
 } from '../../src/environment-maintenance/commands/ClaimCustodyKeyReferenceVerifier.js';
 import { frameBackupProtectedSecretEnvelope } from '../../src/coordination/backupProtectedSecretEnvelope.js';
 import { ProtectedSecretCustody } from '../../src/project-authority/lifecycle/ProtectedSecretCustody.js';
@@ -207,7 +206,7 @@ describe('ClaimCustodyKeyReferenceVerifier', () => {
     );
   });
 
-  it('checks captured and reopened checkpoint records before returning them', async () => {
+  it('checks captured checkpoint records before returning them', async () => {
     const checked: unknown[] = [];
     const verifier = {
       verify: (records: readonly unknown[]) => {
@@ -225,20 +224,7 @@ describe('ClaimCustodyKeyReferenceVerifier', () => {
       } as never,
       verifier,
     });
-    const published = new KeyReferenceCheckingPublishedCheckpoint({
-      checkpoint: {
-        readPublishedOutboundRecords: () => Promise.resolve(capturedRecords),
-        reserveOutbound: () => Promise.resolve({}),
-        verifyOutboundOperation: () => Promise.resolve(),
-      } as never,
-      verifier,
-    });
-
     assert.equal((await source.snapshot({} as never)).records, capturedRecords);
-    assert.equal(
-      await published.readPublishedOutboundRecords({} as never, {} as never),
-      capturedRecords,
-    );
-    assert.deepEqual(checked, [capturedRecords, capturedRecords]);
+    assert.deepEqual(checked, [capturedRecords]);
   });
 });

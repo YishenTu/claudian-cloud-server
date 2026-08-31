@@ -13,12 +13,12 @@ import type {
 
 export type EnvironmentRestoreCoordinationStoragePort = Omit<
   EnvironmentRestorePersistence,
-  'readRestoredContinuity'
+  'readRestoredContinuity' | 'readRestoredTerminalContinuity'
 >;
 
 export interface EnvironmentRestoreCoordinationAdapterOptions {
   readonly source: EnvironmentProjectBackupSource
-    & Partial<EnvironmentTerminalProjectBackupSource>;
+    & EnvironmentTerminalProjectBackupSource;
   readonly storage: EnvironmentRestoreCoordinationStoragePort;
 }
 
@@ -44,7 +44,7 @@ function translate(error: unknown): never {
 export class EnvironmentRestoreCoordinationAdapter
 implements EnvironmentRestoreCoordinationPort {
   readonly #source: EnvironmentProjectBackupSource
-    & Partial<EnvironmentTerminalProjectBackupSource>;
+    & EnvironmentTerminalProjectBackupSource;
   readonly #storage: EnvironmentRestoreCoordinationStoragePort;
 
   constructor(options: EnvironmentRestoreCoordinationAdapterOptions) {
@@ -105,16 +105,11 @@ implements EnvironmentRestoreCoordinationPort {
         });
       }
       for (const terminalProject of input.catalog.terminalProjects) {
-        const readTerminal = this.#source.readTerminalProjectBackup;
-        const importTerminal = this.#storage.importTerminalProject;
-        if (readTerminal === undefined || importTerminal === undefined) {
-          return fail();
-        }
-        const backup = await readTerminal.call(this.#source, {
+        const backup = await this.#source.readTerminalProjectBackup({
           signal: input.signal,
           terminalProject,
         });
-        await importTerminal.call(this.#storage, {
+        await this.#storage.importTerminalProject({
           operationId: input.operationId,
           projectId: terminalProject.projectId,
           records: backup.records,
@@ -189,16 +184,11 @@ implements EnvironmentRestoreCoordinationPort {
         });
       }
       for (const terminalProject of input.catalog.terminalProjects) {
-        const readTerminal = this.#source.readTerminalProjectBackup;
-        const verifyTerminal = this.#storage.verifyRestoredTerminalProject;
-        if (readTerminal === undefined || verifyTerminal === undefined) {
-          return fail();
-        }
-        const backup = await readTerminal.call(this.#source, {
+        const backup = await this.#source.readTerminalProjectBackup({
           signal: input.signal,
           terminalProject,
         });
-        await verifyTerminal.call(this.#storage, {
+        await this.#storage.verifyRestoredTerminalProject({
           operationId: input.operationId,
           projectId: terminalProject.projectId,
           records: backup.records,
