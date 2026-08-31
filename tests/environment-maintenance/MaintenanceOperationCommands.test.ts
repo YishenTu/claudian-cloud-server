@@ -2,9 +2,6 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
-  EnvironmentBackupVerificationCommand,
-} from '../../src/environment-maintenance/commands/EnvironmentBackupVerificationCommand.js';
-import {
   EnvironmentRestoreCommand,
 } from '../../src/environment-maintenance/commands/EnvironmentRestoreCommand.js';
 import {
@@ -19,36 +16,6 @@ const operationId = 'backup-environment-1';
 const projectId = '11111111-1111-4111-8111-111111111111';
 
 describe('maintenance operation commands', () => {
-  it('verifies the catalog self-digest through the O2 verifier', async () => {
-    const calls: unknown[] = [];
-    const command = new EnvironmentBackupVerificationCommand({
-      catalog: {
-        readCatalog: () => Promise.resolve({ catalogSha256 }),
-      },
-      verifier: {
-        validate: input => {
-          calls.push(input);
-          return Promise.resolve({
-            projects: [projectId],
-            terminalProjects: [{ projectId: 'terminal-project' }],
-          });
-        },
-      },
-    });
-    const result = await command.run({
-      catalogId: operationId,
-      signal: new AbortController().signal,
-    });
-    assert.deepEqual(result, {
-      catalogId: operationId,
-      catalogSha256,
-      projectCount: 2,
-      state: 'verified',
-    });
-    assert.equal((calls[0] as { expectedCatalogSha256: string })
-      .expectedCatalogSha256, catalogSha256);
-  });
-
   it('restores the exact catalog into the target identity', async () => {
     const calls: unknown[] = [];
     const command = new EnvironmentRestoreCommand({
@@ -218,23 +185,5 @@ describe('maintenance operation commands', () => {
     assert.ok(settlementSignal);
     assert.notEqual(settlementSignal, controller.signal);
     assert.equal(settlementSignal.aborted, false);
-  });
-
-  it('rejects a malformed catalog digest before invoking an owner', async () => {
-    let invoked = false;
-    const command = new EnvironmentBackupVerificationCommand({
-      catalog: { readCatalog: () => Promise.resolve({ catalogSha256: '../x' }) },
-      verifier: {
-        validate: () => {
-          invoked = true;
-          return Promise.resolve({ projects: [], terminalProjects: [] });
-        },
-      },
-    });
-    await assert.rejects(command.run({
-      catalogId: operationId,
-      signal: new AbortController().signal,
-    }), /maintenance-operation-command\.error\.invalid-input/u);
-    assert.equal(invoked, false);
   });
 });

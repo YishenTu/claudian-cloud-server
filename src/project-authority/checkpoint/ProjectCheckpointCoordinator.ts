@@ -128,6 +128,7 @@ export interface CaptureOutboundProjectCheckpointInput {
   readonly placement: RepositoryPlacementLease;
   readonly profile: Extract<CollabCheckpointProfile, 'backup' | 'export'>;
   readonly projectId: string;
+  /** Borrowed immutable snapshot; the caller must not mutate these records. */
   readonly records: readonly OutboundProjectCheckpointRecord[];
   readonly refs: readonly CollabCheckpointGitRef[];
   readonly signal?: AbortSignal;
@@ -382,11 +383,8 @@ function snapshotOutboundInput(
       name: ref.name,
       oid: ref.oid,
     })));
-    const coordinationJson = encodeOutboundCoordination(input.records, profile);
-    const records = deepFreeze(decodeOutboundCoordination(
-      coordinationJson,
-      profile,
-    ));
+    const records = input.records;
+    const coordinationJson = encodeOutboundCoordination(records, profile);
     return Object.freeze({
       coordinationJson,
       createdAt,

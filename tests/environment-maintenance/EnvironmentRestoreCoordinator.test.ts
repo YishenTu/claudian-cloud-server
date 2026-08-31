@@ -238,6 +238,7 @@ describe('EnvironmentRestoreCoordinator', () => {
         verifyProjectBackup: async () => {
           throw new Error('unexpected');
         },
+        verifyTerminalProjectBackup: () => assert.fail('unexpected terminal backup'),
       },
     });
     const coordinator = new EnvironmentRestoreCoordinator(unreachableOptions({

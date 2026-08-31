@@ -314,7 +314,10 @@ function publishedSource(options: Readonly<{
     staging: { ...publication },
   });
   const source = new PublishedEnvironmentBackupSource({
-    catalog: { readCatalog: () => Promise.resolve({}) },
+    catalog: {
+      readCatalog: () => Promise.resolve({}),
+      readTerminalArtifact: () => assert.fail('unexpected terminal artifact'),
+    },
     checkpoint,
     publication,
   });
@@ -342,7 +345,10 @@ describe('production environment restore adapters', () => {
   it('requires the common repository verifier before reading a Project backup', () => {
     assert.throws(
       () => new PublishedEnvironmentBackupSource({
-        catalog: { readCatalog: () => Promise.resolve({}) },
+        catalog: {
+          readCatalog: () => Promise.resolve({}),
+          readTerminalArtifact: () => assert.fail('unexpected terminal artifact'),
+        },
         checkpoint: undefined as never,
         publication: {
           inspectAttempt: () => assert.fail('unexpected attempt inspection'),
@@ -520,6 +526,7 @@ describe('production environment restore adapters', () => {
         readProjectBackup: () => Promise.reject(
           new Error('backup-must-not-be-read'),
         ),
+        readTerminalProjectBackup: () => assert.fail('unexpected terminal backup'),
       },
       storage: {
         assertEmpty: () => Promise.reject(new CoordinationError('state-conflict')),
@@ -528,9 +535,11 @@ describe('production environment restore adapters', () => {
           new CoordinationError('dependency-failed'),
         ),
         importProject: () => Promise.resolve(),
+        importTerminalProject: () => assert.fail('unexpected terminal import'),
         publishAuthority: () => Promise.resolve(),
         verifyDatabaseIdentity: () => Promise.resolve(),
         verifyRestoredProject: () => Promise.resolve(),
+        verifyRestoredTerminalProject: () => assert.fail('unexpected terminal verification'),
       },
     });
     await assert.rejects(
@@ -692,12 +701,14 @@ describe('production environment restore adapters', () => {
           assert.deepEqual(input.records, backupRecords());
           return Promise.resolve();
         },
+        importTerminalProject: () => assert.fail('unexpected terminal import'),
         publishAuthority: () => Promise.resolve(),
         verifyDatabaseIdentity: () => Promise.resolve(),
         verifyRestoredProject: input => {
           coordinationEvents.push(`verify:${input.project.projectId}`);
           return Promise.resolve();
         },
+        verifyRestoredTerminalProject: () => assert.fail('unexpected terminal verification'),
       },
     });
     const environmentCatalog = catalog(exactProject);
@@ -843,8 +854,12 @@ describe('production environment restore adapters', () => {
           ...backup,
           records,
         })),
+        readTerminalProjectBackup: () => assert.fail('unexpected terminal backup'),
       },
-      storage: { readRestoredContinuity: () => Promise.resolve(records) },
+      storage: {
+        readRestoredContinuity: () => Promise.resolve(records),
+        readRestoredTerminalContinuity: () => assert.fail('unexpected terminal continuity'),
+      },
     });
     await verifier.verifyBeforeCreation({
       catalog: catalog(exactProject),
@@ -903,8 +918,12 @@ describe('production environment restore adapters', () => {
           ...backup,
           records,
         })),
+        readTerminalProjectBackup: () => assert.fail('unexpected terminal backup'),
       },
-      storage: { readRestoredContinuity: () => Promise.resolve(records) },
+      storage: {
+        readRestoredContinuity: () => Promise.resolve(records),
+        readRestoredTerminalContinuity: () => assert.fail('unexpected terminal continuity'),
+      },
     });
     await assert.rejects(
       verifier.verifyBeforeCreation({

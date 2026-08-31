@@ -22,7 +22,7 @@ export interface EnvironmentRestoreTargetPort {
 }
 
 export interface EnvironmentRestoreCommandOptions<Result = unknown> {
-  readonly catalog: EnvironmentBackupCatalogDocumentSource;
+  readonly catalog: Pick<EnvironmentBackupCatalogDocumentSource, 'readCatalog'>;
   readonly restore: EnvironmentRestoreCommandPort<Result>;
   readonly target: EnvironmentRestoreTargetPort;
 }
@@ -44,7 +44,7 @@ function digest(value: unknown): string {
 }
 
 export class EnvironmentRestoreCommand<Result = unknown> {
-  readonly #catalog: EnvironmentBackupCatalogDocumentSource;
+  readonly #catalog: EnvironmentRestoreCommandOptions<Result>['catalog'];
   readonly #restore: EnvironmentRestoreCommandPort<Result>;
   readonly #target: EnvironmentRestoreTargetPort;
 

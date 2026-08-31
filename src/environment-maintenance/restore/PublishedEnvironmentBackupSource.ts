@@ -39,7 +39,7 @@ export interface EnvironmentBackupCatalogDocumentSource {
     readonly catalogId: string;
     readonly signal: AbortSignal;
   }>): Promise<unknown>;
-  readTerminalArtifact?(input: Readonly<{
+  readTerminalArtifact(input: Readonly<{
     readonly signal: AbortSignal;
     readonly terminalProject: EnvironmentRestoreTerminalProject;
   }>): Promise<string>;
@@ -198,7 +198,6 @@ implements
     readonly terminalProject: EnvironmentRestoreTerminalProject;
   }>): Promise<TerminalProjectContinuityArtifact> {
     try {
-      if (this.#catalog.readTerminalArtifact === undefined) return invalid();
       const json = await this.#catalog.readTerminalArtifact(input);
       const artifact = decodeTerminalProjectContinuityArtifact(json, {
         projectId: input.terminalProject.projectId,

@@ -64,6 +64,7 @@ describe('EnvironmentBackupCatalogVerifier', () => {
           assert.equal(input.catalogId, 'backup-catalog-a');
           return sourceDocument;
         },
+        verifyTerminalProjectBackup: () => assert.fail('unexpected terminal backup'),
         verifyProjectBackup: async input => {
           verified.push(input.project.backupId);
           return Object.freeze({
@@ -108,6 +109,7 @@ describe('EnvironmentBackupCatalogVerifier', () => {
       serverBuild: 'cloud-build-a',
       source: {
         readCatalog: async () => sourceDocument,
+        verifyTerminalProjectBackup: () => assert.fail('unexpected terminal backup'),
         verifyProjectBackup: async input => Object.freeze({
           authorityGeneration: input.project.authorityGeneration,
           authorityId: 'cloud-authority-a',
@@ -155,6 +157,7 @@ describe('EnvironmentBackupCatalogVerifier', () => {
       serverBuild: 'cloud-build-a',
       source: {
         readCatalog: async () => sourceDocument,
+        verifyTerminalProjectBackup: () => assert.fail('unexpected terminal backup'),
         verifyProjectBackup: async input => Object.freeze({
           authorityGeneration: input.project.authorityGeneration,
           authorityId: 'cloud-authority-a',

@@ -129,6 +129,7 @@ describe('environment backup catalog publication', () => {
       serverBuild: '0.0.0',
       source: {
         readCatalog: () => Promise.resolve(JSON.parse(publication.json)),
+        verifyTerminalProjectBackup: () => assert.fail('unexpected terminal backup'),
         verifyProjectBackup: input => Promise.resolve(Object.freeze({
           ...input.project,
           authorityId: 'authority-a',

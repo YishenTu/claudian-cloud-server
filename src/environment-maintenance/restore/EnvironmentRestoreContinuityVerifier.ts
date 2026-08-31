@@ -29,7 +29,7 @@ export interface EnvironmentRestoreContinuityStoragePort {
     project: EnvironmentRestoreProject,
     signal: AbortSignal,
   ): Promise<readonly CollabProjectBackupRecord[]>;
-  readRestoredTerminalContinuity?(
+  readRestoredTerminalContinuity(
     projectId: EnvironmentRestoreTerminalProject['projectId'],
     signal: AbortSignal,
   ): Promise<readonly CollabProjectBackupRecord[]>;
@@ -39,7 +39,7 @@ export interface EnvironmentRestoreContinuityVerifierOptions {
   readonly clock?: () => Date;
   readonly custody: EnvironmentRestoreClaimCustodyPort;
   readonly source: EnvironmentProjectBackupSource
-    & Partial<EnvironmentTerminalProjectBackupSource>;
+    & EnvironmentTerminalProjectBackupSource;
   readonly storage: EnvironmentRestoreContinuityStoragePort;
 }
 
@@ -84,7 +84,7 @@ implements EnvironmentRestoreContinuityPort {
   readonly #clock: () => Date;
   readonly #custody: EnvironmentRestoreClaimCustodyPort;
   readonly #source: EnvironmentProjectBackupSource
-    & Partial<EnvironmentTerminalProjectBackupSource>;
+    & EnvironmentTerminalProjectBackupSource;
   readonly #storage: EnvironmentRestoreContinuityStoragePort;
 
   constructor(options: EnvironmentRestoreContinuityVerifierOptions) {
@@ -117,9 +117,7 @@ implements EnvironmentRestoreContinuityPort {
         );
       }
       for (const terminalProject of input.catalog.terminalProjects) {
-        const readTerminal = this.#source.readTerminalProjectBackup;
-        if (readTerminal === undefined) return fail();
-        const backup = await readTerminal.call(this.#source, {
+        const backup = await this.#source.readTerminalProjectBackup({
           signal: input.signal,
           terminalProject,
         });
@@ -159,10 +157,6 @@ implements EnvironmentRestoreContinuityPort {
         await this.#verifyRecords(restored, input.catalog.createdAt, input.signal);
       }
       for (const terminalProject of input.catalog.terminalProjects) {
-        if (
-          this.#source.readTerminalProjectBackup === undefined
-          || this.#storage.readRestoredTerminalContinuity === undefined
-        ) return fail();
         const backup = await this.#source.readTerminalProjectBackup({
           signal: input.signal,
           terminalProject,
