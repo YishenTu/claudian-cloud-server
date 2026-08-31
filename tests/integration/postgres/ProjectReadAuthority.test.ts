@@ -70,9 +70,30 @@ describe('Project read authority integration', () => {
         resourceAdmission: admission,
         storageNodeId: 'node-read',
       });
+      let driftAfterRepositoryVerification = false;
       const authority = new ProjectReadAuthority({
         coordination: store,
-        repository,
+        repository: {
+          advertiseUploadPack: repository.advertiseUploadPack.bind(repository),
+          runUploadPack: repository.runUploadPack.bind(repository),
+          verifyProjectRead: async input => {
+            await repository.verifyProjectRead(input);
+            if (!driftAfterRepositoryVerification) return;
+            driftAfterRepositoryVerification = false;
+            await seed.query('BEGIN');
+            await seed.query(
+              "SELECT set_config('claudian_cloud.project_id', $1, true)",
+              [projectId],
+            );
+            await seed.query(
+              `UPDATE claudian_cloud.projects
+                  SET authority_generation = 8
+                WHERE project_id = $1`,
+              [projectId],
+            );
+            await seed.query('COMMIT');
+          },
+        },
       });
       try {
         await execFileAsync(GIT_EXECUTABLE, ['init', '--initial-branch=main', work]);
@@ -101,9 +122,9 @@ describe('Project read authority integration', () => {
         );
         await seed.query(
           `INSERT INTO claudian_cloud.projects (
-             project_id, project_name, manager_set_generation,
+             project_id, project_name, manager_set_generation, authority_generation,
              expected_main_oid, service_state, created_at, activated_at
-           ) VALUES ($1, 'Read integration', 1, $2, 'active', $3, $4)`,
+           ) VALUES ($1, 'Read integration', 1, 7, $2, 'active', $3, $4)`,
           [projectId, oid, CREATED, ACTIVATED],
         );
         for (const [memberId, displayName, role] of [[
@@ -145,10 +166,21 @@ describe('Project read authority integration', () => {
           projectId,
         );
         assert.equal(snapshot.project.expectedMainOid, oid);
+        assert.equal(snapshot.project.authorityGeneration, 7);
         assert.equal(snapshot.currentMember.createdAt, CREATED);
         assert.equal(snapshot.currentMember.activatedAt, ACTIVATED);
         assert.deepEqual(snapshot.openRequests, []);
         assert.deepEqual(snapshot.ticketHighlights, []);
+
+        driftAfterRepositoryVerification = true;
+        await assert.rejects(
+          authority.getProjectSnapshot(
+            createDevelopmentIngressPrincipal('member-a'),
+            projectId,
+          ),
+          error => error instanceof ProjectReadAuthorityError
+            && error.code === 'state-conflict',
+        );
 
         await assert.rejects(
           authority.getProjectSnapshot(

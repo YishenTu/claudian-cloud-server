@@ -178,6 +178,18 @@ export class TransferredMembershipClaimAuthority {
       }
       const record = result.record;
       if (record === undefined) return mapStatus('conflict');
+      const transfer = await write.transact(scope => (
+        scope.portability.getLifecycleJournal(record.transferId)
+      ));
+      if (
+        transfer?.kind !== 'authority-transfer'
+        || transfer.direction !== 'lan-to-cloud'
+        || transfer.state !== 'completed'
+        || transfer.projectId !== record.projectId
+        || transfer.operationId !== record.transferId
+      ) {
+        throw domainError('operation-failed', 'claim-transfer-unavailable');
+      }
       let replayedClaim = claim;
       if (result.status === 'replayed') {
         if (record.envelope === undefined) return mapStatus('replay-expired');
@@ -199,6 +211,8 @@ export class TransferredMembershipClaimAuthority {
           memberId: record.memberId,
           projectId: record.projectId,
           secretReplayExpiresAt: record.secretReplayExpiresAt,
+          targetAuthorityGeneration: transfer.expectedAuthorityGeneration + 1,
+          transferId: record.transferId,
         });
     }, options);
   }

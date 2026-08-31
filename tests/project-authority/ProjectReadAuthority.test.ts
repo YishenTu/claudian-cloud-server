@@ -138,7 +138,7 @@ class MemoryCoordination implements ProjectReadAuthorityCoordination {
             occurredAt: CREATED,
             payload: { memberId: 'member-001' },
             projectId,
-            protocolVersion: 6,
+            protocolVersion: 7,
             sequence: 1,
           },
           {
@@ -146,7 +146,7 @@ class MemoryCoordination implements ProjectReadAuthorityCoordination {
             occurredAt: CREATED,
             payload: { mainOid: MAIN_OID, requestId: 'request-001' },
             projectId,
-            protocolVersion: 6,
+            protocolVersion: 7,
             sequence: 2,
           },
         ] : [],
@@ -261,6 +261,7 @@ describe('ProjectReadAuthority', () => {
       openRequests: [],
       openTicketCount: 0,
       project: {
+        authorityGeneration: 1,
         createdAt: CREATED,
         expectedMainOid: MAIN_OID,
         id: 'project-a',
@@ -426,7 +427,7 @@ describe('ProjectReadAuthority', () => {
           occurredAt: CREATED,
           payload: { memberId: 'member-001' },
           projectId: 'project-a',
-          protocolVersion: 6,
+          protocolVersion: 7,
           sequence: 1,
         },
         {
@@ -434,7 +435,7 @@ describe('ProjectReadAuthority', () => {
           occurredAt: CREATED,
           payload: { mainOid: MAIN_OID, requestId: 'request-001' },
           projectId: 'project-a',
-          protocolVersion: 6,
+          protocolVersion: 7,
           sequence: 2,
         },
       ],

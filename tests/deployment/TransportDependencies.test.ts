@@ -5,9 +5,9 @@ import { describe, it } from 'node:test';
 
 const repositoryRoot = resolve(import.meta.dirname, '../..');
 const protocolPackageName = '@claudian-collab/protocol';
-const protocolVersion = '3.3.2';
-const protocolRegistryArtifact = 'https://registry.npmjs.org/@claudian-collab/protocol/-/protocol-3.3.2.tgz';
-const protocolIntegrity = 'sha512-oOSfYrCZNSjVbDK9tE2d8wlhvIf9nUi5mCHf/lLQwQ2jeZ4sW7dLgygE+NEhZFqfICXwF3V++UTsAfcle5AAdg==';
+const protocolVersion = '4.0.0';
+const protocolRegistryArtifact = 'https://registry.npmjs.org/@claudian-collab/protocol/-/protocol-4.0.0.tgz';
+const protocolIntegrity = 'sha512-ca5848qPj0Xcb3+pp1JQSWEHV/F4g6URbl/4GqH9T24idg0+CgtJ5mGRETLPXgDNix8wJHVuEOwXfr4HxZDzhg==';
 
 interface PackageManifest {
   readonly dependencies: Readonly<Record<string, string>>;
@@ -75,11 +75,11 @@ describe('Cloud transport dependency baseline', () => {
     assert.equal(typeof ws.createWebSocketStream, 'function');
   });
 
-  it('loads the Step 12 contract only from the exact installed registry artifact', async () => {
+  it('loads the Step 13 contract only from the exact installed registry artifact', async () => {
     const protocol = await import('@claudian-collab/protocol');
 
-    assert.equal(protocol.COLLAB_PROTOCOL_VERSION, 6);
-    assert.equal(protocol.COLLAB_CLOUD_BINDING_VERSION, 2);
+    assert.equal(protocol.COLLAB_PROTOCOL_VERSION, 7);
+    assert.equal(protocol.COLLAB_CLOUD_BINDING_VERSION, 3);
     assert.equal(protocol.COLLAB_PROJECT_BACKUP_COORDINATION_FORMAT_VERSION, 3);
     assert.deepEqual(protocol.COLLAB_PROJECT_MEMBERSHIP_OPERATIONS, [
       'createCloudProject',

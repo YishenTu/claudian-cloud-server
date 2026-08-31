@@ -421,7 +421,7 @@ describe('DevelopmentBootstrapRoutes', () => {
       (await requestJson(
         port,
         'POST',
-        '/v2/development/bootstrap/attempts/attempt_1/unknown',
+        '/v3/development/bootstrap/attempts/attempt_1/unknown',
         envelope({}, 'request_unknown'),
       )).response.status,
       404,

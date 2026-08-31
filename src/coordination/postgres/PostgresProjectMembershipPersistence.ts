@@ -112,6 +112,7 @@ interface ProjectMemberRow {
   readonly binding_state: string;
   readonly claim_expires_at: Date | null;
   readonly claim_state: string | null;
+  readonly override_claim_generation: string | null;
   readonly override_state: string | null;
   readonly display_name: string;
   readonly member_id: string;
@@ -2144,6 +2145,7 @@ export class PostgresProjectMembershipPersistence
               ) THEN 'bound' ELSE 'unbound' END AS binding_state,
               claim.state AS claim_state,
               claim.expires_at AS claim_expires_at,
+              override.claim_generation AS override_claim_generation,
               override.state AS override_state
          FROM claudian_cloud.project_memberships AS membership
          LEFT JOIN LATERAL (
@@ -2155,7 +2157,7 @@ export class PostgresProjectMembershipPersistence
             LIMIT 1
          ) AS claim ON true
          LEFT JOIN LATERAL (
-           SELECT candidate.state
+           SELECT candidate.state, candidate.claim_generation
              FROM claudian_cloud.transferred_membership_claim_overrides AS candidate
             WHERE candidate.project_id = membership.project_id
               AND candidate.member_id = membership.member_id
@@ -2207,6 +2209,10 @@ export class PostgresProjectMembershipPersistence
           ? row.binding_state
           : 'hidden' as const,
         displayName: row.display_name,
+        importedClaimGeneration: importedClaimState === 'hidden'
+          || importedClaimState === 'not-applicable'
+          ? null
+          : Number(row.override_claim_generation ?? 0),
         importedClaimState,
         memberId: row.member_id,
         membershipRevision,

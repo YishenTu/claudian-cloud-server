@@ -68,7 +68,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
             projectId: PROJECT_ID,
             secret: Buffer.alloc(32, 7).toString('base64url'),
           },
-          protocolVersion: 6,
+          protocolVersion: 7,
           requestId: 'request-join-diverged',
         }),
         headers: { 'content-type': 'application/json' },
@@ -135,7 +135,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
             projectId: PROJECT_ID,
             projectName: 'Cloud Route Project',
           },
-          protocolVersion: 6,
+          protocolVersion: 7,
           requestId: 'route_request',
         }),
         headers: {
@@ -222,6 +222,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
               bindingState: 'unbound' as const,
               displayName: 'Target',
               importedClaimState: 'not-applicable' as const,
+              importedClaimGeneration: null,
               memberId: 'member-target',
               membershipRevision: 2,
               role: 'member' as const,
@@ -255,6 +256,8 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
             memberId: 'member-target',
             projectId: PROJECT_ID,
             secretReplayExpiresAt: '2026-09-29T01:02:03.000Z',
+            targetAuthorityGeneration: 7,
+            transferId: 'transfer-imported',
           });
         },
         revoke: () => {
@@ -469,7 +472,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
     for (const [operation, data] of requests) {
       const route = collabCloudProjectOperationRoute(PROJECT_ID, operation);
       const response = await fetch(`${base}${route.target}`, {
-        body: JSON.stringify({ data, protocolVersion: 6, requestId: `request-${operation}` }),
+        body: JSON.stringify({ data, protocolVersion: 7, requestId: `request-${operation}` }),
         headers: { 'content-type': 'application/json' },
         method: route.method,
       });

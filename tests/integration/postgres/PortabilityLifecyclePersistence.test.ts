@@ -1824,6 +1824,18 @@ describe('portability lifecycle persistence', () => {
             memberId: importedMemberId,
             transferId,
           });
+          const original = (await scope.membership.listProjectMembers({
+            actorRole: 'manager',
+            now: T1,
+          })).members.find(member => member.memberId === importedMemberId);
+          assert.equal(original?.importedClaimState, 'original-active');
+          assert.equal(original.importedClaimGeneration, 0);
+          const redacted = (await scope.membership.listProjectMembers({
+            actorRole: 'member',
+            now: T1,
+          })).members.find(member => member.memberId === importedMemberId);
+          assert.equal(redacted?.importedClaimState, 'hidden');
+          assert.equal(redacted.importedClaimGeneration, null);
           assert.deepEqual(
             await scope.membership.getImportedMembershipClaimFacts(
               importedMemberId,
@@ -1874,6 +1886,12 @@ describe('portability lifecycle persistence', () => {
           assert.equal((await scope.membership.reissueTransferredMembershipClaim(
             first,
           )).status, 'created');
+          const overridden = (await scope.membership.listProjectMembers({
+            actorRole: 'manager',
+            now: T1,
+          })).members.find(member => member.memberId === importedMemberId);
+          assert.equal(overridden?.importedClaimState, 'override-active');
+          assert.equal(overridden.importedClaimGeneration, 1);
           assert.equal((await scope.membership.reissueTransferredMembershipClaim(
             first,
           )).status, 'replayed');
@@ -1900,6 +1918,12 @@ describe('portability lifecycle persistence', () => {
           })).status, 'created');
 
           const secondDigest = '5'.repeat(64);
+          const revoked = (await scope.membership.listProjectMembers({
+            actorRole: 'manager',
+            now: T2,
+          })).members.find(member => member.memberId === importedMemberId);
+          assert.equal(revoked?.importedClaimState, 'revoked');
+          assert.equal(revoked.importedClaimGeneration, 1);
           const secondExpires = new Date(
             Date.parse(T3) + 30 * 24 * 60 * 60 * 1_000,
           ).toISOString();
@@ -1968,12 +1992,14 @@ describe('portability lifecycle persistence', () => {
             }),
             receipt,
           );
-          assert.equal((await scope.membership.listProjectMembers({
+          const redeemed = (await scope.membership.listProjectMembers({
             actorRole: 'manager',
             now: redeemedAt,
           })).members.find(member => (
             member.memberId === importedMemberId
-          ))?.importedClaimState, 'redeemed');
+          ));
+          assert.equal(redeemed?.importedClaimState, 'redeemed');
+          assert.equal(redeemed.importedClaimGeneration, 2);
         });
       } finally {
         await store.close();
