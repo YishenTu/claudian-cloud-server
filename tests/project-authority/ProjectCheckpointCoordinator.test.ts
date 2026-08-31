@@ -122,7 +122,7 @@ function fixture(
     operationId: 'operation-transfer',
     profile: 'authority-transfer',
     projectId: 'project-a',
-    protocolVersion: 6,
+    protocolVersion: 7,
     refs: Object.freeze([
       Object.freeze({ name: 'refs/heads/main', oid: MAIN_OID }),
       Object.freeze({
@@ -1193,6 +1193,30 @@ describe('ProjectCheckpointCoordinator', () => {
         < events.indexOf('read:repository.bundle:end'),
     );
     await coordinator.close();
+  });
+
+  it('rejects wire-6 staging without importing Git or discarding recovery evidence', async () => {
+    const expected = fixture();
+    const oldManifest = Buffer.from(JSON.stringify({ ...expected.manifest, protocolVersion: 6 }));
+    const originalBytes = Buffer.from(oldManifest);
+    const artifacts = { ...expected.artifacts, 'checkpoint.json': oldManifest };
+    const staging = new MemoryStaging(expected.attempt, artifacts);
+    const repository = new MemoryRepositoryStaging();
+    const coordinator = new ProjectCheckpointCoordinator({ repository, staging });
+    try {
+      await expectCheckpointError(coordinator.validateStaged({
+        attempt: expected.attempt,
+        expectedProfile: 'authority-transfer',
+        expectedSourceAuthority: expected.manifest.sourceAuthority,
+        expectedTargetAuthority: expected.manifest.targetAuthority,
+      }), 'invalid-checkpoint');
+      assert.deepEqual(repository.events, []);
+      assert.equal(staging.events.includes('staging-discard'), false);
+      assert.deepEqual(staging.artifacts, artifacts);
+      assert.deepEqual(staging.artifacts['checkpoint.json'], originalBytes);
+    } finally {
+      await coordinator.close();
+    }
   });
 
   it('fails before Git import when the staged manifest contradicts authority', async () => {

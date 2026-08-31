@@ -7,6 +7,7 @@ import type {
   ProjectTransferredMembershipClaimAdministrationPersistence,
   TransferredMembershipClaimOverrideRecord,
 } from '../../src/coordination/ProjectMembershipPersistence.js';
+import type { PortabilityLifecyclePersistenceReader } from '../../src/coordination/PortabilityLifecyclePersistence.js';
 import { ProtectedSecretCustody } from '../../src/project-authority/lifecycle/ProtectedSecretCustody.js';
 import { TransferredMembershipClaimAuthority } from '../../src/project-authority/membership/TransferredMembershipClaimAuthority.js';
 import { createTrustedIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
@@ -23,6 +24,7 @@ const PRINCIPAL = createTrustedIngressPrincipal({
 class MemoryClaimAdministration
 implements ProjectTransferredMembershipClaimAdministrationPersistence {
   record: TransferredMembershipClaimOverrideRecord | undefined;
+  transferId = 'transfer-imported';
   status: 'created' | 'replayed' | 'stale' = 'created';
 
   getImportedMembershipClaimFacts() {
@@ -30,7 +32,7 @@ implements ProjectTransferredMembershipClaimAdministrationPersistence {
       claimGeneration: this.record?.claimGeneration ?? 0,
       claimSha256: this.record?.claimSha256 ?? 'a'.repeat(64),
       memberId: MEMBER_ID,
-      transferId: 'transfer-imported',
+      transferId: this.transferId,
     });
   }
 
@@ -106,11 +108,36 @@ function fixture() {
         role: 'manager';
         transact<U>(callback: (scope: {
           membership: ProjectTransferredMembershipClaimAdministrationPersistence;
+          portability: Pick<PortabilityLifecyclePersistenceReader, 'getLifecycleJournal'>;
         }) => Promise<U>): Promise<U>;
       }) => Promise<T>) => operation({
         memberId: 'member-manager',
         role: 'manager',
-        transact: callback => callback({ membership: persistence }),
+        transact: callback => callback({
+          membership: persistence,
+          portability: {
+            getLifecycleJournal: transferId => Promise.resolve(transferId === 'transfer-imported' ? {
+              actorMemberId: 'member-manager',
+              batchRevision: 1,
+              batchSha256: 'b'.repeat(64),
+              checkpointSha256: 'a'.repeat(64),
+              createdAt: NOW,
+              direction: 'lan-to-cloud',
+              expectedAuthorityGeneration: 6,
+              idempotencyKey: 'transfer-import-key',
+              kind: 'authority-transfer',
+              operationId: 'transfer-imported',
+              phase: 'completed',
+              projectId: PROJECT_ID,
+              recoveryFromPhase: undefined,
+              requestFingerprint: 'c'.repeat(64),
+              resultSha256: 'd'.repeat(64),
+              scheduledAt: NOW,
+              state: 'completed',
+              updatedAt: NOW,
+            } : undefined),
+          },
+        }),
       }),
     } as never,
   });
@@ -137,9 +164,12 @@ describe('TransferredMembershipClaimAuthority', () => {
       memberId: MEMBER_ID,
       projectId: PROJECT_ID,
       secretReplayExpiresAt: '2026-09-29T06:00:00.000Z',
+      targetAuthorityGeneration: 7,
+      transferId: 'transfer-imported',
     });
     assert.equal(JSON.stringify(persistence.record).includes(CLAIM), false);
-    assert.equal((await authority.reissue(PRINCIPAL, request)).claim, CLAIM);
+    persistence.transferId = 'transfer-newer-import';
+    assert.deepEqual(await authority.reissue(PRINCIPAL, request), created);
   });
 
   it('revokes the exact highest generation and fails closed on stale state', async () => {

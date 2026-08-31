@@ -140,6 +140,7 @@ interface SnapshotFacts extends AdmissionFacts {
   readonly collaboration: CollaborationSnapshot;
   readonly eventSequence: number;
   readonly project: {
+    readonly authorityGeneration: number;
     readonly createdAt: string;
     readonly expectedMainOid: CollabGitOid;
     readonly projectId: CollabProjectId;
@@ -173,6 +174,7 @@ function sameAdmission(left: AdmissionFacts, right: AdmissionFacts): boolean {
 function sameSnapshotFacts(left: SnapshotFacts, right: SnapshotFacts): boolean {
   return sameAdmission(left, right)
     && JSON.stringify(left.collaboration) === JSON.stringify(right.collaboration)
+    && left.project.authorityGeneration === right.project.authorityGeneration
     && left.project.createdAt === right.project.createdAt
     && left.project.projectId === right.project.projectId
     && left.project.projectName === right.project.projectName
@@ -374,6 +376,7 @@ export class ProjectReadAuthority {
         collaboration: collaboration.snapshot,
         eventSequence: await scope.getProjectEventSequence(),
         project: Object.freeze({
+          authorityGeneration: project.authorityGeneration,
           createdAt: project.createdAt,
           expectedMainOid: project.expectedMainOid,
           projectId: project.projectId,
@@ -424,6 +427,7 @@ export class ProjectReadAuthority {
         openRequests: current.collaboration.openRequests,
         openTicketCount: current.collaboration.openTicketCount,
         project: {
+          authorityGeneration: current.project.authorityGeneration,
           createdAt: current.project.createdAt,
           expectedMainOid: current.project.expectedMainOid,
           id: current.project.projectId,

@@ -44,6 +44,7 @@ class MemoryAdministration implements ProjectMembershipAdministrationPersistence
         displayName: 'Target member',
         importedClaimState: input.actorRole === 'manager'
           ? 'original-active' as const : 'hidden' as const,
+        importedClaimGeneration: input.actorRole === 'manager' ? 0 : null,
         memberId: 'member-target',
         membershipRevision: 2,
         role: 'member' as const,

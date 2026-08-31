@@ -336,7 +336,7 @@ async function pushPersonalCommit(
     '-c',
     `http.extraHeader=X-Claudian-Development-Actor: ${actor}`,
     'push',
-    `${baseUrl}/v2/projects/${PROJECT_ID}/repository.git`,
+    `${baseUrl}/v3/projects/${PROJECT_ID}/repository.git`,
     `HEAD:${personalRef}`,
   ]);
   return oid;

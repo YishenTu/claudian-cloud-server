@@ -25,9 +25,11 @@ import { Client } from 'pg';
 import {
   collabCloudGitRoute,
   collabCloudProjectOperationRoute,
+  collabMemberRef,
   decodeCollabCloudCapabilityDocument,
   decodeCollabCloudSuccessEnvelope,
   type CollabControlOperation,
+  type ListProjectMembersResponse,
 } from '@claudian-collab/protocol';
 
 import { createApplication } from '../../../src/composition/createApplication.js';
@@ -171,7 +173,7 @@ async function projectOperation(
   const response = await fetch(`${baseUrl}${route.target}`, {
     body: JSON.stringify({
       data,
-      protocolVersion: 6,
+      protocolVersion: 7,
       requestId: `request-${operation}-${principalId}`,
     }),
     headers: {
@@ -196,7 +198,7 @@ async function rejectedProjectOperation(
   const response = await fetch(`${baseUrl}${route.target}`, {
     body: JSON.stringify({
       data,
-      protocolVersion: 6,
+      protocolVersion: 7,
       requestId: `request-rejected-${operation}-${principalId}`,
     }),
     headers: {
@@ -988,6 +990,216 @@ while :; do sleep 1; done`,
     }
   });
 
+  it('returns the imported transfer descriptor and replays the durable claim', async () => {
+    const database = await acquirePostgresTestDatabase();
+    await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+    const authorityRoot = await mkdtemp(join(tmpdir(), 'claudian-reissue-descriptor-'));
+    const repositoryRoot = join(authorityRoot, 'repositories');
+    await mkdir(repositoryRoot, { mode: 0o700 });
+    await mkdir(`${repositoryRoot}-staging`, { mode: 0o700 });
+    await writeFile(join(authorityRoot, '.authority-volume-id'), `${database.authorityVolumeId}\n`, { mode: 0o600 });
+    const projectId = 'project-reissue-descriptor';
+    const transferId = 'transfer-reissue-descriptor';
+    const importedMemberId = 'member-reissue-descriptor';
+    const managerPrincipal = 'principal-reissue-manager';
+    const custody = keyring();
+    const running = createApplication({
+      config: config({ postgresUrl: database.runtimeUrl, repositoryRoot }),
+      keyring: custody,
+      logger: logger([]),
+      trustedPrincipal: {
+        establishedAssertion: request => ({
+          principalId: request.headers['x-test-established-principal'],
+          provenance: {
+            kind: 'operator-protected-channel',
+            providerId: 'operator-process-test',
+          },
+        }),
+        provider: new TrustedPrincipalProvider(),
+      },
+    });
+    try {
+      const address = await running.start();
+      const baseUrl = `http://${address.host}:${String(address.port)}`;
+      const created = await projectOperation(
+        baseUrl, managerPrincipal, projectId, 'createCloudProject', {
+          idempotencyKey: 'create-reissue-project',
+          managerDisplayName: 'Reissue Manager',
+          projectId,
+          projectName: 'Reissue Project',
+        },
+      ) as Readonly<{ readonly mainOid: string; readonly memberId: string }>;
+      const invitation = await projectOperation(
+        baseUrl, managerPrincipal, projectId, 'createProjectInvitation', {
+          expectedManagerSetGeneration: 1,
+          idempotencyKey: 'reissue-member-invitation',
+          projectId,
+        },
+      ) as Readonly<{ readonly invitationId: string; readonly secret: string }>;
+      const ordinaryPrincipal = 'principal-reissue-member';
+      const ordinaryMember = await projectOperation(
+        baseUrl, ordinaryPrincipal, projectId, 'joinCloudProject', {
+          displayName: 'Ordinary Member',
+          idempotencyKey: 'reissue-member-join',
+          invitationId: invitation.invitationId,
+          projectId,
+          secret: invitation.secret,
+        },
+      ) as Readonly<{ readonly memberId: string }>;
+      // A completed import with logical generation seven and an expired original
+      // claim is the accepted SQL fixture; repository placement stays at one.
+      const migration = new Client({ connectionString: database.migrationUrl });
+      try {
+        await migration.connect();
+        await migration.query('BEGIN');
+        await migration.query(
+          "SELECT set_config('claudian_cloud.project_id', $1, true)",
+          [projectId],
+        );
+        await migration.query(
+          `UPDATE claudian_cloud.projects SET authority_generation = 7
+             WHERE project_id = $1`,
+          [projectId],
+        );
+        await migration.query(
+          `INSERT INTO claudian_cloud.project_memberships (
+             project_id, member_id, role, status, revision, display_name,
+             created_at, updated_at, activated_at
+           ) VALUES ($1, $2, 'member', 'active', 1, 'Imported Member',
+                     '2026-06-01T00:00:00Z', '2026-06-01T00:00:00Z',
+                     '2026-06-01T00:00:00Z')`,
+          [projectId, importedMemberId],
+        );
+        await migration.query(
+          `INSERT INTO claudian_cloud.project_lifecycle_journals (
+             project_id, operation_id, kind, direction, phase,
+             recovery_from_phase, state, expected_authority_generation,
+             actor_member_id, idempotency_key, request_fingerprint,
+             checkpoint_sha256, batch_revision, batch_sha256, result_sha256,
+             scheduled_at, created_at, updated_at
+           ) VALUES ($1, $2, 'authority-transfer', 'lan-to-cloud', 'completed',
+             NULL, 'completed', 6, $3, 'reissue-import-key', repeat('8', 64),
+             repeat('a', 64), 1, repeat('b', 64), NULL,
+             '2026-06-01T00:00:00Z', '2026-06-01T00:00:00Z', '2026-06-01T00:00:00Z')`,
+          [projectId, transferId, created.memberId],
+        );
+        await migration.query('COMMIT');
+      } finally {
+        await migration.end();
+      }
+      const store = new PostgresCoordination({
+        ...config({ postgresUrl: database.runtimeUrl, repositoryRoot }).postgres,
+        runtimeConnectionString: database.runtimeUrl,
+        shutdownTimeoutMs: 1_000,
+      });
+      try {
+        const placement = await store.withProjectScope(projectId, async scope => {
+          const receiptPublicKey = custody.receiptKeys[0]?.publicKey.export({ format: 'jwk' }).x;
+          assert.ok(receiptPublicKey);
+          await scope.portability.putTransferReceiptKey({
+            createdAt: '2026-06-01T00:00:00.000Z',
+            publicKey: receiptPublicKey,
+            receiptKeyId: custody.activeReceiptKeyId,
+            transferId,
+          });
+          await scope.portability.putTransferredMembershipClaim({
+            batchRevision: 1,
+            checkpointSha256: 'a'.repeat(64),
+            claimSha256: 'c'.repeat(64),
+            createdAt: '2026-06-01T00:00:00.000Z',
+            expiresAt: '2026-07-01T00:00:00.000Z',
+            memberId: importedMemberId,
+            transferId,
+          });
+          return scope.getRepositoryPlacement();
+        });
+        assert.ok(placement);
+        await execFileAsync(GIT_EXECUTABLE, [
+          '--git-dir', join(repositoryRoot, Buffer.from(projectId).toString('hex'), placement.repositoryStorageKey),
+          'update-ref', collabMemberRef(importedMemberId), created.mainOid,
+        ]);
+      } finally {
+        await store.close();
+      }
+      const request = {
+        expectedClaimGeneration: 0,
+        expectedManagerSetGeneration: 1,
+        expectedMembershipRevision: 1,
+        idempotencyKey: 'reissue-descriptor-key',
+        memberId: importedMemberId,
+        projectId,
+      };
+      const originalMembers = await projectOperation(
+        baseUrl, managerPrincipal, projectId, 'listProjectMembers', { projectId },
+      ) as ListProjectMembersResponse;
+      const original = originalMembers.members.find(member => member.memberId === importedMemberId);
+      assert.equal(original?.importedClaimState, 'expired');
+      assert.equal(original.importedClaimGeneration, 0);
+      const ordinaryMembers = await projectOperation(
+        baseUrl, ordinaryPrincipal, projectId, 'listProjectMembers', { projectId },
+      ) as ListProjectMembersResponse;
+      assert.ok(ordinaryMembers.members.every(member => (
+        member.importedClaimState === 'hidden' && member.importedClaimGeneration === null
+      )));
+      await rejectedProjectOperation(
+        baseUrl, ordinaryPrincipal, projectId, 'reissueTransferredMembershipClaim', request,
+      );
+      await rejectedProjectOperation(
+        baseUrl, managerPrincipal, projectId, 'reissueTransferredMembershipClaim', {
+          ...request, memberId: ordinaryMember.memberId,
+        },
+      );
+      const response = await projectOperation(
+        baseUrl, managerPrincipal, projectId, 'reissueTransferredMembershipClaim', request,
+      ) as Readonly<{
+        readonly claimGeneration: number;
+        readonly createdAt: string;
+        readonly expiresAt: string;
+        readonly memberId: string;
+        readonly projectId: string;
+        readonly targetAuthorityGeneration: number;
+        readonly transferId: string;
+      }>;
+      assert.equal(response.transferId, transferId);
+      assert.equal(response.targetAuthorityGeneration, 7);
+      assert.equal(response.projectId, projectId);
+      assert.equal(response.memberId, importedMemberId);
+      assert.equal(response.claimGeneration, 1);
+      assert.equal(Date.parse(response.expiresAt) - Date.parse(response.createdAt), 2_592_000_000);
+      assert.deepEqual(await projectOperation(
+        baseUrl, managerPrincipal, projectId, 'reissueTransferredMembershipClaim', request,
+      ), response);
+      await rejectedProjectOperation(
+        baseUrl, 'principal-reissue-outsider', projectId,
+        'reissueTransferredMembershipClaim', request,
+      );
+      await rejectedProjectOperation(
+        baseUrl, managerPrincipal, projectId, 'reissueTransferredMembershipClaim', {
+          ...request, idempotencyKey: 'reissue-stale-key',
+        },
+      );
+      const expiryStore = new PostgresCoordination({
+        ...config({ postgresUrl: database.runtimeUrl, repositoryRoot }).postgres,
+        runtimeConnectionString: database.runtimeUrl,
+        shutdownTimeoutMs: 1_000,
+      });
+      try {
+        const expiredMembers = await expiryStore.withProjectScope(projectId, scope => (
+          scope.membership.listProjectMembers({ actorRole: 'manager', now: response.expiresAt })
+        ));
+        const expired = expiredMembers.members.find(member => member.memberId === importedMemberId);
+        assert.equal(expired?.importedClaimState, 'expired');
+        assert.equal(expired.importedClaimGeneration, 1);
+      } finally {
+        await expiryStore.close();
+      }
+    } finally {
+      await running.close();
+      await rm(authorityRoot, { force: true, recursive: true });
+      await database.close();
+    }
+  });
+
   it('joins every Cloud membership group through the real process and restart path', async () => {
     const projectId = 'project-membership-process';
     const otherProjectId = 'project-membership-cross-scope';
@@ -1039,7 +1251,7 @@ while :; do sleep 1; done`,
       const snapshotResponse = await fetch(`${baseUrl}${snapshotRoute.target}`, {
         body: JSON.stringify({
           data: { projectId },
-          protocolVersion: 6,
+          protocolVersion: 7,
           requestId: 'request-production-snapshot',
         }),
         headers: {
