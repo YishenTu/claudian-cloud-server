@@ -719,7 +719,7 @@ function checkpoint(includeOfflineMember: boolean): ValidatedProjectCheckpoint {
     operationId: TRANSFER_ID,
     profile: 'authority-transfer',
     projectId: PROJECT_ID,
-    protocolVersion: 7,
+    protocolVersion: 8,
     refs: Object.freeze([
       Object.freeze({ name: 'refs/heads/main', oid: MAIN_OID }),
       ...members.map(member => Object.freeze({
@@ -979,6 +979,21 @@ async function assertCode(operation: Promise<unknown>, code: string): Promise<vo
 }
 
 describe('LanToCloudTransferCoordinator', () => {
+  it('authorizes checkpoint uploads only for the exact LAN source principal', async () => {
+    const test = fixture();
+    await test.coordinator.begin(beginInput(test));
+    const request = { projectId: PROJECT_ID, transferId: TRANSFER_ID };
+
+    assert.equal((await test.coordinator.getCheckpointUploadStatus({
+      principalId: HOST_PRINCIPAL_ID,
+      request,
+    })).phase, 'source-quiesced');
+    await assertCode(test.coordinator.getCheckpointUploadStatus({
+      principalId: OFFLINE_PRINCIPAL_ID,
+      request,
+    }), 'authorization-denied');
+  });
+
   it('exposes safe fixed errors at the Project Authority seam', () => {
     const error = new LanToCloudTransferCoordinatorError('state-conflict');
 

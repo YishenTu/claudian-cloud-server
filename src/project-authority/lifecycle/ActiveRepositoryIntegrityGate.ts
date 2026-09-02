@@ -101,7 +101,8 @@ export class ActiveRepositoryIntegrityGate {
         const placement = await scope.getRepositoryPlacement();
         const memberships = await scope.listMemberships();
         if (
-          project?.serviceState !== 'active'
+          (project?.serviceState !== 'active'
+            && project?.serviceState !== 'read-only-transition')
           || placement === undefined
           || !sameRepositoryPlacement(placement, catalogPlacement)
         ) {

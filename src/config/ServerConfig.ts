@@ -1,4 +1,5 @@
 import { isAbsolute, normalize, parse } from 'node:path';
+import { isIP, SocketAddress } from 'node:net';
 
 import { COLLAB_CLOUD_BINDING_LIMITS } from '@claudian-collab/protocol';
 
@@ -67,18 +68,48 @@ export interface RepositoryConfig {
   readonly storageNodeId: string;
 }
 
+export interface TrustedIngressPrincipalConfig {
+  readonly assertion: Readonly<{
+    readonly deviceCredentialId?: string;
+    readonly principalId: string;
+    readonly provenance: Readonly<{
+      readonly kind: 'operator-protected-channel';
+      readonly providerId: string;
+    }>;
+  }>;
+  readonly sourceAddress: string;
+}
+
+export interface TrustedIngressConfig {
+  readonly mode: 'proxy-v2';
+  readonly preambleTimeoutMs: number;
+  readonly principals: readonly TrustedIngressPrincipalConfig[];
+}
+
+export type PrincipalProfile = 'private-development' | 'trusted-ingress';
+
 export interface ServerConfig {
   readonly developmentBootstrap: DevelopmentBootstrapConfig;
   readonly eventAdmission: EventAdmissionConfig;
   readonly gitAdmission: GitAdmissionConfig;
   readonly http: HttpConfig;
   readonly postgres: PostgresConfig;
+  readonly principalProfile: PrincipalProfile;
   readonly repository: RepositoryConfig;
   readonly shutdownTimeoutMs: number;
+  readonly trustedIngress?: TrustedIngressConfig;
 }
 
 const SHUTDOWN_TIMEOUT_MS = 15_000;
 const STORAGE_NODE_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
+const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const PRINCIPAL_PROFILE_FIELD = 'CLAUDIAN_CLOUD_PRINCIPAL_PROFILE';
+const PROXY_V2_PREAMBLE_TIMEOUT_MS = 5_000;
+const TRUSTED_INGRESS_MODE_FIELD = 'CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE';
+const TRUSTED_INGRESS_PROVIDER_FIELD =
+  'CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID';
+const TRUSTED_INGRESS_SOURCE_MAP_FIELD =
+  'CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCE_MAP';
 
 const CONFIG_FIELDS = new Set([
   'CLAUDIAN_CLOUD_BIND_HOST',
@@ -107,6 +138,7 @@ const CONFIG_FIELDS = new Set([
   'CLAUDIAN_CLOUD_EVENT_MAX_CONNECTIONS_PER_PROJECT',
   'CLAUDIAN_CLOUD_EVENT_MAX_PENDING_AUTHORIZATIONS',
   'CLAUDIAN_CLOUD_PORT',
+  PRINCIPAL_PROFILE_FIELD,
   'CLAUDIAN_CLOUD_POSTGRES_ORDINARY_POOL_MAX',
   'CLAUDIAN_CLOUD_POSTGRES_PINNED_POOL_MAX',
   'CLAUDIAN_CLOUD_POSTGRES_RESERVED_POOL_MAX',
@@ -115,7 +147,108 @@ const CONFIG_FIELDS = new Set([
   'CLAUDIAN_CLOUD_REPOSITORY_ROOT',
   'CLAUDIAN_CLOUD_STAGING_ROOT',
   'CLAUDIAN_CLOUD_STORAGE_NODE_ID',
+  TRUSTED_INGRESS_MODE_FIELD,
+  TRUSTED_INGRESS_PROVIDER_FIELD,
+  TRUSTED_INGRESS_SOURCE_MAP_FIELD,
 ]);
+
+function canonicalIpAddress(value: string): string | undefined {
+  const family = isIP(value);
+  if (family === 0) return undefined;
+  try {
+    return new SocketAddress({
+      address: value,
+      family: family === 4 ? 'ipv4' : 'ipv6',
+      port: 0,
+    }).address;
+  } catch {
+    return undefined;
+  }
+}
+
+function trustedIngressEntry(
+  value: unknown,
+  providerId: string,
+): TrustedIngressPrincipalConfig {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCE_MAP_FIELD);
+  }
+  const source = value as Readonly<Record<string, unknown>>;
+  const keys = Object.keys(source);
+  const allowed = new Set(['deviceCredentialId', 'principalId', 'sourceAddress']);
+  if (
+    keys.length < 2
+    || keys.some(key => !allowed.has(key))
+    || !Object.hasOwn(source, 'principalId')
+    || !Object.hasOwn(source, 'sourceAddress')
+    || typeof source.principalId !== 'string'
+    || !OPAQUE_ID_PATTERN.test(source.principalId)
+    || typeof source.sourceAddress !== 'string'
+  ) throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCE_MAP_FIELD);
+  const canonicalSource = canonicalIpAddress(source.sourceAddress);
+  if (canonicalSource === undefined || canonicalSource !== source.sourceAddress) {
+    throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCE_MAP_FIELD);
+  }
+  const deviceCredentialId = source.deviceCredentialId;
+  if (
+    deviceCredentialId !== undefined
+    && (typeof deviceCredentialId !== 'string'
+      || !OPAQUE_ID_PATTERN.test(deviceCredentialId))
+  ) throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCE_MAP_FIELD);
+  const provenance = Object.freeze({
+    kind: 'operator-protected-channel' as const,
+    providerId,
+  });
+  const assertion = Object.freeze({
+    ...(deviceCredentialId === undefined ? {} : { deviceCredentialId }),
+    principalId: source.principalId,
+    provenance,
+  });
+  return Object.freeze({ assertion, sourceAddress: canonicalSource });
+}
+
+function decodeTrustedIngress(
+  source: ConfigSource,
+  profile: PrincipalProfile,
+): TrustedIngressConfig | undefined {
+  const selected = [
+    TRUSTED_INGRESS_MODE_FIELD,
+    TRUSTED_INGRESS_PROVIDER_FIELD,
+    TRUSTED_INGRESS_SOURCE_MAP_FIELD,
+  ].some(field => source[field] !== undefined);
+  if (profile === 'private-development') {
+    if (selected) throw new ConfigError('profile-conflict', PRINCIPAL_PROFILE_FIELD);
+    return undefined;
+  }
+  if (!selected) throw new ConfigError('missing-field', TRUSTED_INGRESS_MODE_FIELD);
+  const mode = requireConfigValue(source, TRUSTED_INGRESS_MODE_FIELD);
+  if (mode !== 'proxy-v2') {
+    throw new ConfigError('profile-conflict', TRUSTED_INGRESS_MODE_FIELD);
+  }
+  const providerId = requireConfigValue(source, TRUSTED_INGRESS_PROVIDER_FIELD);
+  if (!OPAQUE_ID_PATTERN.test(providerId)) {
+    throw new ConfigError('invalid-field', TRUSTED_INGRESS_PROVIDER_FIELD);
+  }
+  const encoded = requireConfigValue(source, TRUSTED_INGRESS_SOURCE_MAP_FIELD);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(encoded) as unknown;
+  } catch {
+    throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCE_MAP_FIELD);
+  }
+  if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 256) {
+    throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCE_MAP_FIELD);
+  }
+  const principals = parsed.map(value => trustedIngressEntry(value, providerId));
+  if (new Set(principals.map(entry => entry.sourceAddress)).size !== principals.length) {
+    throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCE_MAP_FIELD);
+  }
+  return Object.freeze({
+    mode: 'proxy-v2' as const,
+    preambleTimeoutMs: PROXY_V2_PREAMBLE_TIMEOUT_MS,
+    principals: Object.freeze(principals),
+  });
+}
 
 function parseInteger(
   source: ConfigSource,
@@ -165,6 +298,12 @@ function invalidWhen(condition: boolean, field: string): void {
 
 export function decodeServerConfig(source: ConfigSource): ServerConfig {
   rejectUnknownConfigFields(source, CONFIG_FIELDS);
+  const profileValue = requireConfigValue(source, PRINCIPAL_PROFILE_FIELD);
+  if (profileValue !== 'private-development' && profileValue !== 'trusted-ingress') {
+    throw new ConfigError('invalid-field', PRINCIPAL_PROFILE_FIELD);
+  }
+  const principalProfile: PrincipalProfile = profileValue;
+  const trustedIngress = decodeTrustedIngress(source, principalProfile);
 
   const host = requireConfigValue(source, 'CLAUDIAN_CLOUD_BIND_HOST');
   if (host !== '127.0.0.1') {
@@ -478,7 +617,9 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
     gitAdmission,
     http,
     postgres,
+    principalProfile,
     repository,
     shutdownTimeoutMs: SHUTDOWN_TIMEOUT_MS,
+    ...(trustedIngress === undefined ? {} : { trustedIngress }),
   });
 }

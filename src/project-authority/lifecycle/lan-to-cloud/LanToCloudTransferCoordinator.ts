@@ -64,6 +64,7 @@ import type {
 import {
   defaultAuthorityTransferExpiresAt,
 } from '../AuthorityTransferExpiry.js';
+import { isDurableAuthorityTransferProof } from '../AuthorityTransferProof.js';
 
 export type LanToCloudTransferCoordinatorErrorCode =
   | 'authorization-denied'
@@ -341,9 +342,7 @@ function decodeSourceEvidence(value: string | undefined): StoredSourceEvidence {
       || !SHA256_PATTERN.test(record.checkpointManifestSha256)
       || typeof record.principalId !== 'string'
       || !PRINCIPAL_PATTERN.test(record.principalId)
-      || typeof record.proof !== 'string'
-      || record.proof.length === 0
-      || record.proof.length > 7_000
+      || !isDurableAuthorityTransferProof(record.proof)
       || typeof record.receiptKeyId !== 'string'
       || !isCollabOpaqueId(record.receiptKeyId)
       || !canonicalSigningPublicKey(record.receiptPublicKey)
@@ -1433,6 +1432,19 @@ implements ProjectLifecycleRecoveryOwner {
         return binding?.state === 'active';
       });
       if (!sourceAuthorized && !targetAuthorized) return fail('authorization-denied');
+      return this.#requireStatus(lease, request.transferId);
+    });
+  }
+
+  getCheckpointUploadStatus(
+    input: GetLanToCloudTransferInput,
+  ): Promise<CollabAuthorityTransferStatus> {
+    const request = decodeRequest(
+      'getProjectAuthorityTransfer',
+      input.request,
+    );
+    return this.#run(request.projectId, async lease => {
+      await this.#authorizeSource(lease, request.transferId, input.principalId);
       return this.#requireStatus(lease, request.transferId);
     });
   }

@@ -227,7 +227,7 @@ async function importTransfer(
     operationId: transferId,
     profile: 'authority-transfer',
     projectId,
-    protocolVersion: 7,
+    protocolVersion: 8,
     refs,
     sourceAuthority: Object.freeze({ generation: 1, kind: 'lan' }),
     targetAuthority: Object.freeze({ generation: 2, kind: 'cloud' }),
@@ -617,8 +617,11 @@ describe('LAN-to-Cloud cross-store recovery', () => {
             : coordination;
         const authorityTransfer = createMaintenanceAuthorityTransferRecovery({
           checkpoint: checkpointPort(transfer),
-          coordination: exactCoordination,
-          environmentIdentity: 'test-authority-volume',
+          cloudToLan: {
+            close: () => Promise.resolve(),
+            recover: () => Promise.resolve('waiting-for-external-proof'),
+            reserveRecovery: () => Promise.resolve(undefined),
+          },
           repository,
         });
         const dispatcher = new ProjectLifecycleRecoveryDispatcher({

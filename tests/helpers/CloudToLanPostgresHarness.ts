@@ -507,31 +507,23 @@ export function cloudToLanCoordinator(input: Readonly<{
       await writeDurableJson(path, { ...current, state: 'activated' });
     },
     verifyRedemptionReceipt: () => Promise.resolve(),
-    invalidateAndClean: async (request: Readonly<{
-      readonly checkpointSha256: string | undefined;
-      readonly projectId: string;
-      readonly stageSha256: string | undefined;
-      readonly transferId: string;
+    verifyCleanup: async (request: Readonly<{
+      readonly proof: {
+        readonly projectId: string;
+        readonly transferId: string;
+      };
     }>) => {
-      if (input.durableRoot !== undefined) {
-        await writeDurableJson(`${operationPath(
-          input.durableRoot,
-          request.projectId,
-          request.transferId,
-        )}.target.json`, {
-          checkpointSha256: request.checkpointSha256,
-          stageSha256: request.stageSha256,
-          state: 'invalidated',
-        });
+      if (input.durableRoot === undefined) return;
+      const path = `${operationPath(
+        input.durableRoot,
+        request.proof.projectId,
+        request.proof.transferId,
+      )}.target.json`;
+      const current = await readJson(path);
+      if (current?.state !== 'staged' && current?.state !== 'invalidated') {
+        throw new Error('cloud-to-lan-test-target.not-staged');
       }
-      return Object.freeze({
-        cleanupSha256: sha256(JSON.stringify({
-          checkpointSha256: request.checkpointSha256,
-          projectId: request.projectId,
-          stageSha256: request.stageSha256,
-          transferId: request.transferId,
-        })),
-      });
+      await writeDurableJson(path, { ...current, state: 'invalidated' });
     },
   };
   return new CloudToLanTransferCoordinator({
@@ -552,7 +544,17 @@ export function cloudToLanCoordinator(input: Readonly<{
     relinquishmentIntentIdFactory: () => (
       `relinquish-${sha256(input.projectId).slice(0, 16)}`
     ),
-    relinquishmentSigner: { sign: () => Promise.resolve(SIGNATURE) },
+    relinquishmentSigner: {
+      activeKey: Object.freeze({
+        publicKey: Buffer.alloc(32, 6).toString('base64url'),
+        receiptKeyId: 'receipt-key-source',
+      }),
+      resolveReceiptKey: () => Promise.resolve(Object.freeze({
+        publicKey: Buffer.alloc(32, 6).toString('base64url'),
+        receiptKeyId: 'receipt-key-source',
+      })),
+      sign: () => Promise.resolve(SIGNATURE),
+    },
     repository: {
       reserveExactRepositoryOperation: projectId => Promise.resolve(Object.freeze({
         async close() {},
@@ -666,6 +668,45 @@ export function activateCloudToLan(
       projectId,
       relinquishmentProof: proof,
       targetActivationProof: Buffer.alloc(32, 3).toString('base64url'),
+      transferId,
+    },
+  });
+}
+
+export async function confirmCloudToLanTargetInvalidated(
+  coordinator: CloudToLanTransferCoordinator,
+  store: PostgresCoordination,
+  projectId: string,
+  transferId: string,
+): Promise<CollabAuthorityTransferStatus> {
+  const facts = await store.withProjectScope(projectId, async scope => ({
+    journal: await scope.portability.getLifecycleJournal(transferId),
+    recovery: await scope.portability.getAuthorityTransferRecovery(transferId),
+  }));
+  assert.ok(facts.journal);
+  assert.ok(facts.recovery);
+  return coordinator.confirmTargetInvalidated({
+    principalId: CLOUD_TO_LAN_TARGET_PRINCIPAL,
+    request: {
+      idempotencyKey: `cleanup-${sha256(projectId).slice(0, 16)}`,
+      projectId,
+      proof: {
+        batchRevision: facts.journal.batchRevision ?? null,
+        batchSha256: facts.journal.batchSha256 ?? null,
+        checkpointSha256: facts.journal.checkpointSha256 ?? null,
+        cleanupSha256: '7'.repeat(64),
+        invalidatedAt: '2026-08-28T00:00:00.000Z',
+        operationIntentId: `cleanup-${sha256(projectId).slice(0, 16)}`,
+        projectId,
+        receiptKeyId: `receipt-${sha256(projectId).slice(0, 16)}`,
+        signature: SIGNATURE,
+        signatureAlgorithm: 'ed25519',
+        sourceAuthority: { generation: 4, kind: 'cloud' },
+        stageSha256: facts.recovery.stageSha256 ?? null,
+        targetAuthority: { generation: 5, kind: 'lan' },
+        targetHostMemberId: CLOUD_TO_LAN_TARGET_ID,
+        transferId,
+      },
       transferId,
     },
   });

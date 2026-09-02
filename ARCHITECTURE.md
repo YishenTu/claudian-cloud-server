@@ -94,7 +94,7 @@ virtual machine or persistent container per Project.
 15. **Placement generation is an execution fence.** Every repository operation
     carries a server-derived placement lease. Stale generations and demoted
     nodes fail closed; placement is not merely routing metadata.
-16. **Collab has three independent version authorities.** The implemented registry baseline is `@claudian-collab/protocol@3.3.2`, canonical wire version `6`, and Cloud binding version `2`, while Claudian LAN Project control remains independently at version `9`. No adapter infers compatibility from package SemVer alone or couples a Cloud change to the LAN binding.
+16. **Collab has three independent version authorities.** The implemented registry baseline is `@claudian-collab/protocol@4.1.3`, canonical wire version `8`, and Cloud binding version `4`, while Claudian LAN Project control remains independently versioned. No adapter infers compatibility from package SemVer alone or couples a Cloud change to the LAN binding.
 17. **Durable phase records are singular authorities.** Activation, cancellation, client binding, and Accept each have one named journal or transition record. Membership, placement, repository directories, refs, indexes, and marker files are observations used to advance or reject that journal; none becomes a parallel phase authority.
 18. **Authority generation fences authority movement.** Existing authorities begin at generation `1`; a supported transfer activates the target at exactly `source + 1`. Pre-cutover cancellation must prove the target has not accepted relinquishment. At or after the one-way source fence, every recovery owner moves forward and the source can never become writable again.
 19. **One semantic checkpoint serves portability.** A versioned manifest, canonical logical coordination stream, and exact Git bundle share profile-specific allowlists for authority transfer, backup, and export. PostgreSQL rows, SQLite images, credentials, CA private keys, working trees, and operational refs are never the portable contract.
@@ -204,9 +204,16 @@ policy. The private-development exception is defined in §10.1.
 
 The production profile contract decides which attribution is mandatory.
 Managed ingress must supply both the stable Account ID and device-credential ID
-established upstream. A supported self-hosted ingress may supply only its stable
-actor ID when it has no device concept. Missing attribution is never inferred
-from client fields or source IP.
+established upstream. The supported self-hosted production profile accepts one
+bounded PROXY protocol v2 source assertion only from the operator-owned loopback
+TCP ingress and resolves it through an immutable operator source-to-principal
+mapping. The operator authenticates the connection and owns that mapping;
+Cloud Server neither validates caller credentials nor treats a direct socket
+peer, ordinary header, or identity-bearing PROXY TLV as a principal. Missing or
+unmapped attribution fails closed for every principal-bound route. In this
+self-hosted profile, each mapped principal is the authenticated device's stable
+Claudian installation key; LAN-to-Cloud source proof binds that same key so a
+proof captured by one admitted installation cannot be replayed by another.
 
 The request may carry the target `projectId` and operation parameters. It may
 not supply authoritative `accountId`, `deviceId`, `memberId`, role,
@@ -491,7 +498,7 @@ Git command execution remains internal to `GitRepositoryAuthority`. The isolated
 
 ## 8. Protocol ownership and compatibility
 
-The standalone `claudian-collab-protocol` repository produces `@claudian-collab/protocol`. The Cloud Server depends on the exact `3.3.2` npm registry release. That release carries canonical wire version `6`, Cloud binding version `2`, and backup coordination format version `3`; its npm lock entry records the immutable registry artifact integrity used by local development, CI, and deployments. Package SemVer, canonical wire version, Cloud binding version, backup coordination format version, and the independently owned LAN version are never substituted for one another.
+The standalone `claudian-collab-protocol` repository produces `@claudian-collab/protocol`. The Cloud Server depends on the exact `4.1.3` npm registry release. That release carries canonical wire version `8`, Cloud binding version `4`, and backup coordination format version `3`; its npm lock entry records the immutable registry artifact integrity used by local development, CI, and deployments. Package SemVer, canonical wire version, Cloud binding version, backup coordination format version, and the independently owned LAN version are never substituted for one another.
 
 The package exposes curated boundaries only:
 
@@ -812,6 +819,8 @@ Before either source-relinquishment phase, both directions cancel through the sa
 | `cancelled` | The stable terminal cancellation result is replayable and recovery candidates plus remaining attempt-only state are removed. |
 
 Cancellation may start after any pre-relinquishment transfer phase, including after claim custody or inactive repository publication. No directory absence, disconnect, timeout, or unverified remote response permits source reopen. At or after `source-relinquished` or `cloud-relinquished`, cancellation is rejected and every source/target recovery path moves forward to target activation, terminal response, and any authorized deletion handoff.
+
+Cloud-to-LAN Manager cancellation is an asynchronous durable intent, not a synchronous remote-cleanup call. The Manager request persists `cancel-intent` and may return that pending status. The selected target observes the intent, durably fences the exact transfer/generation, removes only its attempt-owned staging, claim hashes, and inactive placement, then submits one canonical target-signed cleanup confirmation through its own trusted Cloud principal. The confirmation binds the transfer, source and target generations, checkpoint and stage facts, current claim-batch facts when present, and cleanup digest. Cloud verifies the already-bound selected target principal and signature before advancing `target-invalidated`, `target-cleaned`, reopening the unchanged source generation, and terminalizing cancellation. Reply loss replays the same frozen confirmation; missing, stale, unsigned, or contradictory proof leaves the source fenced. The target never depends on a Cloud-owned client for Claudian's private LAN HTTP binding.
 
 Socket presence and events are latency hints, never consent or identity proof. LAN-to-Cloud activation binds only the source Host through source proof. Cloud-to-LAN staging binds only the selected target Host. Every other active Member remains imported and unbound. The old authority authenticates a former Member and returns only that Member's retained opaque claim. Cloud redemption binds the exact accepted ingress principal; LAN redemption binds the claimant's already persisted client-generated credential hash. Exact retries return the same target-signed receipt. The same former Member forwards that receipt through the old binding; only that receipt or expiry scrubs the source-held claim. Batch custody acknowledgement never scrubs.
 
@@ -1338,7 +1347,7 @@ The completed local-milestone merge order was: the original shared protocol prod
 
 The clean schema baseline is one serial, checksum-verified catalog from `0001_foundation.sql` through `0011_cloud_project_membership.sql`. Empty-database initialization applies the full catalog atomically; an existing database must already contain that exact completed history. Each schema change owns its checksum registry entry, least-privilege grants, forced-RLS policy, and real PostgreSQL evidence. Gates freeze that ordered catalog; they do not become a second migration owner.
 
-Shared contract files, compatibility policy, and releases belong to the standalone protocol repository. Claudian and Cloud own their consumer package manifests and lockfiles; no later transport tranche edits those manifests opportunistically. Published `3.3.2` is the implemented baseline. Step 11 followed a producer-first order for exact `3.2.1` with wire v6, Cloud binding v2, and backup coordination format v2. Step 12 then published exact `3.3.0`, retained wire v6 and Cloud binding v2, and directly replaced the pre-production backup format with v3 before either consumer converged. The corrective `3.3.1` patch added the backup-v3 tombstone required for bounded Manager-responsibility compaction without changing wire or binding versions. The `3.3.2` patch consolidates checkpoint validation and applies the existing inclusive 256 MiB limit to actual UTF-8 backup artifacts without changing those contracts. The exact pin alone advertises nothing; each new capability is advertised only after its complete server and client path passes.
+Shared contract files, compatibility policy, and releases belong to the standalone protocol repository. Claudian and Cloud own their consumer package manifests and lockfiles; no later transport tranche edits those manifests opportunistically. Published `4.1.3`, wire v8, Cloud binding v4, and backup coordination format v3 are the implemented baseline. Step 11 followed a producer-first order for exact `3.2.1` with wire v6, Cloud binding v2, and backup coordination format v2. Step 12 then published exact `3.3.0`, retained wire v6 and Cloud binding v2, and directly replaced the pre-production backup format with v3 before either consumer converged. The corrective `3.3.1` and `3.3.2` patches completed that backup contract. Step 14 advanced the authority-transfer contract through the exact producer releases that culminated in `4.1.3`; both consumers converge on that immutable artifact before advertising the new lifecycle operations. The exact pin alone advertises nothing; each new capability is advertised only after its complete server and client path passes.
 
 ## 22. Explicit non-goals
 

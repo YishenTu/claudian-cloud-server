@@ -112,6 +112,7 @@ function config(
       reservedPoolMax: 1,
       url: database.runtimeUrl,
     }),
+    principalProfile: 'private-development',
     repository: Object.freeze({
       gitExecutable: GIT_EXECUTABLE,
       operationTimeoutMs: 10_000,

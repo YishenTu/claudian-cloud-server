@@ -12,6 +12,7 @@ const validSource = {
   CLAUDIAN_CLOUD_GIT_EXECUTABLE: '/usr/bin/git',
   CLAUDIAN_CLOUD_PORT: '8787',
   CLAUDIAN_CLOUD_POSTGRES_URL: 'postgresql://cloud-runtime:secret@127.0.0.1/cloud',
+  CLAUDIAN_CLOUD_PRINCIPAL_PROFILE: 'private-development',
   CLAUDIAN_CLOUD_REPOSITORY_ROOT: '/srv/claudian/repositories',
   CLAUDIAN_CLOUD_STAGING_ROOT: '/srv/claudian/staging',
   CLAUDIAN_CLOUD_STORAGE_NODE_ID: 'node-a',
@@ -69,6 +70,7 @@ describe('decodeServerConfig', () => {
         reservedPoolMax: 2,
         url: 'postgresql://cloud-runtime:secret@127.0.0.1/cloud',
       },
+      principalProfile: 'private-development',
       repository: {
         gitExecutable: '/usr/bin/git',
         operationTimeoutMs: 300_000,
@@ -100,6 +102,20 @@ describe('decodeServerConfig', () => {
           (error as ConfigError).field,
           'CLAUDIAN_CLOUD_DEPLOYMENT_PROFILE',
         );
+        return true;
+      },
+    );
+  });
+
+  it('rejects an implicit principal profile', () => {
+    const source: Record<string, string> = { ...validSource };
+    delete source.CLAUDIAN_CLOUD_PRINCIPAL_PROFILE;
+    assert.throws(
+      () => decodeServerConfig(source),
+      (error: unknown) => {
+        assert.equal(error instanceof ConfigError, true);
+        assert.equal((error as ConfigError).code, 'missing-field');
+        assert.equal((error as ConfigError).field, 'CLAUDIAN_CLOUD_PRINCIPAL_PROFILE');
         return true;
       },
     );
@@ -163,22 +179,102 @@ describe('decodeServerConfig', () => {
     );
   });
 
-  it('rejects trusted-ingress settings before an adapter exists', () => {
-    assert.throws(
-      () => decodeServerConfig({
-        ...validSource,
+  it('decodes the complete operator-protected PROXY v2 production profile', () => {
+    const config = decodeServerConfig({
+      ...validSource,
+      CLAUDIAN_CLOUD_PRINCIPAL_PROFILE: 'trusted-ingress',
+      CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE: 'proxy-v2',
+      CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID: 'tailscale-serve',
+      CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCE_MAP: JSON.stringify([
+        {
+          deviceCredentialId: 'mac-a',
+          principalId: 'account-a',
+          sourceAddress: '100.64.0.10',
+        },
+        {
+          principalId: 'account-b',
+          sourceAddress: '2001:db8::1',
+        },
+      ]),
+    });
+
+    assert.equal(config.principalProfile, 'trusted-ingress');
+    assert.deepEqual(config.trustedIngress, {
+      mode: 'proxy-v2',
+      preambleTimeoutMs: 5_000,
+      principals: [
+        {
+          assertion: {
+            deviceCredentialId: 'mac-a',
+            principalId: 'account-a',
+            provenance: {
+              kind: 'operator-protected-channel',
+              providerId: 'tailscale-serve',
+            },
+          },
+          sourceAddress: '100.64.0.10',
+        },
+        {
+          assertion: {
+            principalId: 'account-b',
+            provenance: {
+              kind: 'operator-protected-channel',
+              providerId: 'tailscale-serve',
+            },
+          },
+          sourceAddress: '2001:db8::1',
+        },
+      ],
+    });
+    const firstPrincipal = config.trustedIngress.principals[0];
+    assert.ok(firstPrincipal);
+    assert.equal(Object.isFrozen(config.trustedIngress), true);
+    assert.equal(Object.isFrozen(config.trustedIngress.principals), true);
+    assert.equal(Object.isFrozen(firstPrincipal), true);
+    assert.equal(Object.isFrozen(firstPrincipal.assertion), true);
+  });
+
+  it('rejects incomplete, unsupported, or ambiguous trusted-ingress profiles', () => {
+    const validMap = JSON.stringify([{
+      principalId: 'account-a',
+      sourceAddress: '100.64.0.10',
+    }]);
+    for (const [field, source] of [
+      ['CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE', {
         CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE: 'header-assertion',
-      }),
-      (error: unknown) => {
-        assert.equal(error instanceof ConfigError, true);
-        assert.equal((error as ConfigError).code, 'profile-conflict');
-        assert.equal(
-          (error as ConfigError).field,
-          'CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE',
-        );
-        return true;
-      },
-    );
+        CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID: 'tailscale-serve',
+        CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCE_MAP: validMap,
+      }],
+      ['CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID', {
+        CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE: 'proxy-v2',
+        CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCE_MAP: validMap,
+      }],
+      ['CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCE_MAP', {
+        CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE: 'proxy-v2',
+        CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID: 'tailscale-serve',
+      }],
+      ['CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCE_MAP', {
+        CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE: 'proxy-v2',
+        CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID: 'tailscale-serve',
+        CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCE_MAP: JSON.stringify([
+          { principalId: 'account-a', sourceAddress: '2001:0db8::1' },
+          { principalId: 'account-b', sourceAddress: '2001:db8::1' },
+        ]),
+      }],
+    ] as const) {
+      assert.throws(
+        () => decodeServerConfig({
+          ...validSource,
+          CLAUDIAN_CLOUD_PRINCIPAL_PROFILE: 'trusted-ingress',
+          ...source,
+        }),
+        (error: unknown) => {
+          assert.equal(error instanceof ConfigError, true);
+          assert.equal((error as ConfigError).field, field);
+          return true;
+        },
+      );
+    }
   });
 
   it('rejects malformed numeric limits', () => {

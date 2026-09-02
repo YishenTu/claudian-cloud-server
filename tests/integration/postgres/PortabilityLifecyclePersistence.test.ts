@@ -810,6 +810,18 @@ describe('portability lifecycle persistence', () => {
               updatedAt: T3,
             }),
           );
+          assert.equal(await scope.portability.advanceAuthorityTransferRecoveryEvidence({
+            expectedTargetProof: 'target-stage-proof',
+            expectedUpdatedAt: T2,
+            targetProof: 'target-stage-proof-with-cleanup',
+            transferId,
+            updatedAt: T3,
+          }), 'advanced');
+          assert.equal(
+            (await scope.portability.getAuthorityTransferRecovery(transferId))
+              ?.targetProof,
+            'target-stage-proof-with-cleanup',
+          );
         });
       } finally {
         await store.close();
@@ -1505,6 +1517,20 @@ describe('portability lifecycle persistence', () => {
             transferId: 'transfer-claims',
           };
           assert.equal(await scope.portability.putTransferReceiptKey(receiptKey), 'created');
+          const sourceProofKey = {
+            createdAt: T1,
+            publicKey: `${'A'.repeat(42)}E`,
+            receiptKeyId: 'receipt-key-source-proof',
+            transferId: 'transfer-claims',
+          };
+          assert.equal(
+            await scope.portability.putTransferReceiptKey(sourceProofKey),
+            'created',
+          );
+          assert.deepEqual(
+            await scope.portability.listTransferReceiptKeys('transfer-claims'),
+            [receiptKey, sourceProofKey],
+          );
           const receipt = {
             checkpointSha256: CHECKPOINT_SHA,
             claimSha256: CLAIM_SHA,

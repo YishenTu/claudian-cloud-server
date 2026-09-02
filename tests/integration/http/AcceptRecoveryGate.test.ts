@@ -107,6 +107,7 @@ function config(
       reservedPoolMax: 1,
       url: databaseUrl,
     }),
+    principalProfile: 'private-development',
     repository: Object.freeze({
       gitExecutable,
       operationTimeoutMs: 10_000,
@@ -500,7 +501,7 @@ async function preparePersonalPush(
         '-c',
         `http.extraHeader=X-Claudian-Development-Actor: ${MEMBER_ID}`,
         'push',
-        `${baseUrl}/v3/projects/${fixture.projectId}/repository.git`,
+        `${baseUrl}/v4/projects/${fixture.projectId}/repository.git`,
         `HEAD:${personalRef}`,
       ]);
     },

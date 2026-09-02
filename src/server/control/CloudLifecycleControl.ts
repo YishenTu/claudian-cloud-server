@@ -13,6 +13,7 @@ import {
   type CollabProjectRetirementResult,
   type CommitLanToCloudRelinquishmentRequest,
   type ConfirmCloudToLanTargetActiveRequest,
+  type ConfirmCloudToLanTargetInvalidatedRequest,
   type GetProjectAuthorityTransferRequest,
   type GetAuthorityTransferReceiptVerifierRequest,
   type GetTransferredMembershipClaimRequest,
@@ -58,7 +59,9 @@ type CloudToLanControl = Pick<
   | 'acknowledgeRedemption'
   | 'begin'
   | 'confirmTargetActive'
+  | 'confirmTargetInvalidated'
   | 'getClaim'
+  | 'getReceiptVerifier'
   | 'reportTargetStaged'
 >;
 
@@ -212,11 +215,11 @@ export class CloudLifecycleControlAdapter implements CloudLifecycleControl {
           request: context.request as CommitLanToCloudRelinquishmentRequest,
         });
       case 'getAuthorityTransferReceiptVerifier':
-        return this.#lanToCloud.getReceiptVerifier({
+        return this.#getReceiptVerifier(
           principalId,
-          request: context.request as GetAuthorityTransferReceiptVerifierRequest,
-          signal: context.signal,
-        });
+          context.request as GetAuthorityTransferReceiptVerifierRequest,
+          context.signal,
+        );
       case 'beginCloudToLanTransfer':
         return this.#cloudToLan.begin({
           principalId,
@@ -236,6 +239,11 @@ export class CloudLifecycleControlAdapter implements CloudLifecycleControl {
         return this.#cloudToLan.confirmTargetActive({
           principalId,
           request: context.request as ConfirmCloudToLanTargetActiveRequest,
+        });
+      case 'confirmCloudToLanTargetInvalidated':
+        return this.#cloudToLan.confirmTargetInvalidated({
+          principalId,
+          request: context.request as ConfirmCloudToLanTargetInvalidatedRequest,
         });
       case 'getTransferredMembershipClaim':
         return this.#cloudToLan.getClaim({
@@ -270,5 +278,16 @@ export class CloudLifecycleControlAdapter implements CloudLifecycleControl {
           request: context.request as CollabProjectRetirementAcknowledgementRequest,
         });
     }
+  }
+
+  async #getReceiptVerifier(
+    principalId: string,
+    request: GetAuthorityTransferReceiptVerifierRequest,
+    signal: AbortSignal,
+  ): Promise<unknown> {
+    const status = await this.#transfer.getStatus({ principalId, request });
+    return status.direction === 'cloud-to-lan'
+      ? this.#cloudToLan.getReceiptVerifier({ principalId, request })
+      : this.#lanToCloud.getReceiptVerifier({ principalId, request, signal });
   }
 }

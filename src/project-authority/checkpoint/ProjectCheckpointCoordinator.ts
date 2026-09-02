@@ -126,13 +126,14 @@ export interface CaptureOutboundProjectCheckpointInput {
   ) => Promise<void> | void;
   readonly operationId: string;
   readonly placement: RepositoryPlacementLease;
-  readonly profile: Extract<CollabCheckpointProfile, 'backup' | 'export'>;
+  readonly profile: CollabCheckpointProfile;
   readonly projectId: string;
   /** Borrowed immutable snapshot; the caller must not mutate these records. */
   readonly records: readonly OutboundProjectCheckpointRecord[];
   readonly refs: readonly CollabCheckpointGitRef[];
   readonly signal?: AbortSignal;
   readonly sourceAuthority: CollabCheckpointAuthority & { readonly kind: 'cloud' };
+  readonly targetAuthority?: CollabCheckpointAuthority & { readonly kind: 'lan' };
 }
 
 export interface CapturedOutboundProjectCheckpoint {
@@ -150,7 +151,7 @@ export interface OutboundProjectCheckpointIdentity {
 
 export interface ProfiledOutboundProjectCheckpointIdentity
   extends OutboundProjectCheckpointIdentity {
-  readonly profile: Extract<CollabCheckpointProfile, 'backup' | 'export'>;
+  readonly profile: CollabCheckpointProfile;
 }
 
 export interface OutboundProjectCheckpointReservation {
@@ -196,10 +197,14 @@ interface ValidationInputSnapshot {
 }
 
 interface OutboundCaptureSnapshot
-  extends Omit<CaptureOutboundProjectCheckpointInput, 'records' | 'signal'> {
+  extends Omit<
+    CaptureOutboundProjectCheckpointInput,
+    'records' | 'signal' | 'targetAuthority'
+  > {
   readonly coordinationJson: string;
   readonly records: readonly OutboundProjectCheckpointRecord[];
   readonly signal: AbortSignal | undefined;
+  readonly targetAuthority: CollabCheckpointAuthority | null;
 }
 
 export type OutboundProjectCheckpointManifest =
@@ -216,10 +221,11 @@ interface OutboundIdentitySnapshot extends OutboundProjectCheckpointIdentity {
 
 interface VerifyOutboundSnapshot extends OutboundIdentitySnapshot {
   readonly expectedCheckpointSha256: string;
-  readonly expectedProfile: Extract<CollabCheckpointProfile, 'backup' | 'export'>;
+  readonly expectedProfile: CollabCheckpointProfile;
   readonly expectedSourceAuthority: CollabCheckpointAuthority & {
     readonly kind: 'cloud';
   };
+  readonly expectedTargetAuthority: CollabCheckpointAuthority | null;
 }
 
 interface OutboundReservationState {
@@ -331,7 +337,7 @@ function canonicalTimestamp(value: unknown): value is string {
 
 function encodeOutboundCoordination(
   records: readonly OutboundProjectCheckpointRecord[],
-  profile: Extract<CollabCheckpointProfile, 'backup' | 'export'>,
+  profile: CollabCheckpointProfile,
 ): string {
   return profile === 'backup'
     ? encodeCollabProjectBackupCheckpointCoordinationNdjson(
@@ -339,17 +345,17 @@ function encodeOutboundCoordination(
     )
     : encodeCollabProjectCheckpointCoordinationNdjson(
       records as readonly CollabCheckpointBackupRecord[],
-      'export',
+      profile,
     );
 }
 
 function decodeOutboundCoordination(
   value: string,
-  profile: Extract<CollabCheckpointProfile, 'backup' | 'export'>,
+  profile: CollabCheckpointProfile,
 ): readonly OutboundProjectCheckpointRecord[] {
   return profile === 'backup'
     ? decodeCollabProjectBackupCheckpointCoordinationNdjson(value)
-    : decodeCollabProjectCheckpointCoordinationNdjson(value, 'export');
+    : decodeCollabProjectCheckpointCoordinationNdjson(value, profile);
 }
 
 function snapshotOutboundInput(
@@ -360,7 +366,7 @@ function snapshotOutboundInput(
     const expiresAt = input.expiresAt;
     const expectedMainOid = input.expectedMainOid;
     const operationId = input.operationId;
-    const profile: unknown = input.profile;
+    const profile = input.profile;
     const projectId = input.projectId;
     const onProgress = input.onProgress;
     if (
@@ -370,7 +376,7 @@ function snapshotOutboundInput(
       || !isCollabGitOid(expectedMainOid)
       || !isCollabOpaqueId(operationId)
       || !isCollabProjectId(projectId)
-      || (profile !== 'backup' && profile !== 'export')
+      || !COLLAB_CHECKPOINT_PROFILES.some(candidate => candidate === profile)
       || typeof onProgress !== 'function'
     ) {
       fail('invalid-checkpoint');
@@ -379,6 +385,15 @@ function snapshotOutboundInput(
     if (placement.projectId !== projectId) fail('invalid-checkpoint');
     const sourceAuthority = snapshotAuthority(input.sourceAuthority);
     if (sourceAuthority.kind !== 'cloud') fail('invalid-checkpoint');
+    const targetAuthority = input.targetAuthority === undefined
+      ? null
+      : snapshotAuthority(input.targetAuthority);
+    if (
+      profile === 'authority-transfer'
+        ? targetAuthority?.kind !== 'lan'
+          || targetAuthority.generation !== sourceAuthority.generation + 1
+        : targetAuthority !== null
+    ) fail('invalid-checkpoint');
     const refs = Object.freeze(input.refs.map(ref => Object.freeze({
       name: ref.name,
       oid: ref.oid,
@@ -401,6 +416,7 @@ function snapshotOutboundInput(
       sourceAuthority: sourceAuthority as CollabCheckpointAuthority & {
         readonly kind: 'cloud';
       },
+      targetAuthority,
     });
   } catch (error: unknown) {
     if (error instanceof ProjectCheckpointCoordinatorError) throw error;
@@ -449,6 +465,7 @@ function snapshotOutboundVerification(
     expectedSourceAuthority: expectedSourceAuthority as CollabCheckpointAuthority & {
       readonly kind: 'cloud';
     },
+    expectedTargetAuthority: null,
   });
 }
 
@@ -545,7 +562,7 @@ function decodeManifestJson(value: string): CollabProjectCheckpointManifest {
 
 function decodeOutboundManifestJson(
   value: string,
-  profile: Extract<CollabCheckpointProfile, 'backup' | 'export'>,
+  profile: CollabCheckpointProfile,
 ): OutboundProjectCheckpointManifest {
   try {
     const parsed = JSON.parse(value) as unknown;
@@ -1103,10 +1120,10 @@ export class ProjectCheckpointCoordinator {
     signal?: AbortSignal,
   ): Promise<void> {
     let snapshot: OutboundIdentitySnapshot;
-    const profile: unknown = input.profile;
+    const profile = input.profile;
     try {
       snapshot = snapshotOutboundIdentity(input, signal);
-      if (profile !== 'backup' && profile !== 'export') {
+      if (!COLLAB_CHECKPOINT_PROFILES.some(candidate => candidate === profile)) {
         fail('invalid-checkpoint');
       }
     } catch (error: unknown) {
@@ -1124,10 +1141,10 @@ export class ProjectCheckpointCoordinator {
     signal?: AbortSignal,
   ): Promise<void> {
     let snapshot: OutboundIdentitySnapshot;
-    const profile: unknown = input.profile;
+    const profile = input.profile;
     try {
       snapshot = snapshotOutboundIdentity(input, signal);
-      if (profile !== 'backup' && profile !== 'export') {
+      if (!COLLAB_CHECKPOINT_PROFILES.some(candidate => candidate === profile)) {
         fail('invalid-checkpoint');
       }
     } catch (error: unknown) {
@@ -1160,7 +1177,10 @@ export class ProjectCheckpointCoordinator {
         snapshot,
         operationSignal,
         reservation,
-        this.#publication?.[snapshot.expectedProfile],
+        snapshot.expectedProfile === 'backup'
+          || snapshot.expectedProfile === 'export'
+          ? this.#publication?.[snapshot.expectedProfile]
+          : undefined,
       )
     ));
   }
@@ -1503,7 +1523,7 @@ export class ProjectCheckpointCoordinator {
         protocolVersion: COLLAB_PROTOCOL_VERSION,
         refs: input.refs,
         sourceAuthority: input.sourceAuthority,
-        targetAuthority: null,
+        targetAuthority: input.targetAuthority,
       }) as OutboundProjectCheckpointManifest;
       const manifest = deepFreeze(decodeOutboundManifestJson(
         encodeOutboundManifestCanonicalJson(Object.freeze({
@@ -1553,6 +1573,7 @@ export class ProjectCheckpointCoordinator {
         expectedCheckpointSha256: manifest.manifestSha256,
         expectedProfile: input.profile,
         expectedSourceAuthority: input.sourceAuthority,
+        expectedTargetAuthority: input.targetAuthority,
         expiresAt: input.expiresAt,
         operationId: input.operationId,
         projectId: input.projectId,
@@ -1676,6 +1697,7 @@ export class ProjectCheckpointCoordinator {
         expectedSourceAuthority: snapshotAuthority(
           checkpoint.manifest.sourceAuthority,
         ) as CollabCheckpointAuthority & { readonly kind: 'cloud' },
+        expectedTargetAuthority: null,
         expiresAt: attempt.expiresAt,
         operationId: attempt.operationId,
         projectId: attempt.projectId,
@@ -1744,10 +1766,9 @@ export class ProjectCheckpointCoordinator {
           operationSignal,
         );
         const profile = checkpoint.manifest.profile;
-        if (profile !== 'backup' && profile !== 'export') {
-          fail('invalid-checkpoint');
-        }
-        const publication = this.#publication?.[profile];
+        const publication = profile === 'backup' || profile === 'export'
+          ? this.#publication?.[profile]
+          : undefined;
         if (discardArtifacts && publication !== undefined) {
           await publication.discardAttempt(
             checkpoint.attempt,
@@ -1762,7 +1783,7 @@ export class ProjectCheckpointCoordinator {
 
   #settleOutboundOperation(
     input: OutboundIdentitySnapshot,
-    profile: Extract<CollabCheckpointProfile, 'backup' | 'export'>,
+    profile: CollabCheckpointProfile,
     discardArtifacts: boolean,
   ): Promise<void> {
     return this.#run(input.signal, async operationSignal => {
@@ -1775,7 +1796,9 @@ export class ProjectCheckpointCoordinator {
           projectId: input.projectId,
         }, operationSignal);
         await this.#staging.discardAttempt(attempt, operationSignal);
-        const publication = this.#publication?.[profile];
+        const publication = profile === 'backup' || profile === 'export'
+          ? this.#publication?.[profile]
+          : undefined;
         if (discardArtifacts && publication !== undefined) {
           await publication.discardAttempt(attempt, operationSignal);
         }
@@ -1837,7 +1860,10 @@ export class ProjectCheckpointCoordinator {
         || manifest.operationId !== attempt.operationId
         || manifest.profile !== input.expectedProfile
         || !sameAuthority(manifest.sourceAuthority, input.expectedSourceAuthority)
-        || manifest.targetAuthority !== null
+        || !sameAuthority(
+          manifest.targetAuthority,
+          input.expectedTargetAuthority,
+        )
       ) {
         fail('invalid-checkpoint');
       }

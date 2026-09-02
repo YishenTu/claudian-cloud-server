@@ -279,6 +279,7 @@ export interface AuthorityTransferRecoveryInput {
 export interface AuthorityTransferRecoveryEvidenceInput {
   readonly cancellationRequestSha256?: string;
   readonly expectedUpdatedAt: CollabIsoTimestamp;
+  readonly expectedTargetProof?: string;
   readonly inactivePublicationJson?: string;
   readonly nextExpiresAt?: CollabIsoTimestamp;
   readonly relinquishmentProof?: CollabAuthorityRelinquishmentProof;
@@ -517,6 +518,9 @@ export interface PortabilityLifecyclePersistenceReader {
     transferId: string,
     receiptKeyId: string,
   ): Promise<TransferReceiptKeyInput | undefined>;
+  listTransferReceiptKeys(
+    transferId: string,
+  ): Promise<readonly TransferReceiptKeyInput[]>;
   getTransferredMembershipClaim(
     transferId: string,
     memberId: CollabMemberId,
@@ -555,6 +559,9 @@ export interface PortabilityLifecyclePersistence
   ): Promise<PersistenceAdvanceResult>;
   cleanupTerminalArtifacts(
     input: CleanupTerminalArtifactsInput,
+  ): Promise<PersistenceAdvanceResult>;
+  deleteTransferReceiptKey(
+    input: TransferReceiptKeyInput,
   ): Promise<PersistenceAdvanceResult>;
   deleteProtectedClaimEnvelopes(
     input: DeleteProtectedClaimEnvelopesInput,

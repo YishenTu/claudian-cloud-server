@@ -117,7 +117,7 @@ class BoundedCheckpointRecords {
   }
 
   canonical(
-    profile: Extract<CollabCheckpointProfile, 'backup' | 'export'>,
+    profile: CollabCheckpointProfile,
   ): readonly ProjectCheckpointRecord[] {
     const allowed = new Set<string>(profile === 'backup'
       ? COLLAB_PROJECT_BACKUP_RECORD_KINDS
@@ -135,7 +135,7 @@ class BoundedCheckpointRecords {
         )
         : encodeCollabProjectCheckpointCoordinationNdjson(
           sorted as readonly CollabCheckpointPortableRecord[],
-          'export',
+          profile,
         );
       if (Buffer.byteLength(encoded, 'utf8') > this.#maximumBytes) {
         resourceLimit();
@@ -144,7 +144,7 @@ class BoundedCheckpointRecords {
         ? decodeCollabProjectBackupCheckpointCoordinationNdjson(encoded)
         : decodeCollabProjectCheckpointCoordinationNdjson(
           encoded,
-          'export',
+          profile,
         ) as readonly CollabCheckpointPortableRecord[];
     } catch (error: unknown) {
       if (error instanceof CoordinationError) throw error;

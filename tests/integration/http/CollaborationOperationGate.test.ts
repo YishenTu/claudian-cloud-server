@@ -94,6 +94,7 @@ function config(
       reservedPoolMax: 1,
       url: databaseUrl,
     }),
+    principalProfile: 'private-development',
     repository: Object.freeze({
       gitExecutable,
       operationTimeoutMs: 10_000,
@@ -336,7 +337,7 @@ async function pushPersonalCommit(
     '-c',
     `http.extraHeader=X-Claudian-Development-Actor: ${actor}`,
     'push',
-    `${baseUrl}/v3/projects/${PROJECT_ID}/repository.git`,
+    `${baseUrl}/v4/projects/${PROJECT_ID}/repository.git`,
     `HEAD:${personalRef}`,
   ]);
   return oid;

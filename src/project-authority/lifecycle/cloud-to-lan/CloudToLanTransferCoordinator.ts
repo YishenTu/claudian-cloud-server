@@ -3,6 +3,8 @@ import { isDeepStrictEqual } from 'node:util';
 
 import {
   collabControlOperationCodec,
+  decodeCollabAuthorityTransferOperationResponse,
+  decodeCollabCloudToLanTargetCleanupProof,
   decodeCollabAuthorityRelinquishmentProof,
   decodeCollabAuthorityTransferStatus,
   decodeCollabTransferredMembershipClaim,
@@ -15,7 +17,9 @@ import {
   type BeginCloudToLanTransferRequest,
   type CancelProjectAuthorityTransferRequest,
   type CollabAuthorityRelinquishmentProof,
+  type CollabAuthorityTransferReceiptVerifier,
   type CollabAuthorityTransferStatus,
+  type CollabCloudToLanTargetCleanupProof,
   type CollabCheckpointAuthority,
   type CollabIsoTimestamp,
   type CollabMemberId,
@@ -26,6 +30,7 @@ import {
   type CollabTransferredMembershipRedemptionAcknowledgement,
   type CollabTransferredMembershipRedemptionReceipt,
   type ConfirmCloudToLanTargetActiveRequest,
+  type ConfirmCloudToLanTargetInvalidatedRequest,
   type GetProjectAuthorityTransferRequest,
   type GetTransferredMembershipClaimRequest,
   type ReportCloudToLanTargetStagedRequest,
@@ -57,6 +62,7 @@ import type {
 import {
   defaultAuthorityTransferExpiresAt,
 } from '../AuthorityTransferExpiry.js';
+import { isDurableAuthorityTransferProof } from '../AuthorityTransferProof.js';
 
 export type CloudToLanTransferCoordinatorErrorCode =
   | 'authorization-denied'
@@ -139,17 +145,14 @@ export interface CloudToLanTargetTrustPort {
     readonly request: ConfirmCloudToLanTargetActiveRequest;
     readonly target: VerifiedCloudToLanTarget;
   }>): Promise<void>;
+  verifyCleanup(input: Readonly<{
+    readonly proof: CollabCloudToLanTargetCleanupProof;
+    readonly receiptPublicKey: string;
+  }>): Promise<void>;
   verifyRedemptionReceipt(input: Readonly<{
     readonly receipt: CollabTransferredMembershipRedemptionReceipt;
     readonly receiptPublicKey: string;
   }>): Promise<void>;
-  invalidateAndClean(input: Readonly<{
-    readonly checkpointSha256: string | undefined;
-    readonly projectId: CollabProjectId;
-    readonly stageSha256: string | undefined;
-    readonly target: VerifiedCloudToLanTarget | undefined;
-    readonly transferId: string;
-  }>): Promise<Readonly<{ readonly cleanupSha256: string }>>;
 }
 
 export interface CloudToLanClaimCustodyPort {
@@ -164,9 +167,25 @@ export interface CloudToLanClaimCustodyPort {
 }
 
 export interface CloudToLanRelinquishmentSigner {
+  readonly activeKey: Readonly<{
+    readonly publicKey: string;
+    readonly receiptKeyId: string;
+  }>;
   sign(input: Readonly<{
+    readonly receiptKeyId: string;
     readonly signingInput: string;
   }>): Promise<string>;
+  resolveReceiptKey(input: Readonly<{
+    readonly candidates: readonly Readonly<{
+      readonly publicKey: string;
+      readonly receiptKeyId: string;
+    }>[];
+    readonly certificate: string;
+    readonly signingInput: string;
+  }>): Promise<Readonly<{
+    readonly publicKey: string;
+    readonly receiptKeyId: string;
+  }>>;
 }
 
 export interface CloudToLanSourceFencePort {
@@ -196,7 +215,9 @@ export interface CloudToLanTransferCoordinatorOptions {
   readonly custody: CloudToLanClaimCustodyPort;
   readonly custodyReceiptIdFactory?: () => string;
   readonly deletionOperationIdFactory?: (transferId: string) => string;
-  readonly environmentIdentity: string;
+  readonly environmentIdentity: string | Readonly<{
+    read(): Promise<string>;
+  }>;
   readonly relinquishmentIntentIdFactory?: (transferId: string) => string;
   readonly relinquishmentSigner: CloudToLanRelinquishmentSigner;
   readonly repository: ExactRepositoryPresencePort;
@@ -222,6 +243,16 @@ export interface ReportCloudToLanTargetStagedInput {
 export interface ConfirmCloudToLanTargetActiveInput {
   readonly principalId: string;
   readonly request: ConfirmCloudToLanTargetActiveRequest;
+}
+
+export interface ConfirmCloudToLanTargetInvalidatedInput {
+  readonly principalId: string;
+  readonly request: ConfirmCloudToLanTargetInvalidatedRequest;
+}
+
+export interface GetCloudToLanReceiptVerifierInput {
+  readonly principalId: string;
+  readonly request: GetProjectAuthorityTransferRequest;
 }
 
 export interface GetCloudToLanTransferInput {
@@ -251,6 +282,7 @@ interface StoredTargetEvidence {
   readonly receiptKeyId: string;
   readonly receiptPublicKey: string;
   readonly schemaVersion: 1;
+  readonly cleanupProof?: CollabCloudToLanTargetCleanupProof;
 }
 
 interface ExactTransfer {
@@ -266,6 +298,8 @@ type CloudToLanControlOperation =
   | 'beginCloudToLanTransfer'
   | 'cancelProjectAuthorityTransfer'
   | 'confirmCloudToLanTargetActive'
+  | 'confirmCloudToLanTargetInvalidated'
+  | 'getAuthorityTransferReceiptVerifier'
   | 'getProjectAuthorityTransfer'
   | 'getTransferredMembershipClaim'
   | 'reportCloudToLanTargetStaged';
@@ -384,17 +418,21 @@ function decodeTargetEvidence(value: string | undefined): StoredTargetEvidence |
       return fail('recovery-required');
     }
     const record = parsed as Record<string, unknown>;
+    const cleanupProof = record.cleanupProof === undefined
+      ? undefined
+      : decodeCollabCloudToLanTargetCleanupProof(record.cleanupProof);
+    const expectedKeys = cleanupProof === undefined
+      ? TARGET_EVIDENCE_KEYS
+      : [...TARGET_EVIDENCE_KEYS, 'cleanupProof'];
     if (
       Object.keys(record).sort().join('\0')
-        !== [...TARGET_EVIDENCE_KEYS].sort().join('\0')
+        !== [...expectedKeys].sort().join('\0')
       || record.schemaVersion !== 1
       || typeof record.acceptanceIntentId !== 'string'
       || !isCollabOpaqueId(record.acceptanceIntentId)
       || typeof record.principalId !== 'string'
       || !PRINCIPAL_PATTERN.test(record.principalId)
-      || typeof record.proof !== 'string'
-      || record.proof.length === 0
-      || record.proof.length > 7_000
+      || !isDurableAuthorityTransferProof(record.proof)
       || typeof record.receiptKeyId !== 'string'
       || !isCollabOpaqueId(record.receiptKeyId)
       || !canonicalPublicKey(record.receiptPublicKey)
@@ -406,6 +444,7 @@ function decodeTargetEvidence(value: string | undefined): StoredTargetEvidence |
       receiptKeyId: record.receiptKeyId,
       receiptPublicKey: record.receiptPublicKey,
       schemaVersion: 1 as const,
+      ...(cleanupProof === undefined ? {} : { cleanupProof }),
     });
     if (encodeTargetEvidence(result) !== value) return fail('recovery-required');
     return result;
@@ -519,7 +558,7 @@ implements ProjectLifecycleRecoveryOwner {
   readonly #custody: CloudToLanClaimCustodyPort;
   readonly #custodyReceiptIdFactory: () => string;
   readonly #deletionOperationIdFactory: (transferId: string) => string;
-  readonly #environmentIdentity: string;
+  readonly #environmentIdentity: () => Promise<string>;
   readonly #relinquishmentIntentIdFactory: (transferId: string) => string;
   readonly #relinquishmentSigner: CloudToLanRelinquishmentSigner;
   readonly #repository: ExactRepositoryPresencePort;
@@ -530,9 +569,16 @@ implements ProjectLifecycleRecoveryOwner {
   #closePromise: Promise<void> | undefined;
 
   constructor(options: CloudToLanTransferCoordinatorOptions) {
-    if (!PRINCIPAL_PATTERN.test(options.environmentIdentity)) {
+    if (
+      typeof options.environmentIdentity !== 'string'
+      && typeof options.environmentIdentity.read !== 'function'
+    ) {
       throw new TypeError('cloud-to-lan-transfer.options-invalid');
     }
+    if (
+      typeof options.environmentIdentity === 'string'
+      && !PRINCIPAL_PATTERN.test(options.environmentIdentity)
+    ) throw new TypeError('cloud-to-lan-transfer.options-invalid');
     this.#checkpoint = options.checkpoint;
     this.#clock = options.clock ?? (() => new Date());
     this.#coordination = options.coordination;
@@ -541,7 +587,9 @@ implements ProjectLifecycleRecoveryOwner {
       ?? (() => defaultOpaqueId('custody'));
     this.#deletionOperationIdFactory = options.deletionOperationIdFactory
       ?? defaultDeletionId;
-    this.#environmentIdentity = options.environmentIdentity;
+    this.#environmentIdentity = typeof options.environmentIdentity === 'string'
+      ? () => Promise.resolve(options.environmentIdentity as string)
+      : options.environmentIdentity.read.bind(options.environmentIdentity);
     this.#relinquishmentIntentIdFactory = options.relinquishmentIntentIdFactory
       ?? defaultRelinquishmentIntentId;
     this.#relinquishmentSigner = options.relinquishmentSigner;
@@ -886,6 +934,101 @@ implements ProjectLifecycleRecoveryOwner {
     );
   }
 
+  confirmTargetInvalidated(
+    input: ConfirmCloudToLanTargetInvalidatedInput,
+  ): Promise<CollabAuthorityTransferStatus> {
+    const request = decodeRequest(
+      'confirmCloudToLanTargetInvalidated',
+      input.request,
+    );
+    return this.#run(request.projectId, async lease => {
+      const terminal = await lease.withProjectScope(scope => (
+        scope.portability.getTerminalResponder('authority-transfer', request.transferId)
+      ));
+      if (terminal !== undefined) {
+        const replayPrincipal = terminal.eligiblePrincipals.find(value => (
+          value.principalId === input.principalId
+        ));
+        if (
+          replayPrincipal === undefined
+          || terminal.replayAuthorization?.memberId !== replayPrincipal.memberId
+          || Date.parse(terminal.expiresAt) <= this.#now()
+        ) return fail('authorization-denied');
+        if (!exactDigest(
+          terminal.replayAuthorization.requestSha256,
+          sha256(JSON.stringify(request)),
+        )) return fail('state-conflict');
+        const terminalExact = await this.#exactTransfer(lease, request.transferId);
+        if (
+          terminalExact.journal.state !== 'cancelled'
+          || terminalExact.recovery.sourceReopenSha256 !== request.proof.cleanupSha256
+        ) return fail('state-conflict');
+        return this.#requireStatus(lease, request.transferId);
+      }
+      let exact = await this.#exactTransfer(lease, request.transferId);
+      const target = this.#requireTarget(exact);
+      const evidence = exact.evidence;
+      if (evidence === undefined) return fail('recovery-required');
+      if (evidence.cleanupProof === undefined) {
+        await this.#authorizeTarget(lease, exact, input.principalId);
+      } else if (target.principalId !== input.principalId) {
+        return fail('authorization-denied');
+      }
+      this.#assertCleanupProof(request.proof, exact, target);
+      await this.#targetTrust.verifyCleanup({
+        proof: request.proof,
+        receiptPublicKey: target.receiptPublicKey,
+      });
+      if (evidence.cleanupProof === undefined) {
+        if (exact.journal.phase !== 'cancel-intent') return fail('state-conflict');
+        const priorEvidence = encodeTargetEvidence(evidence);
+        const updatedEvidence = Object.freeze({
+          ...evidence,
+          cleanupProof: request.proof,
+        });
+        const updatedAt = timestamp(
+          this.#clock,
+          latestTimestamp(
+            exact.journal.updatedAt,
+            exact.recovery.updatedAt,
+            request.proof.invalidatedAt,
+          ),
+        );
+        const nextExpiresAt = renewedExpiry(
+          exact.recovery.createdAt,
+          exact.recovery.expiresAt,
+          updatedAt,
+        );
+        await lease.withProjectScope(async scope => {
+          await scope.portability.advanceAuthorityTransferRecoveryEvidence({
+            expectedTargetProof: priorEvidence,
+            expectedUpdatedAt: exact.recovery.updatedAt,
+            ...(nextExpiresAt === undefined ? {} : { nextExpiresAt }),
+            sourceReopenSha256: request.proof.cleanupSha256,
+            targetProof: encodeTargetEvidence(updatedEvidence),
+            transferId: request.transferId,
+            updatedAt,
+          });
+          await scope.portability.advanceLifecycleJournal({
+            expectedPhase: 'cancel-intent',
+            expectedState: 'active',
+            nextPhase: 'target-invalidated',
+            nextState: 'active',
+            operationId: request.transferId,
+            scheduledAt: nextExpiresAt ?? exact.recovery.expiresAt,
+            updatedAt,
+          });
+        });
+        exact = await this.#exactTransfer(lease, request.transferId);
+      } else if (
+        !isDeepStrictEqual(evidence.cleanupProof, request.proof)
+        || exact.recovery.sourceReopenSha256 !== request.proof.cleanupSha256
+      ) return fail('state-conflict');
+      await this.#settleCancellation(lease, exact);
+      return this.#requireStatus(lease, request.transferId);
+    });
+  }
+
   getStatus(input: GetCloudToLanTransferInput): Promise<CollabAuthorityTransferStatus> {
     const request = decodeRequest('getProjectAuthorityTransfer', input.request);
     return this.#run(request.projectId, async lease => {
@@ -894,6 +1037,45 @@ implements ProjectLifecycleRecoveryOwner {
         request.transferId,
         input.principalId,
       );
+      return this.#requireStatus(lease, request.transferId);
+    });
+  }
+
+  getReceiptVerifier(
+    input: GetCloudToLanReceiptVerifierInput,
+  ): Promise<CollabAuthorityTransferReceiptVerifier> {
+    const request = decodeRequest('getAuthorityTransferReceiptVerifier', input.request);
+    return this.#run(request.projectId, async lease => {
+      const exact = await this.#exactTransfer(lease, request.transferId);
+      this.#requireTarget(exact);
+      await this.#authorizeTarget(lease, exact, input.principalId);
+      const resolved = await this.#sourceReceiptKey(lease, exact);
+      if (
+        !isCollabOpaqueId(resolved.receiptKeyId)
+        || !canonicalPublicKey(resolved.publicKey)
+      ) return fail('dependency-failed');
+      return decodeCollabAuthorityTransferOperationResponse(
+        'getAuthorityTransferReceiptVerifier',
+        {
+          projectId: request.projectId,
+          receiptKeyId: resolved.receiptKeyId,
+          receiptPublicKey: resolved.publicKey,
+          receiptPublicKeyEncoding: 'base64url-raw',
+          signatureAlgorithm: 'ed25519',
+          transferId: request.transferId,
+        },
+      );
+    });
+  }
+
+  getCheckpointDownloadStatus(
+    input: GetCloudToLanTransferInput,
+  ): Promise<CollabAuthorityTransferStatus> {
+    const request = decodeRequest('getProjectAuthorityTransfer', input.request);
+    return this.#run(request.projectId, async lease => {
+      const exact = await this.#exactTransfer(lease, request.transferId);
+      this.#requireTarget(exact);
+      await this.#authorizeTarget(lease, exact, input.principalId);
       return this.#requireStatus(lease, request.transferId);
     });
   }
@@ -1126,9 +1308,13 @@ implements ProjectLifecycleRecoveryOwner {
       return 'settled';
     }
     if (exact.journal.state === 'recovery-required') return fail('recovery-required');
+    if (exact.journal.phase === 'cancel-intent') {
+      if (exact.evidence !== undefined) return 'waiting-for-external-proof';
+      await this.#settleCancellation(lease, exact);
+      return 'settled';
+    }
     if (
-      exact.journal.phase === 'cancel-intent'
-      || exact.journal.phase === 'target-invalidated'
+      exact.journal.phase === 'target-invalidated'
       || exact.journal.phase === 'target-cleaned'
       || exact.journal.phase === 'source-reopened'
     ) {
@@ -1157,6 +1343,11 @@ implements ProjectLifecycleRecoveryOwner {
           ),
         );
         exact = await this.#exactTransfer(lease, exact.journal.operationId);
+      }
+      if (exact.journal.phase === 'cancel-intent') {
+        if (exact.evidence !== undefined) return 'waiting-for-external-proof';
+        await this.#settleCancellation(lease, exact);
+        return 'settled';
       }
       try {
         await this.#settleCancellation(lease, exact);
@@ -1297,6 +1488,50 @@ implements ProjectLifecycleRecoveryOwner {
     });
   }
 
+  async #sourceReceiptKey(
+    lease: PinnedProjectLease,
+    exact: ExactTransfer,
+  ): Promise<Readonly<{ readonly publicKey: string; readonly receiptKeyId: string }>> {
+    const target = this.#requireTarget(exact);
+    const candidates = await lease.withProjectScope(scope => (
+      scope.portability.listTransferReceiptKeys(exact.journal.operationId)
+    ));
+    const sourceCandidates = candidates.filter(candidate => (
+      candidate.receiptKeyId !== target.receiptKeyId
+    ));
+    const proof = exact.recovery.relinquishmentProof;
+    if (proof !== undefined) {
+      const { certificate, ...payload } = proof;
+      return this.#relinquishmentSigner.resolveReceiptKey({
+        candidates: sourceCandidates,
+        certificate,
+        signingInput: encodeCollabAuthorityRelinquishmentProofSigningInput(payload),
+      });
+    }
+    if (sourceCandidates.length > 1) return fail('dependency-failed');
+    const pinned = sourceCandidates[0];
+    if (pinned !== undefined) {
+      if (
+        !isCollabOpaqueId(pinned.receiptKeyId)
+        || !canonicalPublicKey(pinned.publicKey)
+      ) return fail('dependency-failed');
+      return pinned;
+    }
+    const active = this.#relinquishmentSigner.activeKey;
+    if (
+      active.receiptKeyId === target.receiptKeyId
+      || !isCollabOpaqueId(active.receiptKeyId)
+      || !canonicalPublicKey(active.publicKey)
+    ) return fail('dependency-failed');
+    await lease.withProjectScope(scope => scope.portability.putTransferReceiptKey({
+      createdAt: exact.recovery.updatedAt,
+      publicKey: active.publicKey,
+      receiptKeyId: active.receiptKeyId,
+      transferId: exact.journal.operationId,
+    }));
+    return active;
+  }
+
   async #relinquishIfNeeded(lease: PinnedProjectLease, initial: ExactTransfer): Promise<void> {
     let exact = initial;
     if (
@@ -1342,11 +1577,23 @@ implements ProjectLifecycleRecoveryOwner {
       },
       transferId: exact.journal.operationId,
     });
+    const sourceKey = await this.#sourceReceiptKey(lease, exact);
+    const signingInput = encodeCollabAuthorityRelinquishmentProofSigningInput(payload);
     const certificate = await this.#relinquishmentSigner.sign({
-      signingInput: encodeCollabAuthorityRelinquishmentProofSigningInput(payload),
+      receiptKeyId: sourceKey.receiptKeyId,
+      signingInput,
     });
     this.#assertNotExpired(exact);
     if (!canonicalCertificate(certificate)) return fail('dependency-failed');
+    const verifiedSourceKey = await this.#relinquishmentSigner.resolveReceiptKey({
+      candidates: [sourceKey],
+      certificate,
+      signingInput,
+    });
+    if (
+      verifiedSourceKey.receiptKeyId !== sourceKey.receiptKeyId
+      || verifiedSourceKey.publicKey !== sourceKey.publicKey
+    ) return fail('dependency-failed');
     const persistedProof = decodeCollabAuthorityRelinquishmentProof({
       ...payload,
       certificate,
@@ -1593,22 +1840,31 @@ implements ProjectLifecycleRecoveryOwner {
   async #settleCancellation(lease: PinnedProjectLease, initial: ExactTransfer): Promise<void> {
     let exact = initial;
     if (exact.journal.phase === 'cancel-intent') {
-      const cleanup = await this.#targetTrust.invalidateAndClean({
-        checkpointSha256: exact.journal.checkpointSha256,
-        projectId: exact.journal.projectId,
-        stageSha256: exact.recovery.stageSha256,
-        target: exact.target,
-        transferId: exact.journal.operationId,
-      });
-      if (!SHA256_PATTERN.test(cleanup.cleanupSha256)) return fail('dependency-failed');
+      if (exact.evidence !== undefined) return;
+      const cancellationRequestSha256 = exact.recovery.cancellationRequestSha256;
+      if (
+        cancellationRequestSha256 === undefined
+        || exact.journal.checkpointSha256 !== undefined
+        || exact.journal.batchRevision !== undefined
+        || exact.journal.batchSha256 !== undefined
+      ) return fail('recovery-required');
+      const sourceReopenSha256 = sha256(
+        `unaccepted-target\0${exact.journal.projectId}`
+          + `\0${exact.journal.operationId}\0${cancellationRequestSha256}`,
+      );
       const updatedAt = timestamp(
         this.#clock,
         latestTimestamp(exact.journal.updatedAt, exact.recovery.updatedAt),
       );
       await lease.withProjectScope(async scope => {
+        const project = await scope.getProject();
+        if (
+          project?.serviceState !== 'active'
+          || project.authorityGeneration !== exact.journal.expectedAuthorityGeneration
+        ) return fail('recovery-required');
         await scope.portability.advanceAuthorityTransferRecoveryEvidence({
           expectedUpdatedAt: exact.recovery.updatedAt,
-          sourceReopenSha256: cleanup.cleanupSha256,
+          sourceReopenSha256,
           transferId: exact.journal.operationId,
           updatedAt,
         });
@@ -1638,6 +1894,24 @@ implements ProjectLifecycleRecoveryOwner {
             transferId: exact.journal.operationId,
           })
         ));
+      }
+      const receiptKeys = await lease.withProjectScope(scope => (
+        scope.portability.listTransferReceiptKeys(exact.journal.operationId)
+      ));
+      const target = exact.target;
+      if (target === undefined) {
+        if (receiptKeys.length !== 0) return fail('recovery-required');
+      } else {
+        const sourceReceiptKeys = receiptKeys.filter(candidate => (
+          candidate.receiptKeyId !== target.receiptKeyId
+        ));
+        if (sourceReceiptKeys.length > 1) return fail('recovery-required');
+        const sourceReceiptKey = sourceReceiptKeys[0];
+        if (sourceReceiptKey !== undefined) {
+          await lease.withProjectScope(scope => (
+            scope.portability.deleteTransferReceiptKey(sourceReceiptKey)
+          ));
+        }
       }
       await this.#advance(lease, exact.journal, {
         nextPhase: 'target-cleaned',
@@ -1685,10 +1959,70 @@ implements ProjectLifecycleRecoveryOwner {
       exact = await this.#exactTransfer(lease, exact.journal.operationId);
     }
     if (exact.journal.phase === 'source-reopened') {
-      await this.#advance(lease, exact.journal, {
-        nextPhase: 'cancelled',
-        nextState: 'cancelled',
-        scheduledAt: exact.recovery.expiresAt,
+      const evidence = exact.evidence;
+      if (evidence?.cleanupProof === undefined) {
+        await this.#advance(lease, exact.journal, {
+          nextPhase: 'cancelled',
+          nextState: 'cancelled',
+          scheduledAt: exact.recovery.expiresAt,
+        });
+        return;
+      }
+      const target = this.#requireTarget(exact);
+      const { cleanupProof, ...compactedEvidence } = evidence;
+      const cleanupRequest = decodeRequest('confirmCloudToLanTargetInvalidated', {
+        idempotencyKey: cleanupProof.operationIntentId,
+        projectId: exact.journal.projectId,
+        proof: cleanupProof,
+        transferId: exact.journal.operationId,
+      });
+      const cancelledAt = timestamp(
+        this.#clock,
+        latestTimestamp(exact.journal.updatedAt, exact.recovery.updatedAt),
+      );
+      const current = await this.#requireStatus(lease, exact.journal.operationId);
+      const cancelled = decodeCollabAuthorityTransferStatus({
+        ...current,
+        phase: 'cancelled',
+        state: 'cancelled',
+        updatedAt: cancelledAt,
+      });
+      const responseJson = JSON.stringify(cancelled);
+      const responseSha256 = sha256(responseJson);
+      await lease.withProjectScope(async scope => {
+        const principals = await scope.portability.listActiveProjectPrincipalBindings();
+        await scope.portability.advanceAuthorityTransferRecoveryEvidence({
+          expectedTargetProof: encodeTargetEvidence(evidence),
+          expectedUpdatedAt: exact.recovery.updatedAt,
+          targetProof: encodeTargetEvidence(compactedEvidence),
+          transferId: exact.journal.operationId,
+          updatedAt: cancelledAt,
+        });
+        await scope.portability.advanceLifecycleJournal({
+          expectedPhase: 'source-reopened',
+          expectedState: 'active',
+          nextPhase: 'cancelled',
+          nextState: 'cancelled',
+          operationId: exact.journal.operationId,
+          scheduledAt: exact.recovery.expiresAt,
+          updatedAt: cancelledAt,
+        });
+        await scope.portability.putTerminalResponder({
+          createdAt: cancelledAt,
+          eligiblePrincipals: principals.map(binding => Object.freeze({
+            memberId: binding.memberId,
+            principalId: binding.principalId,
+          })),
+          expiresAt: exact.recovery.expiresAt,
+          operationId: exact.journal.operationId,
+          operationKind: 'authority-transfer',
+          replayAuthorization: {
+            memberId: target.targetHostMemberId,
+            requestSha256: sha256(JSON.stringify(cleanupRequest)),
+          },
+          responseJson,
+          responseSha256,
+        });
       });
       return;
     }
@@ -1702,12 +2036,14 @@ implements ProjectLifecycleRecoveryOwner {
     item: CollabTransferredMembershipClaimBatch['claims'][number],
     createdAt: CollabIsoTimestamp,
   ): Promise<ProtectedClaimEnvelopeInput> {
+    const environmentIdentity = await this.#environmentIdentity();
+    if (!PRINCIPAL_PATTERN.test(environmentIdentity)) return fail('dependency-failed');
     const associatedData = Object.freeze({
       authorityGeneration: exact.recovery.sourceAuthority.generation,
       checkpointSha256: batch.checkpointSha256,
       claimSha256: sha256(item.claim),
       envelopeVersion: 1 as const,
-      environmentIdentity: this.#environmentIdentity,
+      environmentIdentity,
       memberId: item.memberId,
       projectId: exact.journal.projectId,
       transferId: exact.journal.operationId,
@@ -1877,6 +2213,38 @@ implements ProjectLifecycleRecoveryOwner {
       || proof.checkpointSha256 !== exact.journal.checkpointSha256
       || proof.batchRevision !== exact.journal.batchRevision
       || proof.batchSha256 !== exact.journal.batchSha256
+    ) return fail('state-conflict');
+  }
+
+  #assertCleanupProof(
+    proof: CollabCloudToLanTargetCleanupProof,
+    exact: ExactTransfer,
+    target: VerifiedCloudToLanTarget,
+  ): void {
+    const hasPersistedBatch = exact.journal.batchRevision !== undefined
+      || exact.journal.batchSha256 !== undefined;
+    const hasPersistedStage = exact.recovery.stageSha256 !== undefined;
+    if (
+      proof.projectId !== exact.journal.projectId
+      || proof.transferId !== exact.journal.operationId
+      || proof.targetHostMemberId !== target.targetHostMemberId
+      || proof.receiptKeyId !== target.receiptKeyId
+      || !sameAuthority(proof.sourceAuthority, exact.recovery.sourceAuthority)
+      || !sameAuthority(proof.targetAuthority, exact.recovery.targetAuthority)
+      || proof.checkpointSha256 !== (exact.journal.checkpointSha256 ?? null)
+      || hasPersistedBatch !== hasPersistedStage
+      || (
+        hasPersistedStage
+        && (
+          proof.stageSha256 !== exact.recovery.stageSha256
+          || proof.batchRevision !== exact.journal.batchRevision
+          || proof.batchSha256 !== exact.journal.batchSha256
+        )
+      )
+      || (
+        exact.evidence?.cleanupProof === undefined
+        && Date.parse(proof.invalidatedAt) <= Date.parse(exact.journal.updatedAt)
+      )
     ) return fail('state-conflict');
   }
 
