@@ -1767,6 +1767,8 @@ describe('portability lifecycle persistence', () => {
       await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
       const projectId = 'project-claim-overrides';
       const transferId = 'transfer-claim-overrides';
+      const newerTransferId = 'transfer-claim-overrides-next';
+      const newerTransferCreatedAt = '2026-08-24T23:59:00.000Z';
       const importedMemberId = 'member-imported-override';
       const managerMemberId = 'member-claim-manager';
       await seedProject(database, projectId);
@@ -1785,6 +1787,12 @@ describe('portability lifecycle persistence', () => {
               SET role = 'manager'
             WHERE project_id = $1 AND member_id = $2`,
           [projectId, managerMemberId],
+        );
+        await migration.query(
+          `UPDATE claudian_cloud.projects
+              SET authority_generation = 5
+            WHERE project_id = $1`,
+          [projectId],
         );
         await migration.query(
           `INSERT INTO claudian_cloud.project_lifecycle_journals (
@@ -1806,6 +1814,28 @@ describe('portability lifecycle persistence', () => {
             CHECKPOINT_SHA,
             BATCH_SHA,
             T0,
+          ],
+        );
+        await migration.query(
+          `INSERT INTO claudian_cloud.project_lifecycle_journals (
+             project_id, operation_id, kind, direction, phase,
+             recovery_from_phase, state, expected_authority_generation,
+             actor_member_id, idempotency_key, request_fingerprint,
+             checkpoint_sha256, batch_revision, batch_sha256, result_sha256,
+             scheduled_at, created_at, updated_at
+           ) VALUES (
+             $1, $2, 'authority-transfer', 'lan-to-cloud', 'completed', NULL,
+             'completed', 5, $3, 'claim-override-transfer-next-key', $4,
+             $5, 1, $6, NULL, $7, $7, $7
+           )`,
+          [
+            projectId,
+            newerTransferId,
+            managerMemberId,
+            '9'.repeat(64),
+            CHECKPOINT_SHA,
+            '0'.repeat(64),
+            newerTransferCreatedAt,
           ],
         );
         await migration.query('COMMIT');
@@ -2000,6 +2030,92 @@ describe('portability lifecycle persistence', () => {
           ));
           assert.equal(redeemed?.importedClaimState, 'redeemed');
           assert.equal(redeemed.importedClaimGeneration, 2);
+
+          assert.equal(await scope.portability.revokeProjectPrincipal({
+            memberId: importedMemberId,
+            principalId: 'principal:claim-override',
+            revokedAt: redeemedAt,
+          }), 'advanced');
+          assert.equal(await scope.advanceProjectAuthorityState({
+            expectedAuthorityGeneration: 5,
+            expectedAuthorityStateRevision: 1,
+            expectedServiceState: 'active',
+            nextAuthorityGeneration: 5,
+            nextServiceState: 'read-only-transition',
+          }), 'advanced');
+          assert.equal(await scope.advanceProjectAuthorityState({
+            expectedAuthorityGeneration: 5,
+            expectedAuthorityStateRevision: 2,
+            expectedServiceState: 'read-only-transition',
+            nextAuthorityGeneration: 6,
+            nextServiceState: 'active',
+          }), 'advanced');
+          await scope.portability.putTransferredMembershipClaim({
+            batchRevision: 1,
+            checkpointSha256: CHECKPOINT_SHA,
+            claimSha256: 'f'.repeat(64),
+            createdAt: newerTransferCreatedAt,
+            expiresAt: EXPIRES,
+            memberId: importedMemberId,
+            transferId: newerTransferId,
+          });
+          const transferredAgain = (await scope.membership.listProjectMembers({
+            actorRole: 'manager',
+            now: redeemedAt,
+          })).members.find(member => member.memberId === importedMemberId);
+          const currentFacts = await scope.membership.getImportedMembershipClaimFacts(
+            importedMemberId,
+            redeemedAt,
+          );
+          const currentOverrideCreatedAt = '2026-08-25T00:05:00.000Z';
+          const currentOverrideExpiresAt = new Date(
+            Date.parse(currentOverrideCreatedAt) + 30 * 24 * 60 * 60 * 1_000,
+          ).toISOString();
+          const currentReissue = await scope.membership.reissueTransferredMembershipClaim({
+            ...first,
+            claimGeneration: 1,
+            claimSha256: '4'.repeat(64),
+            createdAt: currentOverrideCreatedAt,
+            envelope: {
+              ...first.envelope,
+              associatedDataSha256: '8'.repeat(64),
+              createdAt: currentOverrideCreatedAt,
+              expiresAt: currentOverrideExpiresAt,
+              transferId: newerTransferId,
+            },
+            expectedClaimGeneration: 0,
+            expiresAt: currentOverrideExpiresAt,
+            idempotencyKey: 'claim-override-current-transfer',
+            requestFingerprint: '9'.repeat(64),
+            secretReplayExpiresAt: currentOverrideExpiresAt,
+            transferId: newerTransferId,
+          });
+          assert.deepEqual({
+            currentFacts,
+            listedGeneration: transferredAgain?.importedClaimGeneration,
+            listedState: transferredAgain?.importedClaimState,
+            reissuedGeneration: currentReissue.record?.claimGeneration,
+            reissuedTransferId: currentReissue.record?.transferId,
+            reissueStatus: currentReissue.status,
+          }, {
+            currentFacts: {
+              claimGeneration: 0,
+              claimSha256: 'f'.repeat(64),
+              memberId: importedMemberId,
+              transferId: newerTransferId,
+            },
+            listedGeneration: 0,
+            listedState: 'original-active',
+            reissuedGeneration: 1,
+            reissuedTransferId: newerTransferId,
+            reissueStatus: 'created',
+          });
+          const currentOverride = (await scope.membership.listProjectMembers({
+            actorRole: 'manager',
+            now: currentOverrideCreatedAt,
+          })).members.find(member => member.memberId === importedMemberId);
+          assert.equal(currentOverride?.importedClaimState, 'override-active');
+          assert.equal(currentOverride.importedClaimGeneration, 1);
         });
       } finally {
         await store.close();
