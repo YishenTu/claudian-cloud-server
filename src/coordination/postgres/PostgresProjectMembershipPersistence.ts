@@ -2148,18 +2148,28 @@ export class PostgresProjectMembershipPersistence
               override.claim_generation AS override_claim_generation,
               override.state AS override_state
          FROM claudian_cloud.project_memberships AS membership
+         JOIN claudian_cloud.projects AS project
+           ON project.project_id = membership.project_id
          LEFT JOIN LATERAL (
-           SELECT original.state, original.expires_at
+           SELECT original.transfer_id, original.state, original.expires_at
              FROM claudian_cloud.transferred_membership_claims AS original
+             JOIN claudian_cloud.project_lifecycle_journals AS transfer
+               ON transfer.project_id = original.project_id
+              AND transfer.operation_id = original.transfer_id
+              AND transfer.kind = 'authority-transfer'
+              AND transfer.direction = 'lan-to-cloud'
+              AND transfer.state = 'completed'
+              AND transfer.batch_revision = original.batch_revision
+              AND transfer.expected_authority_generation + 1
+                = project.authority_generation
             WHERE original.project_id = membership.project_id
               AND original.member_id = membership.member_id
-            ORDER BY original.created_at DESC, original.batch_revision DESC
-            LIMIT 1
          ) AS claim ON true
          LEFT JOIN LATERAL (
            SELECT candidate.state, candidate.claim_generation
              FROM claudian_cloud.transferred_membership_claim_overrides AS candidate
             WHERE candidate.project_id = membership.project_id
+              AND candidate.transfer_id = claim.transfer_id
               AND candidate.member_id = membership.member_id
             ORDER BY candidate.claim_generation DESC
             LIMIT 1
@@ -2956,21 +2966,24 @@ export class PostgresProjectMembershipPersistence
               override.claim_sha256 AS override_claim_sha256,
               override.state AS override_state
          FROM claudian_cloud.project_memberships AS membership
+         JOIN claudian_cloud.projects AS project
+           ON project.project_id = membership.project_id
          JOIN LATERAL (
            SELECT claim.transfer_id, claim.claim_sha256, claim.state,
-                  claim.expires_at, claim.batch_revision, claim.created_at
+                  claim.expires_at
              FROM claudian_cloud.transferred_membership_claims AS claim
+             JOIN claudian_cloud.project_lifecycle_journals AS transfer
+               ON transfer.project_id = claim.project_id
+              AND transfer.operation_id = claim.transfer_id
+              AND transfer.kind = 'authority-transfer'
+              AND transfer.direction = 'lan-to-cloud'
+              AND transfer.state = 'completed'
+              AND transfer.batch_revision = claim.batch_revision
+              AND transfer.expected_authority_generation + 1
+                = project.authority_generation
             WHERE claim.project_id = membership.project_id
               AND claim.member_id = membership.member_id
-            ORDER BY claim.created_at DESC, claim.batch_revision DESC
-            LIMIT 1
          ) AS original ON true
-         JOIN claudian_cloud.project_lifecycle_journals AS lifecycle
-           ON lifecycle.project_id = membership.project_id
-          AND lifecycle.operation_id = original.transfer_id
-          AND lifecycle.kind = 'authority-transfer'
-          AND lifecycle.direction = 'lan-to-cloud'
-          AND lifecycle.state = 'completed'
          LEFT JOIN LATERAL (
            SELECT candidate.claim_generation, candidate.claim_sha256,
                   candidate.state
