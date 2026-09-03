@@ -15,6 +15,7 @@ import {
   cloudToLanPostgres,
   CLOUD_TO_LAN_MANAGER_PRINCIPAL,
   CLOUD_TO_LAN_TARGET_ID,
+  confirmCloudToLanTargetInvalidated,
   type CloudToLanJournalFault,
   stageCloudToLan,
 } from './CloudToLanPostgresHarness.js';
@@ -128,19 +129,16 @@ async function driveCancellation(): Promise<string> {
     begun.transferId,
   ));
   const faultByPhase: Readonly<Record<string, string | undefined>> = {
-    'cancel-intent': 'target-invalidated',
     'cancelled': undefined,
     'source-reopened': 'cancelled',
     'target-cleaned': 'source-reopened',
     'target-invalidated': 'target-cleaned',
   };
   const cancellationPhase = phase as string;
-  if (!(cancellationPhase in faultByPhase)) {
+  if (cancellationPhase !== 'cancel-intent' && !(cancellationPhase in faultByPhase)) {
     throw new Error('cloud-to-lan-process-worker.invalid-cancel-phase');
   }
-  const shouldFail = faultByPhase[cancellationPhase] !== undefined;
-  fault.nextPhase = faultByPhase[cancellationPhase];
-  const cancellation = coordinator.cancel({
+  await coordinator.cancel({
     principalId: CLOUD_TO_LAN_MANAGER_PRINCIPAL,
     request: {
       expectedPhase: 'target-staged',
@@ -149,8 +147,18 @@ async function driveCancellation(): Promise<string> {
       transferId: begun.transferId,
     },
   });
-  if (shouldFail) await expectFailure(cancellation);
-  else await cancellation;
+  if (cancellationPhase !== 'cancel-intent') {
+    const nextFault = faultByPhase[cancellationPhase];
+    fault.nextPhase = nextFault;
+    const confirmation = confirmCloudToLanTargetInvalidated(
+      coordinator,
+      store,
+      projectId as string,
+      begun.transferId,
+    );
+    if (nextFault === undefined) await confirmation;
+    else await expectFailure(confirmation);
+  }
   assert.equal(await currentPhase(begun.transferId), phase);
   return begun.transferId;
 }
@@ -207,6 +215,15 @@ async function recoverThenWrite(): Promise<void> {
     projectId: journal.projectId,
     scheduledAt: journal.scheduledAt,
   });
+
+  if (mode === 'cancel' && workerPhase === 'cancel-intent') {
+    await confirmCloudToLanTargetInvalidated(
+      coordinator,
+      store,
+      projectId as string,
+      transferId,
+    );
+  }
 
   const recoveredJournal = await store.withProjectScope(projectId as string, scope => (
     scope.portability.getLifecycleJournal(transferId)

@@ -15,14 +15,18 @@ import { Client } from 'pg';
 
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
 import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { ClaimCustodyKeyReferenceVerifier } from '../../../src/environment-maintenance/commands/ClaimCustodyKeyReferenceVerifier.js';
+import { ActiveClaimCustodyKeyReferenceGate } from '../../../src/project-authority/lifecycle/ActiveClaimCustodyKeyReferenceGate.js';
 import {
   CloudToLanTransferCoordinator,
+  CloudToLanTransferCoordinatorError,
   type CloudToLanClaimCustodyPort,
 } from '../../../src/project-authority/lifecycle/cloud-to-lan/CloudToLanTransferCoordinator.js';
 import {
   type PostgresTestDatabase,
   withPostgresTestDatabase,
 } from '../../helpers/PostgresTestDatabase.js';
+import { TerminalResponderExpiry } from '../../../src/project-authority/lifecycle/retire/TerminalResponderExpiry.js';
 
 const PROJECT_ID = 'project-cloud-to-lan-real';
 const MANAGER_ID = 'member-manager';
@@ -196,7 +200,17 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
         deletionOperationIdFactory: () => 'delete-transfer-real',
         environmentIdentity: 'environment-real',
         relinquishmentIntentIdFactory: () => 'relinquishment-intent-real',
-        relinquishmentSigner: { sign: () => Promise.resolve(SIGNATURE) },
+        relinquishmentSigner: {
+          activeKey: Object.freeze({
+            publicKey: Buffer.alloc(32, 6).toString('base64url'),
+            receiptKeyId: 'receipt-key-source',
+          }),
+          resolveReceiptKey: () => Promise.resolve(Object.freeze({
+            publicKey: Buffer.alloc(32, 6).toString('base64url'),
+            receiptKeyId: 'receipt-key-source',
+          })),
+          sign: () => Promise.resolve(SIGNATURE),
+        },
         repository: {
           reserveExactRepositoryOperation: projectId => Promise.resolve(Object.freeze({
             async close() {},
@@ -222,10 +236,8 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
           })),
           verifyStaged: () => Promise.resolve(),
           verifyActivation: () => Promise.resolve(),
+          verifyCleanup: () => Promise.resolve(),
           verifyRedemptionReceipt: () => Promise.resolve(),
-          invalidateAndClean: () => Promise.resolve(Object.freeze({
-            cleanupSha256: '7'.repeat(64),
-          })),
         },
       });
       try {
@@ -340,6 +352,41 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
         assert.equal((await store.listActiveRepositoryPlacements()).placements.some(
           placement => placement.projectId === PROJECT_ID,
         ), false);
+        const restartedStore = coordination(database);
+        try {
+          const keyGate = new ActiveClaimCustodyKeyReferenceGate({
+            coordination: restartedStore,
+            metadata: {
+              read: () => Promise.resolve({
+                authorityId: 'authority-real',
+                authorityVolumeIdentity: 'volume-real',
+                coordinationSchemaVersion: 11,
+                repositoryFormatVersion: 1,
+                restoreEpoch: 1,
+                serverBuild: 'cloud-build-real',
+              }),
+            },
+            verifier: new ClaimCustodyKeyReferenceVerifier({
+              custody: {
+                open: () => Promise.reject(new Error('missing-historical-key')),
+              },
+              keyring: {
+                assertReceiptPublicKey: () => undefined,
+                assertReferences: ({ encryptionKeyIds }) => {
+                  if (encryptionKeyIds.includes('claim-key-current')) {
+                    throw new Error('missing-historical-key');
+                  }
+                },
+              },
+            }),
+          });
+          await assert.rejects(
+            keyGate.verifyAll(new AbortController().signal),
+            /active-claim-custody-key-reference\.error\.unavailable/u,
+          );
+        } finally {
+          await restartedStore.close();
+        }
         const proof = (await coordinator.getStatus({
           principalId: TARGET_PRINCIPAL,
           request: { projectId: PROJECT_ID, transferId: begun.transferId },
@@ -461,6 +508,253 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
             transferId: begun.transferId,
           },
         }), acknowledgement);
+      } finally {
+        await coordinator.close();
+        await store.close();
+      }
+    });
+  });
+
+  it('compacts accepted-target cancellation proof into exact terminal replay before backup', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await seed(database);
+      const store = coordination(database);
+      const claims = new Map<string, string>();
+      let tick = Date.parse(T0) - 1_000;
+      const coordinator = new CloudToLanTransferCoordinator({
+        checkpoint: {
+          capture: input => Promise.resolve(Object.freeze({
+            checkpointSha256: CHECKPOINT_SHA,
+            expiresAt: input.expiresAt,
+            operationId: input.operationId,
+            projectId: input.projectId,
+          })),
+          discard: () => Promise.resolve('removed'),
+        },
+        clock: () => new Date(tick += 1_000),
+        coordination: store,
+        custody: custody(claims),
+        custodyReceiptIdFactory: () => 'custody-receipt-cancelled',
+        deletionOperationIdFactory: () => 'delete-transfer-cancelled',
+        environmentIdentity: 'environment-real',
+        relinquishmentIntentIdFactory: () => 'relinquishment-intent-cancelled',
+        relinquishmentSigner: {
+          activeKey: Object.freeze({
+            publicKey: Buffer.alloc(32, 6).toString('base64url'),
+            receiptKeyId: 'receipt-key-source',
+          }),
+          resolveReceiptKey: () => Promise.resolve(Object.freeze({
+            publicKey: Buffer.alloc(32, 6).toString('base64url'),
+            receiptKeyId: 'receipt-key-source',
+          })),
+          sign: () => Promise.resolve(SIGNATURE),
+        },
+        repository: {
+          reserveExactRepositoryOperation: projectId => Promise.resolve(Object.freeze({
+            async close() {},
+            projectId,
+          })),
+          verifyExactRepository: () => Promise.resolve(),
+        },
+        sourceFence: {
+          quiesce: () => Promise.resolve(),
+          relinquish: () => Promise.resolve(),
+          reopen: () => Promise.resolve(),
+        },
+        targetTrust: {
+          verifyAcceptance: input => Promise.resolve(Object.freeze({
+            principalId: input.principalId,
+            projectId: input.request.projectId,
+            receiptKeyId: 'receipt-key-target-real',
+            receiptPublicKey: PUBLIC_KEY,
+            targetAuthority: input.targetAuthority,
+            targetHostMemberId: input.request.targetHostMemberId,
+            targetUrl: input.targetUrl,
+            transferId: input.request.transferId,
+          })),
+          verifyStaged: () => Promise.resolve(),
+          verifyActivation: () => Promise.resolve(),
+          verifyCleanup: () => Promise.resolve(),
+          verifyRedemptionReceipt: () => Promise.resolve(),
+        },
+      });
+      try {
+        const begun = await coordinator.begin({
+          principalId: MANAGER_PRINCIPAL,
+          request: {
+            expectedAuthorityGeneration: 4,
+            idempotencyKey: 'begin-cancelled-real',
+            projectId: PROJECT_ID,
+            targetHostMemberId: TARGET_ID,
+            targetUrl: 'https://lan.example.test',
+          },
+        });
+        await coordinator.acceptTarget({
+          principalId: TARGET_PRINCIPAL,
+          request: {
+            idempotencyKey: 'accept-cancelled-real',
+            projectId: PROJECT_ID,
+            targetHostMemberId: TARGET_ID,
+            targetProof: Buffer.alloc(32, 1).toString('base64url'),
+            transferId: begun.transferId,
+          },
+        });
+        await coordinator.getReceiptVerifier({
+          principalId: TARGET_PRINCIPAL,
+          request: { projectId: PROJECT_ID, transferId: begun.transferId },
+        });
+        await store.withProjectScope(PROJECT_ID, async scope => {
+          assert.deepEqual(
+            (await scope.portability.listTransferReceiptKeys(begun.transferId))
+              .map(key => key.receiptKeyId),
+            ['receipt-key-source', 'receipt-key-target-real'],
+          );
+        });
+        await coordinator.cancel({
+          principalId: MANAGER_PRINCIPAL,
+          request: {
+            expectedPhase: 'checkpoint-captured',
+            idempotencyKey: 'cancel-cancelled-real',
+            projectId: PROJECT_ID,
+            transferId: begun.transferId,
+          },
+        });
+        const cleanupRequest = {
+          idempotencyKey: 'cleanup-cancelled-real',
+          projectId: PROJECT_ID,
+          proof: {
+            batchRevision: null,
+            batchSha256: null,
+            checkpointSha256: CHECKPOINT_SHA,
+            cleanupSha256: '7'.repeat(64),
+            invalidatedAt: '2026-08-27T00:01:00.000Z',
+            operationIntentId: 'cleanup-cancelled-real',
+            projectId: PROJECT_ID,
+            receiptKeyId: 'receipt-key-target-real',
+            signature: SIGNATURE,
+            signatureAlgorithm: 'ed25519' as const,
+            sourceAuthority: { generation: 4, kind: 'cloud' as const },
+            stageSha256: null,
+            targetAuthority: { generation: 5, kind: 'lan' as const },
+            targetHostMemberId: TARGET_ID,
+            transferId: begun.transferId,
+          },
+          transferId: begun.transferId,
+        };
+        const cancelled = await coordinator.confirmTargetInvalidated({
+          principalId: TARGET_PRINCIPAL,
+          request: cleanupRequest,
+        });
+        assert.equal(cancelled.state, 'cancelled');
+        const terminalExpiresAt = await store.withProjectScope(PROJECT_ID, async scope => {
+          const recovery = await scope.portability.getAuthorityTransferRecovery(
+            begun.transferId,
+          );
+          assert.ok(recovery?.targetProof);
+          assert.equal(Object.hasOwn(
+            JSON.parse(recovery.targetProof) as Record<string, unknown>,
+            'cleanupProof',
+          ), false);
+          const responder = await scope.portability.getTerminalResponder(
+            'authority-transfer',
+            begun.transferId,
+          );
+          assert.ok(responder);
+          assert.equal(responder.replayAuthorization?.memberId, TARGET_ID);
+          assert.deepEqual(
+            (await scope.portability.listTransferReceiptKeys(begun.transferId))
+              .map(key => key.receiptKeyId),
+            ['receipt-key-target-real'],
+          );
+          return responder.expiresAt;
+        });
+        const backupRecords = await store.withProjectScope(
+          PROJECT_ID,
+          scope => scope.checkpoint.readProjectCheckpointRecords({
+            excludedOperationId: 'backup-after-cancelled-transfer',
+            maximumCoordinationBytes: 1024 * 1024,
+            metadata: {
+              authorityId: 'authority-real',
+              authorityVolumeIdentity: 'volume-real',
+              coordinationSchemaVersion: 11,
+              maximumServerBuild: 'cloud-build-real',
+              minimumServerBuild: 'cloud-build-real',
+              repositoryFormatVersion: 1,
+              restoreEpoch: 1,
+            },
+            profile: 'backup',
+            snapshotAt: cancelled.updatedAt,
+          }),
+        );
+        const encoded = encodeCollabProjectBackupCheckpointCoordinationNdjson(
+          backupRecords as readonly CollabProjectBackupRecord[],
+        );
+        assert.deepEqual(
+          decodeCollabProjectBackupCheckpointCoordinationNdjson(encoded),
+          backupRecords,
+        );
+        assert.deepEqual(await coordinator.confirmTargetInvalidated({
+          principalId: TARGET_PRINCIPAL,
+          request: cleanupRequest,
+        }), cancelled);
+        await assert.rejects(coordinator.confirmTargetInvalidated({
+          principalId: TARGET_PRINCIPAL,
+          request: {
+            ...cleanupRequest,
+            proof: { ...cleanupRequest.proof, cleanupSha256: '8'.repeat(64) },
+          },
+        }), (error: unknown) => error instanceof CloudToLanTransferCoordinatorError
+          && error.code === 'state-conflict');
+        const expiry = new TerminalResponderExpiry({ coordination: store });
+        assert.equal(await expiry.expire({
+          operationId: begun.transferId,
+          operationKind: 'authority-transfer',
+          projectId: PROJECT_ID,
+          removedAt: terminalExpiresAt,
+        }), 'expired');
+        await store.withProjectScope(PROJECT_ID, async scope => {
+          assert.equal(await scope.portability.getTerminalResponder(
+            'authority-transfer',
+            begun.transferId,
+          ), undefined);
+          assert.deepEqual(
+            (await scope.portability.listTransferReceiptKeys(begun.transferId))
+              .map(key => key.receiptKeyId),
+            ['receipt-key-target-real'],
+          );
+        });
+        const postExpiryBackupRecords = await store.withProjectScope(
+          PROJECT_ID,
+          scope => scope.checkpoint.readProjectCheckpointRecords({
+            excludedOperationId: 'backup-after-cancelled-responder-expiry',
+            maximumCoordinationBytes: 1024 * 1024,
+            metadata: {
+              authorityId: 'authority-real',
+              authorityVolumeIdentity: 'volume-real',
+              coordinationSchemaVersion: 11,
+              maximumServerBuild: 'cloud-build-real',
+              minimumServerBuild: 'cloud-build-real',
+              repositoryFormatVersion: 1,
+              restoreEpoch: 1,
+            },
+            profile: 'backup',
+            snapshotAt: terminalExpiresAt,
+          }),
+        );
+        const postExpiryEncoded = encodeCollabProjectBackupCheckpointCoordinationNdjson(
+          postExpiryBackupRecords as readonly CollabProjectBackupRecord[],
+        );
+        assert.deepEqual(
+          decodeCollabProjectBackupCheckpointCoordinationNdjson(postExpiryEncoded),
+          postExpiryBackupRecords,
+        );
+        assert.equal(await expiry.expire({
+          operationId: begun.transferId,
+          operationKind: 'authority-transfer',
+          projectId: PROJECT_ID,
+          removedAt: terminalExpiresAt,
+        }), 'replayed');
       } finally {
         await coordinator.close();
         await store.close();

@@ -1,4 +1,8 @@
+import { createPublicKey, verify } from 'node:crypto';
+
 import {
+  decodeCollabAuthorityRelinquishmentProof,
+  encodeCollabAuthorityRelinquishmentProofSigningInput,
   isCollabOpaqueId,
   type CollabCheckpointProtectedClaimEnvelopeRecord,
 } from '@claudian-collab/protocol';
@@ -66,6 +70,35 @@ function rawPublicKey(value: unknown): string {
   return candidate;
 }
 
+interface ReceiptKeyReference {
+  readonly publicKey: string;
+  readonly receiptKeyId: string;
+}
+
+function receiptKeyReference(value: unknown): ReceiptKeyReference {
+  return Object.freeze({
+    publicKey: rawPublicKey(value),
+    receiptKeyId: keyId(value, 'receiptKeyId'),
+  });
+}
+
+function authorityKind(value: unknown): 'cloud' | 'lan' {
+  const kind = record(value).kind;
+  if (kind !== 'cloud' && kind !== 'lan') return invalid();
+  return kind;
+}
+
+function retainReceiptReference(
+  receipt: Set<string>,
+  publicKeys: Map<string, string>,
+  reference: ReceiptKeyReference,
+): void {
+  const existing = publicKeys.get(reference.receiptKeyId);
+  if (existing !== undefined && existing !== reference.publicKey) return invalid();
+  receipt.add(reference.receiptKeyId);
+  publicKeys.set(reference.receiptKeyId, reference.publicKey);
+}
+
 /** Proves that the operator retained every key referenced by checkpoint state. */
 export class ClaimCustodyKeyReferenceVerifier {
   readonly #custody: ClaimCustodyEnvelopeOpeningPort;
@@ -82,18 +115,55 @@ export class ClaimCustodyKeyReferenceVerifier {
     const encryption = new Set<string>();
     const receipt = new Set<string>();
     const receiptPublicKeys = new Map<string, string>();
-    const cloudTargetTransfers = new Set<string>();
+    const receiptPublicKeysForConfig = new Map<string, string>();
+    const transferDirections = new Map<string, 'cloud-to-lan' | 'lan-to-cloud'>();
+    const cloudTargetKeys = new Map<string, ReceiptKeyReference>();
+    const lanTargetKeys = new Map<string, ReceiptKeyReference>();
+    const relinquishmentProofs = new Map<string, unknown>();
     for (const item of records) {
       if (item.kind === 'lifecycle-journal') {
         const value = record(item.value);
         if (
           value.operationKind === 'authority-transfer'
-          && value.direction === 'lan-to-cloud'
-        ) cloudTargetTransfers.add(keyId(value, 'operationId'));
+          && (value.direction === 'cloud-to-lan'
+            || value.direction === 'lan-to-cloud')
+        ) {
+          const transferId = keyId(value, 'operationId');
+          const existing = transferDirections.get(transferId);
+          if (existing !== undefined && existing !== value.direction) return invalid();
+          transferDirections.set(transferId, value.direction);
+        }
       } else if (item.kind === 'authority-transfer-recovery') {
         const value = record(item.value);
+        const transferId = keyId(value, 'transferId');
         if (value.sourceEvidence !== null && value.sourceEvidence !== undefined) {
-          cloudTargetTransfers.add(keyId(value, 'transferId'));
+          if (
+            authorityKind(value.sourceAuthority) !== 'lan'
+            || authorityKind(value.targetAuthority) !== 'cloud'
+            || cloudTargetKeys.has(transferId)
+          ) return invalid();
+          cloudTargetKeys.set(
+            transferId,
+            receiptKeyReference(value.sourceEvidence),
+          );
+        }
+        if (value.targetEvidence !== null && value.targetEvidence !== undefined) {
+          if (
+            authorityKind(value.sourceAuthority) !== 'cloud'
+            || authorityKind(value.targetAuthority) !== 'lan'
+            || lanTargetKeys.has(transferId)
+          ) return invalid();
+          lanTargetKeys.set(
+            transferId,
+            receiptKeyReference(value.targetEvidence),
+          );
+        }
+        if (
+          value.relinquishmentProof !== null
+          && value.relinquishmentProof !== undefined
+        ) {
+          if (relinquishmentProofs.has(transferId)) return invalid();
+          relinquishmentProofs.set(transferId, value.relinquishmentProof);
         }
       }
       if (item.kind !== 'transfer-receipt-key') continue;
@@ -103,6 +173,49 @@ export class ClaimCustodyKeyReferenceVerifier {
       const identity = `${transferId}\0${receiptKeyId}`;
       if (receiptPublicKeys.has(identity)) return invalid();
       receiptPublicKeys.set(identity, publicKey);
+    }
+    for (const [transferId, encodedProof] of relinquishmentProofs) {
+      let proof;
+      try {
+        proof = decodeCollabAuthorityRelinquishmentProof(encodedProof);
+      } catch {
+        return invalid();
+      }
+      if (proof.transferId !== transferId) return invalid();
+      if (proof.sourceAuthority.kind !== 'cloud') continue;
+      const { certificate, ...payload } = proof;
+      const signingInput = Buffer.from(
+        encodeCollabAuthorityRelinquishmentProofSigningInput(payload),
+        'utf8',
+      );
+      const signature = Buffer.from(certificate, 'base64url');
+      const target = lanTargetKeys.get(transferId);
+      if (target === undefined) return invalid();
+      const targetIdentity = `${transferId}\0${target.receiptKeyId}`;
+      if (receiptPublicKeys.get(targetIdentity) !== target.publicKey) return invalid();
+      const matches = [...receiptPublicKeys].filter(([identity, publicKey]) => {
+        if (!identity.startsWith(`${transferId}\0`)) return false;
+        if (identity === targetIdentity) return false;
+        try {
+          return verify(
+            null,
+            signingInput,
+            createPublicKey({
+              format: 'jwk',
+              key: { crv: 'Ed25519', kty: 'OKP', x: publicKey },
+            }),
+            signature,
+          );
+        } catch {
+          return false;
+        }
+      });
+      if (matches.length !== 1) return invalid();
+      const [identity, publicKey] = matches[0] ?? invalid();
+      retainReceiptReference(receipt, receiptPublicKeysForConfig, {
+        publicKey,
+        receiptKeyId: identity.slice(transferId.length + 1),
+      });
     }
     for (const item of records) {
       if (item.kind === 'protected-claim-envelope') {
@@ -119,24 +232,44 @@ export class ClaimCustodyKeyReferenceVerifier {
         encryption.add(keyId(item.value, 'keyId'));
       }
     }
-    const referencedPublicKeys = new Map<string, string>();
-    for (const transferId of cloudTargetTransfers) {
-      const matches = [...receiptPublicKeys].filter(([identity]) => (
-        identity.startsWith(`${transferId}\0`)
+    for (const [transferId, reference] of cloudTargetKeys) {
+      if (transferDirections.get(transferId) !== 'lan-to-cloud') return invalid();
+      const persisted = receiptPublicKeys.get(
+        `${transferId}\0${reference.receiptKeyId}`,
+      );
+      if (persisted !== undefined && persisted !== reference.publicKey) return invalid();
+      retainReceiptReference(receipt, receiptPublicKeysForConfig, reference);
+    }
+    for (const [transferId, direction] of transferDirections) {
+      if (direction !== 'cloud-to-lan' || relinquishmentProofs.has(transferId)) {
+        continue;
+      }
+      const target = lanTargetKeys.get(transferId);
+      if (target === undefined) {
+        if ([...receiptPublicKeys.keys()].some(identity => (
+          identity.startsWith(`${transferId}\0`)
+        ))) return invalid();
+        continue;
+      }
+      const targetIdentity = `${transferId}\0${target.receiptKeyId}`;
+      if (receiptPublicKeys.get(targetIdentity) !== target.publicKey) return invalid();
+      const sourceMatches = [...receiptPublicKeys].filter(([identity]) => (
+        identity.startsWith(`${transferId}\0`) && identity !== targetIdentity
       ));
-      if (matches.length !== 1) return invalid();
-      const [identity, publicKey] = matches[0] ?? invalid();
-      const receiptKeyId = identity.slice(transferId.length + 1);
-      const existing = referencedPublicKeys.get(receiptKeyId);
-      if (existing !== undefined && existing !== publicKey) return invalid();
-      receipt.add(receiptKeyId);
-      referencedPublicKeys.set(receiptKeyId, publicKey);
+      if (sourceMatches.length > 1) return invalid();
+      const source = sourceMatches[0];
+      if (source !== undefined) {
+        retainReceiptReference(receipt, receiptPublicKeysForConfig, {
+          publicKey: source[1],
+          receiptKeyId: source[0].slice(transferId.length + 1),
+        });
+      }
     }
     this.#keyring.assertReferences({
       encryptionKeyIds: [...encryption].sort(),
       receiptKeyIds: [...receipt].sort(),
     });
-    for (const [keyId, publicKey] of [...referencedPublicKeys].sort()) {
+    for (const [keyId, publicKey] of [...receiptPublicKeysForConfig].sort()) {
       this.#keyring.assertReceiptPublicKey(keyId, publicKey);
     }
     for (const item of records) {

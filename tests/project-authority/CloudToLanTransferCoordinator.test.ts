@@ -71,6 +71,8 @@ const MAIN_OID = '3'.repeat(40);
 const CREATED_AT = '2026-08-27T00:00:00.000Z';
 const EXPIRES_AT = '2026-09-26T00:00:00.000Z';
 const PUBLIC_KEY = Buffer.alloc(32, 8).toString('base64url');
+const SOURCE_PUBLIC_KEY_A = Buffer.alloc(32, 10).toString('base64url');
+const SOURCE_PUBLIC_KEY_B = Buffer.alloc(32, 11).toString('base64url');
 const SIGNATURE = Buffer.alloc(64, 9).toString('base64url');
 
 function sha256(value: string): string {
@@ -235,6 +237,9 @@ class MemoryState {
         const current = state.recovery;
         assert.ok(current);
         assert.equal(current.updatedAt, input.expectedUpdatedAt);
+        if (input.expectedTargetProof !== undefined) {
+          assert.equal(current.targetProof, input.expectedTargetProof);
+        }
         state.recovery = Object.freeze({
           ...current,
           cancellationRequestSha256: current.cancellationRequestSha256
@@ -252,7 +257,9 @@ class MemoryState {
             ?? input.targetActivationProof,
           targetActivationRequestSha256: current.targetActivationRequestSha256
             ?? input.targetActivationRequestSha256,
-          targetProof: current.targetProof ?? input.targetProof,
+          targetProof: input.expectedTargetProof === undefined
+            ? current.targetProof ?? input.targetProof
+            : input.targetProof,
           updatedAt: input.updatedAt,
         });
         return 'advanced' as const;
@@ -291,6 +298,18 @@ class MemoryState {
       },
       async getTransferReceiptKey(_transferId: string, receiptKeyId: string) {
         return state.keys.get(receiptKeyId);
+      },
+      async listTransferReceiptKeys() {
+        return [...state.keys.values()].sort((left, right) => (
+          left.receiptKeyId.localeCompare(right.receiptKeyId)
+        ));
+      },
+      async deleteTransferReceiptKey(input: TransferReceiptKeyInput) {
+        const current = state.keys.get(input.receiptKeyId);
+        if (current === undefined) return 'replayed' as const;
+        assert.deepEqual(current, input);
+        state.keys.delete(input.receiptKeyId);
+        return 'advanced' as const;
       },
       async putProtectedClaimEnvelope(input: ProtectedClaimEnvelopeInput) {
         state.envelopes.set(input.memberId, input);
@@ -461,6 +480,10 @@ class Harness {
   repositoryAvailable = true;
   repositoryVerifications = 0;
   signerFailures = 0;
+  sourceSignatureValid = true;
+  sourceReceiptKeyId = 'receipt-key-source-a';
+  sourceReceiptPublicKey = SOURCE_PUBLIC_KEY_A;
+  readonly sourceSigningKeyIds: string[] = [];
   targetActivationVerifications = 0;
 
   constructor(singleMember = false) {
@@ -546,18 +569,22 @@ class Harness {
       verifyRedemptionReceipt: async input => {
         assert.equal(input.receiptPublicKey, PUBLIC_KEY);
       },
-      invalidateAndClean: async () => {
+      verifyCleanup: async input => {
+        assert.equal(input.receiptPublicKey, PUBLIC_KEY);
         if (this.cleanupFailures > 0) {
           this.cleanupFailures -= 1;
           throw new Error('target-unreachable');
         }
-        return Object.freeze({ cleanupSha256: '7'.repeat(64) });
       },
     };
   }
 
   coordinator(startAt: string = CREATED_AT): CloudToLanTransferCoordinator {
     let tick = Date.parse(startAt) - 1_000;
+    const activeKey = Object.freeze({
+      publicKey: this.sourceReceiptPublicKey,
+      receiptKeyId: this.sourceReceiptKeyId,
+    });
     return new CloudToLanTransferCoordinator({
       checkpoint: this.checkpoint,
       clock: () => new Date(tick += 1_000),
@@ -573,7 +600,18 @@ class Harness {
       environmentIdentity: 'environment-test',
       relinquishmentIntentIdFactory: () => 'relinquishment-intent',
       relinquishmentSigner: {
-        sign: async () => {
+        activeKey,
+        resolveReceiptKey: async input => {
+          if (!this.sourceSignatureValid) throw new Error('signature-verification-failed');
+          const signedKeyId = this.sourceSigningKeyIds.at(-1);
+          const candidate = input.candidates.find(value => (
+            value.receiptKeyId === signedKeyId
+          ));
+          assert.ok(candidate);
+          return candidate;
+        },
+        sign: async input => {
+          this.sourceSigningKeyIds.push(input.receiptKeyId);
           if (this.signerFailures > 0) {
             this.signerFailures -= 1;
             throw new Error('signer-failed');
@@ -707,7 +745,74 @@ function activationRequest(
   };
 }
 
+function cleanupRequest(
+  transferId: string,
+  input: Readonly<{
+    readonly batchRevision?: number | null;
+    readonly batchSha256?: string | null;
+    readonly checkpointSha256?: string | null;
+    readonly invalidatedAt?: string;
+    readonly stageSha256?: string | null;
+  }> = {},
+) {
+  return {
+    idempotencyKey: 'cleanup-intent',
+    projectId: PROJECT_ID,
+    proof: {
+      batchRevision: input.batchRevision ?? null,
+      batchSha256: input.batchSha256 ?? null,
+      checkpointSha256: input.checkpointSha256 ?? CHECKPOINT_SHA,
+      cleanupSha256: '7'.repeat(64),
+      invalidatedAt: input.invalidatedAt ?? '2026-08-27T00:00:20.000Z',
+      operationIntentId: 'cleanup-intent',
+      projectId: PROJECT_ID,
+      receiptKeyId: 'receipt-key-target',
+      signature: SIGNATURE,
+      signatureAlgorithm: 'ed25519' as const,
+      sourceAuthority: { generation: 4, kind: 'cloud' as const },
+      stageSha256: input.stageSha256 ?? null,
+      targetAuthority: { generation: 5, kind: 'lan' as const },
+      targetHostMemberId: TARGET_ID,
+      transferId,
+    },
+    transferId,
+  };
+}
+
+function cleanupRequestFor(harness: Harness, transferId: string) {
+  const journal = harness.state.journal;
+  const recovery = harness.state.recovery;
+  assert.ok(journal);
+  assert.ok(recovery);
+  return cleanupRequest(transferId, {
+    batchRevision: journal.batchRevision ?? null,
+    batchSha256: journal.batchSha256 ?? null,
+    checkpointSha256: journal.checkpointSha256 ?? null,
+    invalidatedAt: '2026-09-27T00:00:00.000Z',
+    stageSha256: recovery.stageSha256 ?? null,
+  });
+}
+
 describe('CloudToLanTransferCoordinator', () => {
+  it('authorizes checkpoint downloads only for the selected target principal', async () => {
+    const harness = new Harness();
+    const coordinator = harness.coordinator();
+    const begun = await begin(coordinator);
+    await accept(coordinator, begun.transferId);
+    const request = { projectId: PROJECT_ID, transferId: begun.transferId };
+
+    await coordinator.getStatus({ principalId: MANAGER_PRINCIPAL, request });
+    assert.equal((await coordinator.getCheckpointDownloadStatus({
+      principalId: TARGET_PRINCIPAL,
+      request,
+    })).phase, 'checkpoint-captured');
+    await assert.rejects(coordinator.getCheckpointDownloadStatus({
+      principalId: MANAGER_PRINCIPAL,
+      request,
+    }), (error: unknown) => error instanceof CloudToLanTransferCoordinatorError
+      && error.code === 'authorization-denied');
+  });
+
   it('derives exact expiry on first create and replays it after the clock advances', async () => {
     const harness = new Harness();
     const coordinator = harness.coordinator();
@@ -873,6 +978,57 @@ describe('CloudToLanTransferCoordinator', () => {
       receiptId: 'redemption-receipt',
       transferId: begun.transferId,
     });
+  });
+
+  it('pins the exact Cloud verifier before relinquishment across signing-key rotation', async () => {
+    const harness = new Harness();
+    const begun = await begin(harness.coordinator());
+    harness.sourceReceiptKeyId = 'receipt-key-source-b';
+    harness.sourceReceiptPublicKey = SOURCE_PUBLIC_KEY_B;
+    const recovered = harness.coordinator();
+
+    await accept(recovered, begun.transferId);
+    const verifierBeforeFence = await recovered.getReceiptVerifier({
+      principalId: TARGET_PRINCIPAL,
+      request: { projectId: PROJECT_ID, transferId: begun.transferId },
+    });
+    assert.equal(verifierBeforeFence.receiptKeyId, 'receipt-key-source-b');
+    assert.equal(verifierBeforeFence.receiptPublicKey, SOURCE_PUBLIC_KEY_B);
+    assert.deepEqual([...harness.state.keys.keys()].sort(), [
+      'receipt-key-source-b',
+      'receipt-key-target',
+    ]);
+    harness.sourceReceiptKeyId = 'receipt-key-source-c';
+    harness.sourceReceiptPublicKey = Buffer.alloc(32, 8).toString('base64url');
+    await stage(recovered, begun.transferId);
+    const restarted = harness.coordinator();
+    const verifier = await restarted.getReceiptVerifier({
+      principalId: TARGET_PRINCIPAL,
+      request: { projectId: PROJECT_ID, transferId: begun.transferId },
+    });
+
+    assert.equal(verifier.receiptKeyId, 'receipt-key-source-b');
+    assert.equal(verifier.receiptPublicKey, SOURCE_PUBLIC_KEY_B);
+    assert.deepEqual(harness.sourceSigningKeyIds, ['receipt-key-source-b']);
+  });
+
+  it('fails closed before relinquishment when the pinned source key cannot verify its signature', async () => {
+    const harness = new Harness();
+    const coordinator = harness.coordinator();
+    const begun = await begin(coordinator);
+    await accept(coordinator, begun.transferId);
+    await coordinator.getReceiptVerifier({
+      principalId: TARGET_PRINCIPAL,
+      request: { projectId: PROJECT_ID, transferId: begun.transferId },
+    });
+    harness.sourceSignatureValid = false;
+
+    await assert.rejects(stage(coordinator, begun.transferId));
+
+    assert.equal(harness.state.journal?.phase, 'claims-retained');
+    assert.equal(harness.state.membershipAuthoritiesRelinquished, false);
+    assert.equal(harness.relinquishCalls, 0);
+    assert.equal(harness.state.recovery?.relinquishmentProof, undefined);
   });
 
   it('proves exact repository presence before Cloud-to-LAN deletion intent', async () => {
@@ -1064,12 +1220,31 @@ describe('CloudToLanTransferCoordinator', () => {
       assert.equal(await coordinator.recover({
         journal: harness.state.journal as ProjectLifecycleJournalRecord,
         lease: new MemoryLease(harness.state),
-      }), 'settled');
+      }), 'waiting-for-external-proof');
+      await coordinator.confirmTargetInvalidated({
+        principalId: TARGET_PRINCIPAL,
+        request: cleanupRequestFor(harness, begun.transferId),
+      });
       assert.equal(harness.state.journal?.phase, 'cancelled');
       assert.equal(harness.state.project.authorityGeneration, 4);
       assert.equal(harness.state.project.serviceState, 'active');
       assert.equal(harness.relinquishCalls, 0);
     }
+  });
+
+  it('settles an expired unaccepted target in one recovery pass', async () => {
+    const harness = new Harness();
+    const begun = await begin(harness.coordinator());
+    const recovered = harness.coordinator(EXPIRES_AT);
+
+    assert.equal(await recovered.recover({
+      journal: harness.state.journal as ProjectLifecycleJournalRecord,
+      lease: new MemoryLease(harness.state),
+    }), 'settled');
+    assert.equal(harness.state.journal?.phase, 'cancelled');
+    assert.equal(harness.state.project.serviceState, 'active');
+    assert.equal(harness.state.recovery?.relinquishmentProof, undefined);
+    assert.equal(begun.phase, 'collecting-readiness');
   });
 
   it('rechecks expiry before signing a relinquishment proof', async () => {
@@ -1090,7 +1265,11 @@ describe('CloudToLanTransferCoordinator', () => {
     assert.equal(await coordinator.recover({
       journal: harness.state.journal as ProjectLifecycleJournalRecord,
       lease: new MemoryLease(harness.state),
-    }), 'settled');
+    }), 'waiting-for-external-proof');
+    await coordinator.confirmTargetInvalidated({
+      principalId: TARGET_PRINCIPAL,
+      request: cleanupRequestFor(harness, begun.transferId),
+    });
     assert.equal(harness.state.journal?.phase, 'cancelled');
   });
 
@@ -1200,32 +1379,193 @@ describe('CloudToLanTransferCoordinator', () => {
     assert.equal(claim.expiresAt, completed.expiresAt);
   });
 
-  it('keeps Cloud fenced until exact target invalidation permits cancellation', async () => {
+  it('cancels collecting readiness without waiting for cleanup from an unaccepted target', async () => {
     const harness = new Harness();
     const coordinator = harness.coordinator();
     const begun = await begin(coordinator);
-    const accepted = await accept(coordinator, begun.transferId);
-    harness.cleanupFailures = 1;
-    assert.equal(accepted.phase, 'checkpoint-captured');
-    const request: CancelProjectAuthorityTransferRequest = {
-      expectedPhase: 'checkpoint-captured',
-      idempotencyKey: 'cancel-intent',
-      projectId: PROJECT_ID,
-      transferId: begun.transferId,
-    };
+
+    const cancelled = await coordinator.cancel({
+      principalId: MANAGER_PRINCIPAL,
+      request: {
+        expectedPhase: 'collecting-readiness',
+        idempotencyKey: 'cancel-before-target-acceptance',
+        projectId: PROJECT_ID,
+        transferId: begun.transferId,
+      },
+    });
+
+    assert.equal(cancelled.phase, 'cancelled');
+    assert.equal(cancelled.state, 'cancelled');
+    assert.equal(harness.state.project.serviceState, 'active');
+    assert.equal(harness.state.project.authorityGeneration, 4);
+    assert.equal(harness.state.recovery?.targetProof, undefined);
+    assert.match(harness.state.recovery?.sourceReopenSha256 ?? '', /^[a-f0-9]{64}$/u);
+    assert.equal(await coordinator.recover({
+      journal: harness.state.journal as ProjectLifecycleJournalRecord,
+      lease: new MemoryLease(harness.state),
+    }), 'settled');
+  });
+
+  it('recovers a lost collecting-readiness cancellation after persisting cancel intent', async () => {
+    const harness = new Harness();
+    const coordinator = harness.coordinator();
+    const begun = await begin(coordinator);
+    harness.state.failNextJournalPhase = 'target-invalidated';
+
     await assert.rejects(coordinator.cancel({
       principalId: MANAGER_PRINCIPAL,
-      request,
-    }));
+      request: {
+        expectedPhase: 'collecting-readiness',
+        idempotencyKey: 'cancel-before-target-acceptance-lost-response',
+        projectId: PROJECT_ID,
+        transferId: begun.transferId,
+      },
+    }), (error: unknown) => error instanceof CloudToLanTransferCoordinatorError
+      && error.code === 'dependency-failed');
     assert.equal(harness.state.journal?.phase, 'cancel-intent');
-    assert.equal(harness.state.project.serviceState, 'read-only-transition');
+    assert.equal(harness.state.recovery?.targetProof, undefined);
+
     assert.equal(await coordinator.recover({
       journal: harness.state.journal as ProjectLifecycleJournalRecord,
       lease: new MemoryLease(harness.state),
     }), 'settled');
     assert.equal(harness.state.journal?.phase, 'cancelled');
     assert.equal(harness.state.project.serviceState, 'active');
+  });
+
+  it('keeps Cloud fenced until exact target invalidation permits cancellation', async () => {
+    const harness = new Harness();
+    const coordinator = harness.coordinator();
+    const begun = await begin(coordinator);
+    const accepted = await accept(coordinator, begun.transferId);
+    assert.equal(accepted.phase, 'checkpoint-captured');
+    await coordinator.getReceiptVerifier({
+      principalId: TARGET_PRINCIPAL,
+      request: { projectId: PROJECT_ID, transferId: begun.transferId },
+    });
+    assert.deepEqual([...harness.state.keys.keys()].sort(), [
+      'receipt-key-source-a',
+      'receipt-key-target',
+    ]);
+    const request: CancelProjectAuthorityTransferRequest = {
+      expectedPhase: 'checkpoint-captured',
+      idempotencyKey: 'cancel-intent',
+      projectId: PROJECT_ID,
+      transferId: begun.transferId,
+    };
+    const pending = await coordinator.cancel({
+      principalId: MANAGER_PRINCIPAL,
+      request,
+    });
+    assert.equal(pending.phase, 'cancel-intent');
+    assert.equal(harness.state.journal?.phase, 'cancel-intent');
+    assert.equal(harness.state.project.serviceState, 'read-only-transition');
+    assert.equal(await coordinator.recover({
+      journal: harness.state.journal as ProjectLifecycleJournalRecord,
+      lease: new MemoryLease(harness.state),
+    }), 'waiting-for-external-proof');
+    assert.equal(harness.state.journal?.phase, 'cancel-intent');
+    await assert.rejects(coordinator.confirmTargetInvalidated({
+      principalId: MANAGER_PRINCIPAL,
+      request: cleanupRequest(begun.transferId),
+    }), (error: unknown) => error instanceof CloudToLanTransferCoordinatorError
+      && error.code === 'authorization-denied');
+    harness.cleanupFailures = 1;
+    await assert.rejects(coordinator.confirmTargetInvalidated({
+      principalId: TARGET_PRINCIPAL,
+      request: cleanupRequest(begun.transferId),
+    }), (error: unknown) => error instanceof CloudToLanTransferCoordinatorError
+      && error.code === 'dependency-failed');
+    assert.equal(harness.state.journal?.phase, 'cancel-intent');
+    assert.equal(harness.state.project.serviceState, 'read-only-transition');
+    const completed = await coordinator.confirmTargetInvalidated({
+      principalId: TARGET_PRINCIPAL,
+      request: cleanupRequest(begun.transferId),
+    });
+    assert.equal(completed.state, 'cancelled');
+    assert.equal(harness.state.journal?.phase, 'cancelled');
+    assert.equal(harness.state.project.serviceState, 'active');
     assert.equal(harness.state.project.authorityGeneration, 4);
+    assert.deepEqual([...harness.state.keys.keys()], ['receipt-key-target']);
+    assert.equal(harness.state.responder?.replayAuthorization?.memberId, TARGET_ID);
+    assert.equal(
+      Object.hasOwn(
+        JSON.parse(harness.state.recovery?.targetProof ?? '{}') as Record<string, unknown>,
+        'cleanupProof',
+      ),
+      false,
+    );
+    harness.state.members.set(TARGET_ID, Object.freeze({
+      ...member(TARGET_ID, 'member'),
+      status: 'left',
+    }));
+    harness.state.bindings.set(TARGET_PRINCIPAL, Object.freeze({
+      ...binding(TARGET_ID, TARGET_PRINCIPAL),
+      revokedAt: '2026-08-27T00:00:30.000Z',
+      state: 'revoked',
+    }));
+    assert.deepEqual(await coordinator.confirmTargetInvalidated({
+      principalId: TARGET_PRINCIPAL,
+      request: cleanupRequest(begun.transferId),
+    }), completed);
+    await assert.rejects(coordinator.confirmTargetInvalidated({
+      principalId: TARGET_PRINCIPAL,
+      request: {
+        ...cleanupRequest(begun.transferId),
+        proof: {
+          ...cleanupRequest(begun.transferId).proof,
+          cleanupSha256: '8'.repeat(64),
+        },
+      },
+    }), (error: unknown) => error instanceof CloudToLanTransferCoordinatorError
+      && error.code === 'state-conflict');
+  });
+
+  it('accepts exact target cleanup after local staging when the stage report did not commit', async () => {
+    const harness = new Harness();
+    const coordinator = harness.coordinator();
+    const begun = await begin(coordinator);
+    await accept(coordinator, begun.transferId);
+    await coordinator.cancel({
+      principalId: MANAGER_PRINCIPAL,
+      request: {
+        expectedPhase: 'checkpoint-captured',
+        idempotencyKey: 'cancel-after-uncommitted-stage',
+        projectId: PROJECT_ID,
+        transferId: begun.transferId,
+      },
+    });
+    assert.equal(harness.state.recovery?.stageSha256, undefined);
+    const localBatch = claimBatch(begun.transferId, [
+      { claim: Buffer.alloc(32, 1).toString('base64url'), memberId: MANAGER_ID },
+      { claim: Buffer.alloc(32, 2).toString('base64url'), memberId: OFFLINE_ID },
+    ]);
+    const request = cleanupRequest(begun.transferId, {
+      batchRevision: localBatch.batchRevision,
+      batchSha256: localBatch.batchSha256,
+      stageSha256: STAGE_SHA,
+    });
+
+    const cancelled = await coordinator.confirmTargetInvalidated({
+      principalId: TARGET_PRINCIPAL,
+      request,
+    });
+
+    assert.equal(cancelled.phase, 'cancelled');
+    assert.equal(cancelled.state, 'cancelled');
+    assert.deepEqual(await coordinator.confirmTargetInvalidated({
+      principalId: TARGET_PRINCIPAL,
+      request,
+    }), cancelled);
+    await assert.rejects(coordinator.confirmTargetInvalidated({
+      principalId: TARGET_PRINCIPAL,
+      request: cleanupRequest(begun.transferId, {
+        batchRevision: localBatch.batchRevision,
+        batchSha256: localBatch.batchSha256,
+        stageSha256: '8'.repeat(64),
+      }),
+    }), (error: unknown) => error instanceof CloudToLanTransferCoordinatorError
+      && error.code === 'state-conflict');
   });
 
   it('fails closed for non-Manager, wrong target, incomplete batch, and post-cutover cancel', async () => {

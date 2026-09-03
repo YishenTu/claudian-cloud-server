@@ -15,6 +15,7 @@ import type {
 
 import { PostgresMigrator } from '../../src/coordination/postgres/PostgresMigrator.js';
 import type { PostgresCoordination } from '../../src/coordination/postgres/PostgresCoordination.js';
+import { createMaintenanceAuthorityTransferRecovery } from '../../src/composition/MaintenanceAuthorityTransferRecovery.js';
 import type { CloudToLanTransferCoordinator } from '../../src/project-authority/lifecycle/cloud-to-lan/CloudToLanTransferCoordinator.js';
 import {
   acceptCloudToLan,
@@ -275,6 +276,87 @@ async function stopProcess(
 }
 
 describe('Cloud-to-LAN cross-store recovery', () => {
+  it('lets the offline maintenance owner finish every locally actionable phase', async () => {
+    await withPostgresTestDatabase(async database => {
+      await withDurableRoot(async durableRoot => {
+        await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+        const cases = [
+          ['collecting-readiness', 'cloud-quiesced', 'checkpoint-captured'],
+          ['cloud-quiesced', 'checkpoint-captured', 'checkpoint-captured'],
+          ['target-staged', 'claims-retained', 'cloud-relinquished'],
+          ['claims-retained', 'cloud-relinquished', 'cloud-relinquished'],
+          ['cloud-relinquished', undefined, 'cloud-relinquished'],
+        ] as const;
+        for (const [phase, faultPhase, expectedPhase] of cases) {
+          const projectId = `project-maintenance-${suffix(phase)}`;
+          const expectedMainOid = await seedCloudToLanRepository(
+            durableRoot,
+            projectId,
+          );
+          await seedCloudToLanProject(database, projectId, expectedMainOid);
+          const store = cloudToLanPostgres(database);
+          const fault = { nextPhase: undefined as string | undefined };
+          const foreground = cloudToLanCoordinator({
+            durableRoot,
+            fault,
+            projectId,
+            store,
+          });
+          const begun = await beginCloudToLan(foreground, projectId);
+          if (phase === 'collecting-readiness' || phase === 'cloud-quiesced') {
+            fault.nextPhase = faultPhase;
+            await assert.rejects(
+              acceptCloudToLan(foreground, projectId, begun.transferId),
+            );
+          } else {
+            await acceptCloudToLan(foreground, projectId, begun.transferId);
+            if (faultPhase !== undefined) fault.nextPhase = faultPhase;
+            if (phase === 'cloud-relinquished') {
+              await stageCloudToLan(foreground, projectId, begun.transferId);
+            } else {
+              await assert.rejects(
+                stageCloudToLan(foreground, projectId, begun.transferId),
+              );
+            }
+          }
+          assert.equal(
+            await journalPhase(store, projectId, begun.transferId),
+            phase,
+          );
+          await foreground.close();
+
+          const recoveryCoordinator = cloudToLanCoordinator({
+            durableRoot,
+            projectId,
+            store,
+          });
+          const maintenance = createMaintenanceAuthorityTransferRecovery({
+            checkpoint: {} as never,
+            cloudToLan: recoveryCoordinator,
+            repository: {} as never,
+          });
+          const lease = await store.acquireProjectLease(projectId);
+          try {
+            const journal = await lease.withProjectScope(scope => (
+              scope.portability.getLifecycleJournal(begun.transferId)
+            ));
+            assert.ok(journal);
+            assert.equal(await maintenance.owner.recover({ journal, lease }),
+              'waiting-for-external-proof');
+          } finally {
+            await lease.close();
+            await maintenance.close();
+          }
+          assert.equal(
+            await journalPhase(store, projectId, begun.transferId),
+            expectedPhase,
+          );
+          await store.close();
+        }
+      });
+    });
+  });
+
   it('recovers forward after process death at every durable transfer phase', async () => {
     await withPostgresTestDatabase(async database => {
       await withDurableRoot(async durableRoot => {

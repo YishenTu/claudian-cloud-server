@@ -6,10 +6,11 @@
 - Centralize resource limits, timeouts, connection budgets, repository roots,
   and runtime safety gates here. Routes and repositories must not invent local
   defaults.
-- The current runtime accepts only a loopback bind and rejects every production
-  trusted-ingress setting. Do not add a mode selector until a second real
-  composition requires one; external compositions must not recognize the
-  development actor assertion.
+- Every runtime accepts only a loopback bind. The private-development profile
+  recognizes only its explicit actor assertion. The self-hosted production
+  profile accepts only a complete operator-protected PROXY v2 source-to-principal
+  mapping; reject partial profiles, unmapped sources, duplicate bindings, and
+  every attempt to mix development and production assertions.
 - Configuration selects mechanics and safe limits, not collaboration semantics.
   Self-hosted and managed profiles must not fork Project behavior.
 - Secret values may be passed to narrow owners but never serialized, logged,

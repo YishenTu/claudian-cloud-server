@@ -20,7 +20,10 @@ const placement = createRepositoryPlacementLease({
   storageNodeId: 'node-a',
 });
 
-function scope(options: { readonly bothManagers?: boolean } = {}): ProjectScope {
+function scope(options: {
+  readonly bothManagers?: boolean;
+  readonly serviceState?: 'active' | 'read-only-transition';
+} = {}): ProjectScope {
   return {
     findDevelopmentActorMember: () => Promise.resolve(undefined),
     findMembership: () => Promise.resolve(undefined),
@@ -35,7 +38,7 @@ function scope(options: { readonly bothManagers?: boolean } = {}): ProjectScope 
       managerSetGeneration: 0,
       projectId: 'project-active',
       projectName: 'Active project',
-      serviceState: 'active',
+      serviceState: options.serviceState ?? 'active',
     }),
     getRepositoryPlacement: () => Promise.resolve(placement),
     listMemberships: () => Promise.resolve([{
@@ -154,6 +157,37 @@ describe('ActiveRepositoryIntegrityGate', () => {
 
     await new ActiveRepositoryIntegrityGate({ coordination, repository })
       .verifyAll();
+  });
+
+  it('verifies the retained authority while transfer awaits target proof', async () => {
+    let verified = false;
+    const coordination: ActiveRepositoryIntegrityCoordination = {
+      acquireProjectLease: () => Promise.resolve({
+        close: () => Promise.resolve(),
+        drainDevelopmentBootstrapUploads: () => Promise.resolve(),
+        handoffToDevelopmentBootstrapUpload: () => Promise.resolve({
+          close: () => Promise.resolve(),
+        }),
+        withProjectScope: operation => operation(scope({
+          serviceState: 'read-only-transition',
+        })),
+      } satisfies PinnedProjectLease),
+      listActiveRepositoryPlacements: () => Promise.resolve({
+        nextCursor: undefined,
+        placements: [placement],
+      }),
+    };
+    const repository: ActiveRepositoryIntegrityRepository = {
+      cleanupReceivePackState: () => Promise.resolve(),
+      verifyIntegrity: () => {
+        verified = true;
+        return Promise.resolve({ status: 'valid' });
+      },
+    };
+
+    await new ActiveRepositoryIntegrityGate({ coordination, repository })
+      .verifyAll();
+    assert.equal(verified, true);
   });
 
   it('verifies every active Member while ignoring historical memberships', async () => {

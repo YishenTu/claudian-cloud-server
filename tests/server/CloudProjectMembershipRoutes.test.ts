@@ -68,7 +68,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
             projectId: PROJECT_ID,
             secret: Buffer.alloc(32, 7).toString('base64url'),
           },
-          protocolVersion: 7,
+          protocolVersion: 8,
           requestId: 'request-join-diverged',
         }),
         headers: { 'content-type': 'application/json' },
@@ -135,7 +135,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
             projectId: PROJECT_ID,
             projectName: 'Cloud Route Project',
           },
-          protocolVersion: 7,
+          protocolVersion: 8,
           requestId: 'route_request',
         }),
         headers: {
@@ -472,7 +472,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
     for (const [operation, data] of requests) {
       const route = collabCloudProjectOperationRoute(PROJECT_ID, operation);
       const response = await fetch(`${base}${route.target}`, {
-        body: JSON.stringify({ data, protocolVersion: 7, requestId: `request-${operation}` }),
+        body: JSON.stringify({ data, protocolVersion: 8, requestId: `request-${operation}` }),
         headers: { 'content-type': 'application/json' },
         method: route.method,
       });

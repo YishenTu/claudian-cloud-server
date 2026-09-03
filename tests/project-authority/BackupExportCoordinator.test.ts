@@ -206,7 +206,7 @@ function capturedCheckpoint(
     operationId: input.operationId,
     profile: 'backup' as const,
     projectId: input.projectId,
-    protocolVersion: 7 as const,
+    protocolVersion: 8 as const,
     refs: input.refs,
     sourceAuthority: input.sourceAuthority,
     targetAuthority: null,
@@ -232,7 +232,7 @@ function capturedCheckpoint(
     operationId: input.operationId,
     profile: 'export' as const,
     projectId: input.projectId,
-    protocolVersion: 7 as const,
+    protocolVersion: 8 as const,
     refs: input.refs,
     sourceAuthority: input.sourceAuthority,
     targetAuthority: null,
@@ -278,6 +278,7 @@ function harness(options: Readonly<{
   readonly priorRecovery?: 'accept' | 'bootstrap';
   readonly profile?: 'backup' | 'export';
   readonly records?: readonly ProjectCheckpointRecord[];
+  readonly rejectConcurrentPreparationReads?: boolean;
   readonly stallPublishedVerification?: boolean;
   readonly waitForSnapshotAbort?: boolean;
   readonly waitForAbortAt?: FailOnceAt;
@@ -301,6 +302,16 @@ function harness(options: Readonly<{
   const publishedVerificationReleases = new Set<() => void>();
   let reservationCloses = 0;
   let sourceCalls = 0;
+  let preparationReadActive = false;
+  const preparationRead = async <Value>(value: Value): Promise<Value> => {
+    if (options.rejectConcurrentPreparationReads && preparationReadActive) {
+      throw new Error('concurrent-preparation-read');
+    }
+    preparationReadActive = true;
+    await Promise.resolve();
+    preparationReadActive = false;
+    return value;
+  };
   let releaseRecoveryGate: (() => void) | undefined;
   const recoveryGate = options.waitForRecovery
     ? new Promise<void>(resolve => { releaseRecoveryGate = resolve; })
@@ -381,7 +392,7 @@ function harness(options: Readonly<{
       );
     },
     getNonterminalLifecycleJournal() {
-      return Promise.resolve(
+      return preparationRead(
         journal?.state === 'active' || journal?.state === 'recovery-required'
           ? journal
           : undefined,
@@ -431,7 +442,7 @@ function harness(options: Readonly<{
   };
   const scope = {
     accept: {
-      getNonterminal: () => Promise.resolve(
+      getNonterminal: () => preparationRead(
         options.priorRecovery === 'accept' ? Object.freeze({}) as never : undefined,
       ),
     },
@@ -465,7 +476,7 @@ function harness(options: Readonly<{
       }));
     },
     getRepositoryPlacement: () => Promise.resolve(placement),
-    getNonterminalDevelopmentBootstrapAttempt: () => Promise.resolve(
+    getNonterminalDevelopmentBootstrapAttempt: () => preparationRead(
       options.priorRecovery === 'bootstrap'
         ? Object.freeze({}) as never
         : undefined,
@@ -1166,6 +1177,19 @@ describe('BackupExportCoordinator', () => {
       assert.equal(test.serviceState, 'active');
       await test.coordinator.close();
     }
+  });
+
+  it('serializes preparation reads on one pinned Project transaction', async () => {
+    const test = harness({ rejectConcurrentPreparationReads: true });
+    const result = await test.coordinator.create({
+      expiresAt: EXPIRES_AT,
+      operationId: 'backup-serial-preparation',
+      profile: 'backup',
+      projectId: 'project-a',
+    });
+
+    assert.equal(result.state, 'published');
+    await test.coordinator.close();
   });
 
   it('recovers and cancels frozen attempts after the server build changes', async () => {

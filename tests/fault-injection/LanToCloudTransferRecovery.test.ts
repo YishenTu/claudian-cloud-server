@@ -227,7 +227,7 @@ async function importTransfer(
     operationId: transferId,
     profile: 'authority-transfer',
     projectId,
-    protocolVersion: 7,
+    protocolVersion: 8,
     refs,
     sourceAuthority: Object.freeze({ generation: 1, kind: 'lan' }),
     targetAuthority: Object.freeze({ generation: 2, kind: 'cloud' }),
@@ -617,8 +617,11 @@ describe('LAN-to-Cloud cross-store recovery', () => {
             : coordination;
         const authorityTransfer = createMaintenanceAuthorityTransferRecovery({
           checkpoint: checkpointPort(transfer),
-          coordination: exactCoordination,
-          environmentIdentity: 'test-authority-volume',
+          cloudToLan: {
+            close: () => Promise.resolve(),
+            recover: () => Promise.resolve('waiting-for-external-proof'),
+            reserveRecovery: () => Promise.resolve(undefined),
+          },
           repository,
         });
         const dispatcher = new ProjectLifecycleRecoveryDispatcher({
@@ -827,6 +830,21 @@ describe('LAN-to-Cloud cross-store recovery', () => {
         );
         try {
           const activated = await activationLease.withProjectScope(async scope => ({
+            backup: await scope.checkpoint.readProjectCheckpointRecords({
+              excludedOperationId: 'backup-after-lan-to-cloud',
+              maximumCoordinationBytes: 1024 * 1024,
+              metadata: {
+                authorityId: 'authority-real',
+                authorityVolumeIdentity: 'volume-real',
+                coordinationSchemaVersion: 11,
+                maximumServerBuild: 'cloud-build-real',
+                minimumServerBuild: 'cloud-build-real',
+                repositoryFormatVersion: 1,
+                restoreEpoch: 1,
+              },
+              profile: 'backup',
+              snapshotAt: '2026-08-27T00:00:00.000Z',
+            }),
             eventReplay: await scope.readProjectEvents({
               afterSequence: 0,
               limit: 10,
@@ -861,12 +879,31 @@ describe('LAN-to-Cloud cross-store recovery', () => {
           }));
           assert.equal(activated.project?.authorityGeneration, 2);
           assert.ok(activated.journal);
+          const lifecycleResultSha256 = activated.journal.resultSha256;
           assert.equal(activated.journal.phase, 'completed');
           assert.equal(activated.journal.state, 'completed');
           assert.ok(activated.status);
           assert.equal(activated.status.direction, 'lan-to-cloud');
           assert.equal(activated.status.phase, 'completed');
           assert.equal(activated.status.state, 'completed');
+          assert.equal(
+            activated.journal.resultSha256,
+            sha256(JSON.stringify(activated.status)),
+          );
+          assert.equal(activated.backup.some(record => (
+            record.kind === 'lifecycle-journal'
+              && record.value.operationId === activationTransfer.transferId
+              && record.value.resultSha256 === lifecycleResultSha256
+          )), true);
+          assert.deepEqual(activated.backup.filter(record => (
+            record.kind === 'transferred-membership-claim'
+          )).map(record => ({
+            batchRevision: record.value.batchRevision,
+            memberId: record.value.memberId,
+          })), [
+            { batchRevision, memberId: COLLATION_MEMBER_ID },
+            { batchRevision, memberId: OFFLINE_MEMBER_ID },
+          ]);
           assert.deepEqual(
             activated.members.map(member => member.memberId).sort(),
             [
@@ -967,6 +1004,69 @@ describe('LAN-to-Cloud cross-store recovery', () => {
           await lifecycleTimestampReader.query('ROLLBACK');
         } finally {
           await lifecycleTimestampReader.end();
+        }
+
+        const incompleteCompletionWriter = new Client({
+          connectionString: database.migrationUrl,
+        });
+        try {
+          await incompleteCompletionWriter.connect();
+          await incompleteCompletionWriter.query('BEGIN');
+          await incompleteCompletionWriter.query(
+            "SELECT set_config('claudian_cloud.project_id', $1, true)",
+            [activationTransfer.projectId],
+          );
+          const incomplete = await incompleteCompletionWriter.query(
+            `UPDATE claudian_cloud.project_lifecycle_journals
+                SET result_sha256 = NULL
+              WHERE project_id = $1 AND operation_id = $2
+                AND phase = 'completed' AND state = 'completed'`,
+            [activationTransfer.projectId, activationTransfer.transferId],
+          );
+          assert.equal(incomplete.rowCount, 1);
+          await incompleteCompletionWriter.query('COMMIT');
+        } finally {
+          await incompleteCompletionWriter.end();
+        }
+        const incompleteCompletionLease = await coordination.acquireProjectLease(
+          activationTransfer.projectId,
+        );
+        try {
+          const projected = await incompleteCompletionLease.withProjectScope(
+            async scope => ({
+              journal: await scope.portability.getLifecycleJournal(
+                activationTransfer.transferId,
+              ),
+              records: await scope.checkpoint.readProjectCheckpointRecords({
+                excludedOperationId: 'backup-after-incomplete-completion',
+                maximumCoordinationBytes: 1024 * 1024,
+                metadata: {
+                  authorityId: 'authority-real',
+                  authorityVolumeIdentity: 'volume-real',
+                  coordinationSchemaVersion: 11,
+                  maximumServerBuild: 'cloud-build-real',
+                  minimumServerBuild: 'cloud-build-real',
+                  repositoryFormatVersion: 1,
+                  restoreEpoch: 1,
+                },
+                profile: 'backup',
+                snapshotAt: '2026-08-27T00:00:00.000Z',
+              }),
+              status: await scope.portability.getAuthorityTransferStatus(
+                activationTransfer.transferId,
+              ),
+            }),
+          );
+          assert.equal(projected.journal?.resultSha256, undefined);
+          assert.ok(projected.status);
+          assert.equal(projected.records.some(record => (
+            record.kind === 'lifecycle-journal'
+              && record.value.operationId === activationTransfer.transferId
+              && record.value.resultSha256
+                === sha256(JSON.stringify(projected.status))
+          )), true);
+        } finally {
+          await incompleteCompletionLease.close();
         }
 
         const cancellationTransfer = await importTransfer(

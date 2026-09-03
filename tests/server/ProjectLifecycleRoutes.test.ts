@@ -88,7 +88,7 @@ async function request(
 }
 
 describe('ProjectLifecycleRoutes', () => {
-  it('binds a trusted principal and dispatches a Cloud v2 lifecycle operation', async () => {
+  it('binds a trusted principal and dispatches a Cloud v4 lifecycle operation', async () => {
     const calls: unknown[] = [];
     const response = await request({
       execute: (operation, context) => {
@@ -113,6 +113,41 @@ describe('ProjectLifecycleRoutes', () => {
     assert.equal(call.operation, 'getProjectAuthorityTransfer');
     assert.equal(call.context.principalId, 'member-manager');
     assert.equal(call.context.request.projectId, PROJECT_ID);
+  });
+
+  it('dispatches the canonical target cleanup confirmation without a side registry', async () => {
+    const calls: unknown[] = [];
+    const response = await request({
+      execute: (operation, context) => {
+        calls.push({ operation, context });
+        return Promise.resolve(status) as never;
+      },
+    }, 'confirmCloudToLanTargetInvalidated', {
+      idempotencyKey: 'cleanup-intent',
+      projectId: PROJECT_ID,
+      proof: {
+        batchRevision: null,
+        batchSha256: null,
+        checkpointSha256: null,
+        cleanupSha256: '7'.repeat(64),
+        invalidatedAt: '2026-08-27T00:00:01.000Z',
+        operationIntentId: 'cleanup-intent',
+        projectId: PROJECT_ID,
+        receiptKeyId: 'receipt-key',
+        signature: Buffer.alloc(64, 9).toString('base64url'),
+        signatureAlgorithm: 'ed25519',
+        sourceAuthority: { generation: 1, kind: 'cloud' },
+        stageSha256: null,
+        targetAuthority: { generation: 2, kind: 'lan' },
+        targetHostMemberId: 'member-target',
+        transferId: TRANSFER_ID,
+      },
+      transferId: TRANSFER_ID,
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal((calls[0] as { readonly operation: string }).operation,
+      'confirmCloudToLanTargetInvalidated');
   });
 
   it('returns the exact source-pinnable transfer receipt verifier', async () => {

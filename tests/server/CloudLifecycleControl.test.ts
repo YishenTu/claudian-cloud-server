@@ -23,6 +23,7 @@ function adapter(calls: string[]) {
       acknowledgeRedemption: () => calls.push('cloud.acknowledgeRedemption'),
       begin: () => calls.push('cloud.begin'),
       confirmTargetActive: () => calls.push('cloud.confirmTargetActive'),
+      confirmTargetInvalidated: () => calls.push('cloud.confirmTargetInvalidated'),
       getClaim: () => calls.push('cloud.getClaim'),
       reportTargetStaged: () => calls.push('cloud.reportTargetStaged'),
     }),
@@ -40,7 +41,10 @@ function adapter(calls: string[]) {
     }),
     transfer: coordinator({
       cancel: () => calls.push('transfer.cancel'),
-      getStatus: () => calls.push('transfer.getStatus'),
+      getStatus: () => {
+        calls.push('transfer.getStatus');
+        return { direction: 'lan-to-cloud' };
+      },
     }),
   });
 }
@@ -90,6 +94,10 @@ describe('CloudLifecycleControlAdapter', () => {
       projectId: PROJECT_ID,
       transferId: TRANSFER_ID,
     }));
+    await control.execute('confirmCloudToLanTargetInvalidated', context({
+      projectId: PROJECT_ID,
+      transferId: TRANSFER_ID,
+    }));
     await control.execute('getTransferredMembershipClaim', context({
       projectId: PROJECT_ID,
       transferId: TRANSFER_ID,
@@ -125,8 +133,10 @@ describe('CloudLifecycleControlAdapter', () => {
       'cloud.acceptTarget',
       'cloud.reportTargetStaged',
       'cloud.confirmTargetActive',
+      'cloud.confirmTargetInvalidated',
       'cloud.getClaim',
       'cloud.acknowledgeRedemption',
+      'transfer.getStatus',
       'transfer.getStatus',
       'lan.getReceiptVerifier',
       'transfer.cancel',
@@ -167,7 +177,9 @@ describe('CloudLifecycleControlAdapter', () => {
         },
       }),
       retire: coordinator({}),
-      transfer: coordinator({}),
+      transfer: coordinator({
+        getStatus: () => ({ direction: 'lan-to-cloud' }),
+      }),
     });
     const request = { projectId: PROJECT_ID, transferId: TRANSFER_ID };
     const signal = new AbortController().signal;

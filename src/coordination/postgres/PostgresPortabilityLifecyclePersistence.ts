@@ -2114,6 +2114,9 @@ implements PortabilityLifecyclePersistence {
     const targetProof = input.targetProof === undefined
       ? undefined
       : boundedProof(input.targetProof);
+    const expectedTargetProof = input.expectedTargetProof === undefined
+      ? undefined
+      : boundedProof(input.expectedTargetProof);
     const targetActivationProof = input.targetActivationProof === undefined
       ? undefined
       : boundedProof(input.targetActivationProof);
@@ -2145,6 +2148,10 @@ implements PortabilityLifecyclePersistence {
     const current = await this.getAuthorityTransferRecovery(input.transferId);
     if (current === undefined) stateConflict();
     if (
+      expectedTargetProof !== undefined
+      && (targetProof === undefined || current.targetProof !== expectedTargetProof)
+    ) stateConflict();
+    if (
       nextExpiresAt !== undefined
       && (
         Date.parse(nextExpiresAt) <= Date.parse(current.expiresAt)
@@ -2172,7 +2179,7 @@ implements PortabilityLifecyclePersistence {
     const rows = await this.#query<{ readonly transfer_id: string }>(
       `UPDATE claudian_cloud.authority_transfer_recovery
           SET source_proof = COALESCE(source_proof, $4),
-              target_proof = COALESCE(target_proof, $5),
+              target_proof = COALESCE($5, target_proof),
               stage_sha256 = COALESCE(stage_sha256, $6),
               target_activation_proof = COALESCE(target_activation_proof, $7),
               relinquishment_proof_json = COALESCE(relinquishment_proof_json, $8),
@@ -2194,7 +2201,14 @@ implements PortabilityLifecyclePersistence {
         WHERE project_id = $1 AND transfer_id = $2
           AND updated_at = $3::timestamptz
           AND ($4::text IS NULL OR source_proof IS NULL OR source_proof = $4)
-          AND ($5::text IS NULL OR target_proof IS NULL OR target_proof = $5)
+          AND (
+            $5::text IS NULL
+            OR (
+              $15::text IS NULL
+              AND (target_proof IS NULL OR target_proof = $5)
+            )
+            OR ($15::text IS NOT NULL AND target_proof = $15)
+          )
           AND ($6::char(64) IS NULL OR stage_sha256 IS NULL OR stage_sha256 = $6)
           AND (
             $7::text IS NULL
@@ -2243,6 +2257,7 @@ implements PortabilityLifecyclePersistence {
         nextExpiresAt ?? null,
         targetActivationRequestSha256 ?? null,
         updatedAt,
+        expectedTargetProof ?? null,
       ],
     );
     const stored = await this.getAuthorityTransferRecovery(input.transferId);
@@ -2441,6 +2456,14 @@ implements PortabilityLifecyclePersistence {
       !== undefined
     ) stateConflict();
     const tombstone = await this.getProjectTombstone();
+    if (tombstone === undefined && input.operationKind === 'authority-transfer') {
+      const journal = await this.getLifecycleJournal(operationId);
+      if (
+        journal?.kind === 'authority-transfer'
+        && journal.phase === 'cancelled'
+        && journal.state === 'cancelled'
+      ) return 'replayed';
+    }
     if (
       tombstone?.terminalOperationKind !== input.operationKind
       || tombstone.terminalOperationId !== operationId
@@ -2785,6 +2808,39 @@ implements PortabilityLifecyclePersistence {
     return rows.length === 1 ? 'created' : 'replayed';
   }
 
+  async deleteTransferReceiptKey(
+    input: TransferReceiptKeyInput,
+  ): Promise<PersistenceAdvanceResult> {
+    opaqueId(input.transferId);
+    opaqueId(input.receiptKeyId);
+    timestamp(input.createdAt);
+    canonicalBase64url(input.publicKey, 32, 64);
+    const journal = await this.getLifecycleJournal(input.transferId);
+    if (
+      journal?.kind !== 'authority-transfer'
+      || journal.phase !== 'target-invalidated'
+      || journal.state !== 'active'
+    ) stateConflict();
+    const rows = await this.#query<{ readonly receipt_key_id: string }>(
+      `DELETE FROM claudian_cloud.transfer_receipt_keys
+        WHERE project_id = $1 AND transfer_id = $2 AND receipt_key_id = $3
+          AND public_key = $4 AND created_at = $5::timestamptz
+      RETURNING receipt_key_id`,
+      [
+        this.#projectId,
+        input.transferId,
+        input.receiptKeyId,
+        input.publicKey,
+        input.createdAt,
+      ],
+    );
+    if (rows.length === 1) return 'advanced';
+    if (await this.getTransferReceiptKey(input.transferId, input.receiptKeyId)) {
+      stateConflict();
+    }
+    return 'replayed';
+  }
+
   async getTransferReceiptKey(
     transferId: string,
     receiptKeyId: string,
@@ -2809,6 +2865,30 @@ implements PortabilityLifecyclePersistence {
       receiptKeyId: row.receipt_key_id,
       transferId: row.transfer_id,
     });
+  }
+
+  async listTransferReceiptKeys(
+    transferId: string,
+  ): Promise<readonly TransferReceiptKeyInput[]> {
+    opaqueId(transferId);
+    const rows = await this.#query<{
+      readonly created_at: Date;
+      readonly public_key: string;
+      readonly receipt_key_id: string;
+      readonly transfer_id: string;
+    }>(
+      `SELECT transfer_id, receipt_key_id, public_key, created_at
+         FROM claudian_cloud.transfer_receipt_keys
+        WHERE project_id = $1 AND transfer_id = $2
+        ORDER BY receipt_key_id`,
+      [this.#projectId, transferId],
+    );
+    return Object.freeze(rows.map(row => Object.freeze({
+      createdAt: dateIso(row.created_at),
+      publicKey: row.public_key,
+      receiptKeyId: row.receipt_key_id,
+      transferId: row.transfer_id,
+    })));
   }
 
   async redeemTransferredMembershipClaim(
@@ -4015,8 +4095,10 @@ implements PortabilityLifecyclePersistence {
           decoded.projectId !== this.#projectId
           || decoded.transferId !== input.operationId
           || decoded.direction !== 'cloud-to-lan'
-          || decoded.phase !== 'completed'
-          || decoded.state !== 'completed'
+          || !(
+            (decoded.phase === 'completed' && decoded.state === 'completed')
+            || (decoded.phase === 'cancelled' && decoded.state === 'cancelled')
+          )
           || decoded.expiresAt !== expiresAt
         ) invalidRecord();
         canonicalResponseJson = JSON.stringify(decoded);

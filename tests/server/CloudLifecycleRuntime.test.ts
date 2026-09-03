@@ -30,6 +30,17 @@ describe('ComposedCloudLifecycleRuntime', () => {
         },
         start: () => { calls.push('expiry-start'); },
       },
+      recoveryReconciler: {
+        close: () => {
+          calls.push('recovery-reconciler-close');
+          return Promise.resolve();
+        },
+        reconcileAll: () => {
+          calls.push('recovery-reconcile');
+          return Promise.resolve();
+        },
+        start: () => { calls.push('recovery-reconciler-start'); },
+      },
       recovery: {
         close: () => { calls.push('recovery-close'); },
         recoverCandidate: () => Promise.resolve(),
@@ -42,9 +53,12 @@ describe('ComposedCloudLifecycleRuntime', () => {
     await runtime.close(1_000);
     await runtime.close(1_000);
     assert.deepEqual(calls, [
+      'recovery-reconcile',
       'reconcile',
       'expiry-start',
+      'recovery-reconciler-start',
       'expiry-close',
+      'recovery-reconciler-close',
       'recovery-close',
       'transfer-owners',
       'checkpoint-owners',
@@ -76,6 +90,11 @@ describe('ComposedCloudLifecycleRuntime', () => {
           calls.push('expiry-close');
           return Promise.reject(new Error('private-expiry-close-detail'));
         },
+        reconcileAll: () => Promise.resolve(),
+        start: () => undefined,
+      },
+      recoveryReconciler: {
+        close: () => Promise.resolve(),
         reconcileAll: () => Promise.resolve(),
         start: () => undefined,
       },
@@ -120,6 +139,14 @@ describe('ComposedCloudLifecycleRuntime', () => {
         reconcileAll: () => Promise.resolve(),
         start: () => undefined,
       },
+      recoveryReconciler: {
+        close: () => {
+          calls.push('recovery-reconciler-close');
+          return Promise.resolve();
+        },
+        reconcileAll: () => Promise.resolve(),
+        start: () => undefined,
+      },
       recovery: {
         close: () => { calls.push('recovery-close'); },
         recoverCandidate: () => Promise.resolve(),
@@ -130,6 +157,7 @@ describe('ComposedCloudLifecycleRuntime', () => {
     await assert.rejects(runtime.close(10), /cloud-lifecycle-runtime\.close-failed/u);
     assert.deepEqual(calls, [
       'expiry-close',
+      'recovery-reconciler-close',
       'recovery-close',
       'transfer-owners',
     ]);

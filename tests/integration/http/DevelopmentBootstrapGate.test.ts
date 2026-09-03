@@ -111,6 +111,7 @@ function config(
       reservedPoolMax: 1,
       url: database.runtimeUrl,
     }),
+    principalProfile: 'private-development',
     repository: Object.freeze({
       gitExecutable: GIT_EXECUTABLE,
       operationTimeoutMs: 10_000,
@@ -355,7 +356,7 @@ async function fetchProject(
     'remote',
     'add',
     'origin',
-    `${baseUrl}/v3/projects/${projectId}/repository.git`,
+    `${baseUrl}/v4/projects/${projectId}/repository.git`,
   ]);
   await git(checkout, [
     '-c',

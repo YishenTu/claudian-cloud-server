@@ -66,6 +66,7 @@ describe('maintenance source entry', () => {
         CLAUDIAN_CLOUD_PORT: '8787',
         CLAUDIAN_CLOUD_POSTGRES_URL:
           'postgresql://runtime:password@127.0.0.1:5432/claudian_cloud',
+        CLAUDIAN_CLOUD_PRINCIPAL_PROFILE: 'private-development',
         CLAUDIAN_CLOUD_REPOSITORY_ROOT: repositoryRoot,
         CLAUDIAN_CLOUD_RESTORE_RECOVERY_REQUIRED: 'true',
         CLAUDIAN_CLOUD_STAGING_ROOT: stagingRoot,

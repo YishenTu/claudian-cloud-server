@@ -44,11 +44,13 @@ export function rejectUnknownConfigFields(
 ): void {
   for (const [field, value] of Object.entries(source)) {
     if (value === undefined || !field.startsWith(CONFIG_PREFIX)) continue;
-    if (field.startsWith(TRUSTED_INGRESS_PREFIX)) {
-      throw new ConfigError('profile-conflict', field);
-    }
     if (!fields.has(field)) {
-      throw new ConfigError('unknown-field', field);
+      throw new ConfigError(
+        field.startsWith(TRUSTED_INGRESS_PREFIX)
+          ? 'profile-conflict'
+          : 'unknown-field',
+        field,
+      );
     }
   }
 }

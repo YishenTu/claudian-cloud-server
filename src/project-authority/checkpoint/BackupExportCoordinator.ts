@@ -898,11 +898,9 @@ export class BackupExportCoordinator implements ProjectLifecycleRecoveryOwner {
       return fail('state-conflict');
     }
     return lease.withProjectScope(async scope => {
-      const [accept, bootstrap, existing] = await Promise.all([
-        scope.accept.getNonterminal(),
-        scope.getNonterminalDevelopmentBootstrapAttempt(),
-        scope.portability.getNonterminalLifecycleJournal(),
-      ]);
+      const accept = await scope.accept.getNonterminal();
+      const bootstrap = await scope.getNonterminalDevelopmentBootstrapAttempt();
+      const existing = await scope.portability.getNonterminalLifecycleJournal();
       if (
         accept !== undefined
         || bootstrap !== undefined

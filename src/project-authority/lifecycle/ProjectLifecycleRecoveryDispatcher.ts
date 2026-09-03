@@ -196,6 +196,17 @@ implements ProjectLifecycleRecoveryPort {
   }
 
   async recoverAll(catalog: RecoveryCandidateCatalog): Promise<void> {
+    return this.#recoverCatalog(catalog, true);
+  }
+
+  async recoverAvailable(catalog: RecoveryCandidateCatalog): Promise<void> {
+    return this.#recoverCatalog(catalog, false);
+  }
+
+  async #recoverCatalog(
+    catalog: RecoveryCandidateCatalog,
+    rejectWaiting: boolean,
+  ): Promise<void> {
     let after;
     for (;;) {
       if (this.#isClosed()) fail('closed');
@@ -210,7 +221,7 @@ implements ProjectLifecycleRecoveryPort {
       }
       for (const candidate of page.candidates) {
         if (this.#isClosed()) fail('closed');
-        await this.#recoverCandidate(snapshotCandidate(candidate), true);
+        await this.#recoverCandidate(snapshotCandidate(candidate), rejectWaiting);
       }
       if (page.nextCursor === undefined) return;
       after = page.nextCursor;

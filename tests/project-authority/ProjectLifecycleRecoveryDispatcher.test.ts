@@ -266,6 +266,42 @@ describe('ProjectLifecycleRecoveryDispatcher', () => {
     dispatcher.close();
   });
 
+  it('preserves externally waiting candidates during the serving startup gate', async () => {
+    const record = Object.freeze({
+      ...journal('authority-transfer'),
+      direction: 'cloud-to-lan' as const,
+      phase: 'cancel-intent',
+    });
+    const coordination = new MemoryLifecycleCoordination(record);
+    const waiting: ProjectLifecycleRecoveryOwner = {
+      recover: () => Promise.resolve('waiting-for-external-proof'),
+    };
+    const dispatcher = new ProjectLifecycleRecoveryDispatcher({
+      coordination,
+      owners: Object.freeze({
+        ...owners(waiting),
+        authorityTransfer: waiting,
+      }),
+    });
+
+    await dispatcher.recoverAvailable({
+      listRecoveryCandidates: () => Promise.resolve({
+        candidates: [{
+          kind: record.kind,
+          operationId: record.operationId,
+          projectId: record.projectId,
+          scheduledAt: record.scheduledAt,
+        }],
+        nextCursor: undefined,
+      }),
+    });
+
+    assert.ok(coordination.current);
+    assert.equal(coordination.current.phase, 'cancel-intent');
+    assert.equal(coordination.current.state, 'active');
+    dispatcher.close();
+  });
+
   it('re-reads an exact candidate under one Project lease before dispatch', async () => {
     const record = journal();
     const coordination = new MemoryLifecycleCoordination(record);

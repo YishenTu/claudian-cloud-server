@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
+import { generateKeyPairSync, sign } from 'node:crypto';
 import { describe, it } from 'node:test';
+
+import {
+  encodeCollabAuthorityRelinquishmentProofSigningInput,
+} from '@claudian-collab/protocol';
 
 import {
   ClaimCustodyKeyReferenceVerifier,
@@ -11,6 +16,252 @@ import { encodeInvitationAssociatedData } from '../../src/project-authority/memb
 import { encodeClaimOverrideAssociatedData } from '../../src/project-authority/membership/TransferredMembershipClaimAuthority.js';
 
 describe('ClaimCustodyKeyReferenceVerifier', () => {
+  it('requires the persisted public key that verifies a relinquished Cloud source', async () => {
+    const pair = generateKeyPairSync('ed25519');
+    const publicKey = pair.publicKey.export({ format: 'jwk' }).x;
+    const targetPublicKey = Buffer.alloc(32, 8).toString('base64url');
+    assert.ok(publicKey);
+    const payload = {
+      batchRevision: 1,
+      batchSha256: '1'.repeat(64),
+      certificateAlgorithm: 'ed25519' as const,
+      checkpointSha256: '2'.repeat(64),
+      committedAt: '2026-09-02T00:00:00.000Z',
+      operationIntentId: 'relinquish-one',
+      projectId: 'project-one',
+      sourceAuthority: { generation: 1, kind: 'cloud' as const },
+      sourceHostMemberId: null,
+      targetAuthority: { generation: 2, kind: 'lan' as const },
+      transferId: 'transfer-one',
+    };
+    const records = [{
+      kind: 'lifecycle-journal',
+      value: {
+        direction: 'cloud-to-lan',
+        operationId: payload.transferId,
+        operationKind: 'authority-transfer',
+      },
+    }, {
+      kind: 'authority-transfer-recovery',
+      value: {
+        relinquishmentProof: {
+          ...payload,
+          certificate: sign(
+            null,
+            Buffer.from(
+              encodeCollabAuthorityRelinquishmentProofSigningInput(payload),
+              'utf8',
+            ),
+            pair.privateKey,
+          ).toString('base64url'),
+        },
+        sourceAuthority: { generation: 1, kind: 'cloud' },
+        targetAuthority: { generation: 2, kind: 'lan' },
+        targetEvidence: {
+          receiptKeyId: 'lan-target-key',
+          receiptPublicKey: targetPublicKey,
+        },
+        transferId: payload.transferId,
+      },
+    }, {
+      kind: 'transfer-receipt-key',
+      value: {
+        receiptKeyId: 'cloud-source-key',
+        receiptPublicKey: publicKey,
+        transferId: payload.transferId,
+      },
+    }, {
+      kind: 'transfer-receipt-key',
+      value: {
+        receiptKeyId: 'lan-target-key',
+        receiptPublicKey: targetPublicKey,
+        transferId: payload.transferId,
+      },
+    }];
+    const verifier = new ClaimCustodyKeyReferenceVerifier({
+      custody: { open: () => Promise.resolve('unused') },
+      keyring: {
+        assertReferences() {},
+        assertReceiptPublicKey() {},
+      },
+    });
+
+    await verifier.verify(records);
+    await assert.rejects(
+      verifier.verify(records.filter(record => record.kind !== 'transfer-receipt-key')),
+      /claim-custody-key-reference\.error\.invalid-record/u,
+    );
+  });
+
+  it('rejects a Cloud source proof signed by the LAN target key', async () => {
+    const cloudSource = generateKeyPairSync('ed25519');
+    const lanTarget = generateKeyPairSync('ed25519');
+    const cloudSourcePublicKey = cloudSource.publicKey.export({ format: 'jwk' }).x;
+    const lanTargetPublicKey = lanTarget.publicKey.export({ format: 'jwk' }).x;
+    assert.ok(cloudSourcePublicKey);
+    assert.ok(lanTargetPublicKey);
+    const payload = {
+      batchRevision: 1,
+      batchSha256: '5'.repeat(64),
+      certificateAlgorithm: 'ed25519' as const,
+      checkpointSha256: '6'.repeat(64),
+      committedAt: '2026-09-02T02:00:00.000Z',
+      operationIntentId: 'relinquish-wrong-signer',
+      projectId: 'project-wrong-signer',
+      sourceAuthority: { generation: 1, kind: 'cloud' as const },
+      sourceHostMemberId: null,
+      targetAuthority: { generation: 2, kind: 'lan' as const },
+      transferId: 'transfer-wrong-signer',
+    };
+    const records = [{
+      kind: 'lifecycle-journal',
+      value: {
+        direction: 'cloud-to-lan',
+        operationId: payload.transferId,
+        operationKind: 'authority-transfer',
+      },
+    }, {
+      kind: 'authority-transfer-recovery',
+      value: {
+        relinquishmentProof: {
+          ...payload,
+          certificate: sign(
+            null,
+            Buffer.from(
+              encodeCollabAuthorityRelinquishmentProofSigningInput(payload),
+              'utf8',
+            ),
+            lanTarget.privateKey,
+          ).toString('base64url'),
+        },
+        sourceAuthority: { generation: 1, kind: 'cloud' },
+        targetAuthority: { generation: 2, kind: 'lan' },
+        targetEvidence: {
+          receiptKeyId: 'lan-target-key',
+          receiptPublicKey: lanTargetPublicKey,
+        },
+        transferId: payload.transferId,
+      },
+    }, {
+      kind: 'transfer-receipt-key',
+      value: {
+        receiptKeyId: 'cloud-source-key',
+        receiptPublicKey: cloudSourcePublicKey,
+        transferId: payload.transferId,
+      },
+    }, {
+      kind: 'transfer-receipt-key',
+      value: {
+        receiptKeyId: 'lan-target-key',
+        receiptPublicKey: lanTargetPublicKey,
+        transferId: payload.transferId,
+      },
+    }];
+    const verifier = new ClaimCustodyKeyReferenceVerifier({
+      custody: { open: () => Promise.resolve('unused') },
+      keyring: {
+        assertReferences() {},
+        assertReceiptPublicKey() {},
+      },
+    });
+
+    await assert.rejects(
+      verifier.verify(records),
+      /claim-custody-key-reference\.error\.invalid-record/u,
+    );
+  });
+
+  it('does not verify a LAN source proof with the Cloud target receipt key', async () => {
+    const lanSource = generateKeyPairSync('ed25519');
+    const cloudTarget = generateKeyPairSync('ed25519');
+    const cloudTargetPublicKey = cloudTarget.publicKey.export({ format: 'jwk' }).x;
+    assert.ok(cloudTargetPublicKey);
+    const payload = {
+      batchRevision: 1,
+      batchSha256: '3'.repeat(64),
+      certificateAlgorithm: 'ed25519' as const,
+      checkpointSha256: '4'.repeat(64),
+      committedAt: '2026-09-02T01:00:00.000Z',
+      operationIntentId: 'relinquish-lan-source',
+      projectId: 'project-lan-source',
+      sourceAuthority: { generation: 1, kind: 'lan' as const },
+      sourceHostMemberId: 'member-lan-source',
+      targetAuthority: { generation: 2, kind: 'cloud' as const },
+      transferId: 'transfer-lan-source',
+    };
+    const proof = {
+      ...payload,
+      certificate: sign(
+        null,
+        Buffer.from(
+          encodeCollabAuthorityRelinquishmentProofSigningInput(payload),
+          'utf8',
+        ),
+        lanSource.privateKey,
+      ).toString('base64url'),
+    };
+    const records = [{
+      kind: 'lifecycle-journal',
+      value: {
+        direction: 'lan-to-cloud',
+        operationId: payload.transferId,
+        operationKind: 'authority-transfer',
+      },
+    }, {
+      kind: 'authority-transfer-recovery',
+      value: {
+        relinquishmentProof: proof,
+        sourceAuthority: { generation: 1, kind: 'lan' },
+        sourceEvidence: {
+          receiptKeyId: 'cloud-target-key',
+          receiptPublicKey: cloudTargetPublicKey,
+        },
+        targetAuthority: { generation: 2, kind: 'cloud' },
+        transferId: payload.transferId,
+      },
+    }, {
+      kind: 'transfer-receipt-key',
+      value: {
+        receiptKeyId: 'cloud-target-key',
+        receiptPublicKey: cloudTargetPublicKey,
+        transferId: payload.transferId,
+      },
+    }];
+    const references: unknown[] = [];
+    const publicKeys: unknown[] = [];
+    const verifier = new ClaimCustodyKeyReferenceVerifier({
+      custody: { open: () => Promise.resolve('unused') },
+      keyring: {
+        assertReferences: input => references.push(input),
+        assertReceiptPublicKey: (keyId, publicKey) => {
+          publicKeys.push({ keyId, publicKey });
+        },
+      },
+    });
+
+    await verifier.verify(records);
+    assert.deepEqual(references, [{
+      encryptionKeyIds: [],
+      receiptKeyIds: ['cloud-target-key'],
+    }]);
+    assert.deepEqual(publicKeys, [{
+      keyId: 'cloud-target-key',
+      publicKey: cloudTargetPublicKey,
+    }]);
+    await verifier.verify(records.filter(record => record.kind !== 'transfer-receipt-key'));
+    await assert.rejects(
+      verifier.verify([{
+        ...records[1],
+        value: {
+          ...(records[1]?.value as Record<string, unknown>),
+          transferId: 'different-transfer',
+        },
+      }, records[0] as NonNullable<typeof records[0]>,
+      records[2] as NonNullable<typeof records[2]>]),
+      /claim-custody-key-reference\.error\.invalid-record/u,
+    );
+  });
+
   it('opens framed invitation custody and rejects the wrong retained key', async () => {
     const key = Buffer.alloc(32, 7);
     const custody = new ProtectedSecretCustody({
@@ -151,6 +402,19 @@ describe('ClaimCustodyKeyReferenceVerifier', () => {
           direction: 'lan-to-cloud',
           operationId: 'transfer-2',
           operationKind: 'authority-transfer',
+        },
+      },
+      {
+        kind: 'authority-transfer-recovery',
+        value: {
+          relinquishmentProof: null,
+          sourceAuthority: { generation: 1, kind: 'lan' },
+          sourceEvidence: {
+            receiptKeyId: 'receipt-2',
+            receiptPublicKey: Buffer.alloc(32, 2).toString('base64url'),
+          },
+          targetAuthority: { generation: 2, kind: 'cloud' },
+          transferId: 'transfer-2',
         },
       },
       {

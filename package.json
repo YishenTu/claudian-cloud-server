@@ -49,7 +49,7 @@
     "typescript-eslint": "8.58.0"
   },
   "dependencies": {
-    "@claudian-collab/protocol": "4.0.0",
+    "@claudian-collab/protocol": "4.1.3",
     "fs-ext-extra-prebuilt": "2.2.13",
     "pg": "8.23.0",
     "ws": "8.21.3"

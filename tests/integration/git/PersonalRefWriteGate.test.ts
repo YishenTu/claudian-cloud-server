@@ -91,6 +91,7 @@ function config(
       reservedPoolMax: 1,
       url: databaseUrl,
     }),
+    principalProfile: 'private-development',
     repository: Object.freeze({
       gitExecutable: GIT_EXECUTABLE,
       operationTimeoutMs: 10_000,
@@ -230,14 +231,14 @@ async function pushRound(
     '-c',
     `http.extraHeader=X-Claudian-Development-Actor: ${fixture.actor}`,
     'push',
-    `${baseUrl}/v3/projects/${fixture.project.projectId}/repository.git`,
+    `${baseUrl}/v4/projects/${fixture.project.projectId}/repository.git`,
     `HEAD:${personalRef}`,
   ]);
   const advertised = await git(fixture.checkout, [
     '-c',
     `http.extraHeader=X-Claudian-Development-Actor: ${fixture.actor}`,
     'ls-remote',
-    `${baseUrl}/v3/projects/${fixture.project.projectId}/repository.git`,
+    `${baseUrl}/v4/projects/${fixture.project.projectId}/repository.git`,
     COLLAB_MAIN_REF,
     personalRef,
   ]);

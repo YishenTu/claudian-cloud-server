@@ -11,7 +11,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { createServer } from 'node:net';
+import { createConnection, createServer } from 'node:net';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
@@ -102,6 +102,7 @@ function config(options: {
       reservedPoolMax: 1,
       url: options.postgresUrl,
     }),
+    principalProfile: 'private-development',
     repository: Object.freeze({
       gitExecutable: options.gitExecutable ?? GIT_EXECUTABLE,
       operationTimeoutMs: 2_000,
@@ -173,7 +174,7 @@ async function projectOperation(
   const response = await fetch(`${baseUrl}${route.target}`, {
     body: JSON.stringify({
       data,
-      protocolVersion: 7,
+      protocolVersion: 8,
       requestId: `request-${operation}-${principalId}`,
     }),
     headers: {
@@ -198,7 +199,7 @@ async function rejectedProjectOperation(
   const response = await fetch(`${baseUrl}${route.target}`, {
     body: JSON.stringify({
       data,
-      protocolVersion: 7,
+      protocolVersion: 8,
       requestId: `request-rejected-${operation}-${principalId}`,
     }),
     headers: {
@@ -209,6 +210,85 @@ async function rejectedProjectOperation(
   });
   assert.notEqual(response.status, 200);
   await response.body?.cancel();
+}
+
+function proxyV2Frame(sourceAddress: string): Buffer {
+  const address = Buffer.concat([
+    Buffer.from(sourceAddress.split('.').map(Number)),
+    Buffer.from([127, 0, 0, 1]),
+    Buffer.from([0xc3, 0x50, 0x22, 0x53]),
+  ]);
+  const frame = Buffer.alloc(16);
+  Buffer.from([
+    0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d,
+    0x0a, 0x51, 0x55, 0x49, 0x54, 0x0a,
+  ]).copy(frame);
+  frame[12] = 0x21;
+  frame[13] = 0x11;
+  frame.writeUInt16BE(address.byteLength, 14);
+  return Buffer.concat([frame, address]);
+}
+
+async function proxiedProjectOperation(
+  port: number,
+  sourceAddress: string,
+  projectId: string,
+  operation: CollabControlOperation,
+  data: unknown,
+): Promise<unknown> {
+  const route = collabCloudProjectOperationRoute(projectId, operation);
+  const body = JSON.stringify({
+    data,
+    protocolVersion: 8,
+    requestId: `request-proxy-${operation}`,
+  });
+  const request = Buffer.from(
+    `${route.method} ${route.target} HTTP/1.1\r\n`
+      + 'Host: cloud\r\n'
+      + 'Connection: close\r\n'
+      + 'Content-Type: application/json\r\n'
+      + `Content-Length: ${String(Buffer.byteLength(body))}\r\n\r\n${body}`,
+    'utf8',
+  );
+  const socket = createConnection({ host: '127.0.0.1', port });
+  const received: Buffer[] = [];
+  socket.on('data', chunk => received.push(Buffer.from(chunk)));
+  await once(socket, 'connect');
+  socket.write(proxyV2Frame(sourceAddress));
+  await new Promise<void>(resolve => setImmediate(resolve));
+  socket.write(request);
+  await once(socket, 'close');
+  const response = Buffer.concat(received).toString('utf8');
+  const separator = response.indexOf('\r\n\r\n');
+  assert.match(response.slice(0, separator), /^HTTP\/1\.1 200 OK/mu);
+  return decodeCollabCloudSuccessEnvelope(
+    JSON.parse(response.slice(separator + 4)) as unknown,
+  ).data;
+}
+
+async function proxiedCapabilities(
+  port: number,
+  sourceAddress: string,
+): Promise<ReturnType<typeof decodeCollabCloudCapabilityDocument>> {
+  const socket = createConnection({ host: '127.0.0.1', port });
+  const received: Buffer[] = [];
+  socket.on('data', chunk => received.push(Buffer.from(chunk)));
+  await once(socket, 'connect');
+  socket.write(proxyV2Frame(sourceAddress));
+  await new Promise<void>(resolve => setImmediate(resolve));
+  socket.write(Buffer.from(
+    'GET /collab/capabilities HTTP/1.1\r\n'
+      + 'Host: cloud\r\n'
+      + 'Connection: close\r\n\r\n',
+    'utf8',
+  ));
+  await once(socket, 'close');
+  const response = Buffer.concat(received).toString('utf8');
+  const separator = response.indexOf('\r\n\r\n');
+  assert.match(response.slice(0, separator), /^HTTP\/1\.1 200 OK/mu);
+  return decodeCollabCloudCapabilityDocument(
+    JSON.parse(response.slice(separator + 4)) as unknown,
+  );
 }
 
 async function waitForNoCloudConnections(adminUrl: string): Promise<void> {
@@ -947,36 +1027,42 @@ while :; do sleep 1; done`,
     ]);
   });
 
-  it('advertises every complete membership group only with production principal binding', async () => {
+  it('selects the production principal binding from the complete runtime config', async () => {
+    const baseConfig = config({
+      postgresUrl: database.runtimeUrl,
+      repositoryRoot,
+    });
     const application = createApplication({
-      config: config({
-        postgresUrl: database.runtimeUrl,
-        repositoryRoot,
+      config: Object.freeze({
+        ...baseConfig,
+        principalProfile: 'trusted-ingress',
+        trustedIngress: Object.freeze({
+          mode: 'proxy-v2' as const,
+          preambleTimeoutMs: 5_000,
+          principals: Object.freeze([Object.freeze({
+            assertion: Object.freeze({
+              principalId: 'principal-production',
+              provenance: Object.freeze({
+                kind: 'operator-protected-channel' as const,
+                providerId: 'operator-test',
+              }),
+            }),
+            sourceAddress: '100.64.0.10',
+          })]),
+        }),
       }),
       keyring: keyring(),
       logger: logger([]),
-      trustedPrincipal: {
-        establishedAssertion: () => ({
-          principalId: 'principal-production',
-          provenance: {
-            kind: 'operator-protected-channel',
-            providerId: 'operator-test',
-          },
-        }),
-        provider: new TrustedPrincipalProvider(),
-      },
     });
     try {
       const address = await application.start();
-      const response = await fetch(
-        `http://${address.host}:${String(address.port)}/collab/capabilities`,
-      );
-      assert.equal(response.status, 200);
-      const capabilities = decodeCollabCloudCapabilityDocument(
-        await response.json(),
-      ).capabilities;
+      const capabilities = (await proxiedCapabilities(
+        address.port,
+        '100.64.0.10',
+      )).capabilities;
       assert.equal(capabilities.includes('development-bootstrap'), false);
       for (const capability of [
+        'authority-transfer',
         'cloud-imported-membership-claims',
         'cloud-project-create',
         'cloud-project-invitations',
@@ -984,9 +1070,148 @@ while :; do sleep 1; done`,
         'cloud-project-leave',
         'cloud-project-manager-responsibility',
         'cloud-project-membership',
+        'project-retirement',
       ]) assert.equal(capabilities.includes(capability), true);
     } finally {
       await application.close();
+    }
+  });
+
+  it('serves one production lifecycle owner to two PROXY-bound principals across restart', async () => {
+    const projectId = 'project-production-lifecycle';
+    const sourceA = '100.64.0.10';
+    const sourceB = '100.64.0.11';
+    const productionDatabase = await acquirePostgresTestDatabase();
+    await new PostgresMigrator({
+      connectionString: productionDatabase.migrationUrl,
+    }).apply();
+    const productionAuthorityRoot = await mkdtemp(join(
+      tmpdir(),
+      'claudian-production-composition-',
+    ));
+    const productionRepositoryRoot = join(productionAuthorityRoot, 'repositories');
+    await mkdir(productionRepositoryRoot, { mode: 0o700 });
+    await mkdir(`${productionRepositoryRoot}-staging`, { mode: 0o700 });
+    await writeFile(
+      join(productionAuthorityRoot, '.authority-volume-id'),
+      `${productionDatabase.authorityVolumeId}\n`,
+      { mode: 0o600 },
+    );
+    const baseConfig = config({
+      postgresUrl: productionDatabase.runtimeUrl,
+      repositoryRoot: productionRepositoryRoot,
+    });
+    const productionConfig: ServerConfig = Object.freeze({
+      ...baseConfig,
+      principalProfile: 'trusted-ingress',
+      trustedIngress: Object.freeze({
+        mode: 'proxy-v2' as const,
+        preambleTimeoutMs: 5_000,
+        principals: Object.freeze([
+          Object.freeze({
+            assertion: Object.freeze({
+              principalId: 'principal-production-manager',
+              provenance: Object.freeze({
+                kind: 'operator-protected-channel' as const,
+                providerId: 'operator-test',
+              }),
+            }),
+            sourceAddress: sourceA,
+          }),
+          Object.freeze({
+            assertion: Object.freeze({
+              principalId: 'principal-production-target',
+              provenance: Object.freeze({
+                kind: 'operator-protected-channel' as const,
+                providerId: 'operator-test',
+              }),
+            }),
+            sourceAddress: sourceB,
+          }),
+        ]),
+      }),
+    });
+    const custody = keyring();
+    const application = () => createApplication({
+      config: productionConfig,
+      keyring: custody,
+      logger: logger([]),
+    });
+    let running = application();
+    try {
+      let address = await running.start();
+      await proxiedProjectOperation(
+        address.port,
+        sourceA,
+        projectId,
+        'createCloudProject',
+        {
+          idempotencyKey: 'create-production-lifecycle',
+          managerDisplayName: 'Production Manager',
+          projectId,
+          projectName: 'Production Lifecycle',
+        },
+      );
+      const invitation = await proxiedProjectOperation(
+        address.port,
+        sourceA,
+        projectId,
+        'createProjectInvitation',
+        {
+          expectedManagerSetGeneration: 1,
+          idempotencyKey: 'invite-production-target',
+          projectId,
+        },
+      ) as Readonly<{
+        readonly invitationId: string;
+        readonly secret: string;
+      }>;
+      const joined = await proxiedProjectOperation(
+        address.port,
+        sourceB,
+        projectId,
+        'joinCloudProject',
+        {
+          displayName: 'Production Target',
+          idempotencyKey: 'join-production-target',
+          invitationId: invitation.invitationId,
+          projectId,
+          secret: invitation.secret,
+        },
+      ) as Readonly<{ readonly memberId: string }>;
+      const begun = await proxiedProjectOperation(
+        address.port,
+        sourceA,
+        projectId,
+        'beginCloudToLanTransfer',
+        {
+          expectedAuthorityGeneration: 1,
+          idempotencyKey: 'begin-production-transfer',
+          projectId,
+          targetHostMemberId: joined.memberId,
+          targetUrl: 'https://lan.example.test:8443',
+        },
+      ) as Readonly<{
+        readonly phase: string;
+        readonly transferId: string;
+      }>;
+      assert.equal(begun.phase, 'collecting-readiness');
+
+      await running.close();
+      running = application();
+      address = await running.start();
+      const replay = await proxiedProjectOperation(
+        address.port,
+        sourceA,
+        projectId,
+        'getProjectAuthorityTransfer',
+        { projectId, transferId: begun.transferId },
+      ) as Readonly<{ readonly phase: string; readonly transferId: string }>;
+      assert.deepEqual(replay, begun);
+    } finally {
+      await running.close();
+      await rm(productionAuthorityRoot, { force: true, recursive: true });
+      await productionDatabase.close();
     }
   });
 
@@ -1251,7 +1476,7 @@ while :; do sleep 1; done`,
       const snapshotResponse = await fetch(`${baseUrl}${snapshotRoute.target}`, {
         body: JSON.stringify({
           data: { projectId },
-          protocolVersion: 7,
+          protocolVersion: 8,
           requestId: 'request-production-snapshot',
         }),
         headers: {
@@ -1526,6 +1751,11 @@ while :; do sleep 1; done`,
         getRetirementTerminal: () => Promise.resolve(null),
       },
       expiry,
+      recoveryReconciler: {
+        close: () => Promise.resolve(),
+        reconcileAll: () => Promise.resolve(),
+        start: () => undefined,
+      },
       recovery: {
         close: () => { closed.push('recovery'); },
         recoverCandidate: () => Promise.resolve(),

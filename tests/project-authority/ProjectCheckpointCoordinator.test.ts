@@ -122,7 +122,7 @@ function fixture(
     operationId: 'operation-transfer',
     profile: 'authority-transfer',
     projectId: 'project-a',
-    protocolVersion: 7,
+    protocolVersion: 8,
     refs: Object.freeze([
       Object.freeze({ name: 'refs/heads/main', oid: MAIN_OID }),
       Object.freeze({
@@ -858,6 +858,60 @@ describe('ProjectCheckpointCoordinator', () => {
     assert.equal(repositoryCapture.discarded, 1);
     assert.equal(staging.artifacts.size, 0);
     assert.equal(publication.artifacts.size, 3);
+    await coordinator.close();
+  });
+
+  it('captures one canonical Cloud-to-LAN authority-transfer checkpoint', async () => {
+    const staging = new MemoryOutboundStaging();
+    const repositoryCapture = new MemoryRepositoryCapture();
+    const coordinator = new ProjectCheckpointCoordinator({
+      repository: new MemoryRepositoryStaging(),
+      repositoryCapture,
+      staging,
+    });
+    const records = fixture().records;
+    const checkpoint = await captureOutboundReserved(coordinator, {
+      createdAt: CREATED_AT,
+      expectedMainOid: MAIN_OID,
+      expiresAt: staging.attempt.expiresAt,
+      onProgress: () => undefined,
+      operationId: staging.attempt.operationId,
+      placement: createRepositoryPlacementLease({
+        active: true,
+        generation: 3,
+        projectId: 'project-a',
+        repositoryStorageKey: 'repository-a',
+        storageNodeId: 'node-a',
+      }),
+      profile: 'authority-transfer',
+      projectId: 'project-a',
+      records,
+      refs: Object.freeze([
+        Object.freeze({ name: 'refs/heads/main', oid: MAIN_OID }),
+        Object.freeze({
+          name: 'refs/heads/members/member-manager',
+          oid: MEMBER_OID,
+        }),
+      ]),
+      sourceAuthority: Object.freeze({ generation: 1, kind: 'cloud' }),
+      targetAuthority: Object.freeze({ generation: 2, kind: 'lan' }),
+    });
+
+    assert.equal(checkpoint.manifest.profile, 'authority-transfer');
+    assert.deepEqual(checkpoint.manifest.targetAuthority, {
+      generation: 2,
+      kind: 'lan',
+    });
+    assert.equal(
+      staging.artifacts.get('coordination.ndjson')?.toString('utf8'),
+      encodeCollabProjectCheckpointCoordinationNdjson(
+        records,
+        'authority-transfer',
+      ),
+    );
+    await coordinator.releaseOutbound(checkpoint);
+    assert.equal(repositoryCapture.discarded, 1);
+    assert.equal(staging.artifacts.size, 0);
     await coordinator.close();
   });
 

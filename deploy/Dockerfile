@@ -1,10 +1,16 @@
 ARG NODE_IMAGE=node:24.16.0-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203
 ARG GIT_PACKAGE_VERSION=1:2.39.5-0+deb12u3
+ARG OPENSSL_PACKAGE_VERSION=3.0.20-1~deb12u2
 ARG CLAUDIAN_SERVER_BUILD
 
 FROM ${NODE_IMAGE} AS build
 
 ARG CLAUDIAN_SERVER_BUILD
+ARG OPENSSL_PACKAGE_VERSION
+
+RUN apt-get update \
+  && apt-get install --yes --no-install-recommends openssl=${OPENSSL_PACKAGE_VERSION} \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 

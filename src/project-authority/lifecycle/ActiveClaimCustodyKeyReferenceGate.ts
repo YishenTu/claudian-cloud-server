@@ -7,6 +7,10 @@ import type {
   ActiveRepositoryPlacementPage,
   PinnedProjectLease,
 } from '../../coordination/ProjectCoordination.js';
+import type {
+  ListRecoveryCandidatesOptions,
+  RecoveryCandidatePage,
+} from '../../coordination/DevelopmentBootstrapPersistence.js';
 import {
   sameRepositoryPlacement,
   type RepositoryPlacementLease,
@@ -31,6 +35,9 @@ export interface ActiveClaimCustodyKeyReferenceGateOptions {
       readonly after?: CollabProjectId;
       readonly limit?: number;
     }>): Promise<ActiveRepositoryPlacementPage>;
+    listRecoveryCandidates(
+      options?: ListRecoveryCandidatesOptions,
+    ): Promise<RecoveryCandidatePage>;
     listTerminalProjectContinuity(options?: Readonly<{
       readonly after?: CollabProjectId;
       readonly limit?: number;
@@ -55,6 +62,19 @@ function assertActive(signal: AbortSignal): void {
   if (signal.aborted) fail();
 }
 
+function decodedEvidence(value: string | undefined): unknown {
+  if (value === undefined) return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return fail();
+    }
+    return parsed;
+  } catch {
+    return fail();
+  }
+}
+
 /** Holds readiness closed until every live protected-key reference is retained. */
 export class ActiveClaimCustodyKeyReferenceGate {
   readonly #coordination: ActiveClaimCustodyKeyReferenceGateOptions['coordination'];
@@ -71,7 +91,7 @@ export class ActiveClaimCustodyKeyReferenceGate {
     try {
       assertActive(signal);
       const metadata = await this.#metadata.read();
-      const activeProjects = new Set<string>();
+      const verifiedProjects = new Set<string>();
       let after: CollabProjectId | undefined;
       do {
         assertActive(signal);
@@ -80,11 +100,32 @@ export class ActiveClaimCustodyKeyReferenceGate {
           limit: 100,
         });
         for (const placement of page.placements) {
-          activeProjects.add(placement.projectId);
+          verifiedProjects.add(placement.projectId);
           await this.#verifyProject(placement, metadata, signal);
         }
         after = page.nextCursor;
       } while (after !== undefined);
+      let recoveryAfter: ListRecoveryCandidatesOptions['after'];
+      do {
+        assertActive(signal);
+        const page = await this.#coordination.listRecoveryCandidates({
+          ...(recoveryAfter === undefined ? {} : { after: recoveryAfter }),
+          limit: 100,
+        });
+        for (const candidate of page.candidates) {
+          if (
+            candidate.kind === 'authority-transfer'
+            && !verifiedProjects.has(candidate.projectId)
+          ) {
+            if (await this.#verifyRecoveryTransfer(
+              candidate.projectId,
+              candidate.operationId,
+              signal,
+            )) verifiedProjects.add(candidate.projectId);
+          }
+        }
+        recoveryAfter = page.nextCursor;
+      } while (recoveryAfter !== undefined);
       after = undefined;
       do {
         assertActive(signal);
@@ -93,8 +134,9 @@ export class ActiveClaimCustodyKeyReferenceGate {
           limit: 100,
         });
         for (const projectId of page.projectIds) {
-          if (!activeProjects.has(projectId)) {
+          if (!verifiedProjects.has(projectId)) {
             await this.#verifyTerminalProject(projectId, signal);
+            verifiedProjects.add(projectId);
           }
         }
         after = page.nextCursor;
@@ -127,7 +169,8 @@ export class ActiveClaimCustodyKeyReferenceGate {
           scope.getRepositoryPlacement(),
         ]);
         if (
-          project?.serviceState !== 'active'
+          (project?.serviceState !== 'active'
+            && project?.serviceState !== 'read-only-transition')
           || placement === undefined
           || !sameRepositoryPlacement(placement, expectedPlacement)
         ) return fail();
@@ -184,5 +227,79 @@ export class ActiveClaimCustodyKeyReferenceGate {
     }
     if (failure !== undefined || records === undefined) fail();
     await this.#verifier.verify(records);
+  }
+
+  async #verifyRecoveryTransfer(
+    projectId: CollabProjectId,
+    operationId: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    let lease: PinnedProjectLease | undefined;
+    let records: readonly unknown[] | undefined;
+    let failure: unknown;
+    try {
+      lease = await this.#coordination.acquireProjectLease(projectId, { signal });
+      const result = await lease.withProjectScope(async scope => {
+        const journal = await scope.portability.getLifecycleJournal(operationId);
+        if (
+          journal?.kind !== 'authority-transfer'
+          || journal.operationId !== operationId
+          || journal.projectId !== projectId
+          || (journal.direction !== 'cloud-to-lan'
+            && journal.direction !== 'lan-to-cloud')
+        ) return fail();
+        const recovery = await scope.portability.getAuthorityTransferRecovery(
+          operationId,
+        );
+        if (
+          recovery === undefined
+          || recovery.transferId !== operationId
+          || recovery.sourceAuthority.kind
+            !== (journal.direction === 'cloud-to-lan' ? 'cloud' : 'lan')
+          || recovery.targetAuthority.kind
+            !== (journal.direction === 'cloud-to-lan' ? 'lan' : 'cloud')
+        ) return fail();
+        const continuity = await scope.checkpoint.readTerminalProjectContinuityRecords({
+          maximumCoordinationBytes:
+            COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxCoordinationBytes,
+        });
+        return Object.freeze({
+          records: Object.freeze([
+            ...continuity,
+            Object.freeze({
+              kind: 'lifecycle-journal',
+              value: Object.freeze({
+                direction: journal.direction,
+                operationId: journal.operationId,
+                operationKind: journal.kind,
+              }),
+            }),
+            Object.freeze({
+              kind: 'authority-transfer-recovery',
+              value: Object.freeze({
+                relinquishmentProof: recovery.relinquishmentProof ?? null,
+                sourceAuthority: recovery.sourceAuthority,
+                sourceEvidence: decodedEvidence(recovery.sourceProof),
+                targetAuthority: recovery.targetAuthority,
+                targetEvidence: decodedEvidence(recovery.targetProof),
+                transferId: recovery.transferId,
+              }),
+            }),
+          ]),
+        });
+      }, { signal, snapshot: 'repeatable-read' });
+      records = result.records;
+    } catch (error: unknown) {
+      failure = error;
+    }
+    try {
+      await lease?.close();
+    } catch (error: unknown) {
+      failure = error;
+    }
+    if (failure !== undefined) fail();
+    if (records === undefined) fail();
+    await this.#verifier.verify(records);
+    return true;
   }
 }

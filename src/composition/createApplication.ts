@@ -56,6 +56,7 @@ import {
 import { EmptyProjectRepositoryAuthority } from '../repositories/EmptyProjectRepositoryAuthority.js';
 import { RepositoryCheckpointAuthority } from '../repositories/RepositoryCheckpointAuthority.js';
 import { DevelopmentPrincipalAdapter } from '../request-context/DevelopmentPrincipalAdapter.js';
+import { TrustedPrincipalProvider } from '../request-context/TrustedPrincipalProvider.js';
 import { BootstrapUploadAdmission } from '../resource-admission/BootstrapUploadAdmission.js';
 import { ProjectEventAdmission } from '../resource-admission/ProjectEventAdmission.js';
 import { GitReceiveAdmission } from '../resource-admission/GitReceiveAdmission.js';
@@ -75,11 +76,13 @@ import {
   HttpServer,
   type HttpServerAddress,
 } from '../server/HttpServer.js';
+import { ProxyV2Ingress } from '../server/ProxyV2Ingress.js';
 import {
   AuthorityVolumePairError,
   AuthorityVolumePairVerifier,
 } from './AuthorityVolumePairVerifier.js';
 import type { CloudLifecycleRuntime } from './CloudLifecycleRuntime.js';
+import { createProductionCloudLifecycleRuntime } from './ProductionCloudLifecycleRuntime.js';
 
 export type ApplicationErrorCode =
   | 'closed'
@@ -221,8 +224,32 @@ class CloudApplication implements Application {
   #state: ApplicationState = 'created';
 
   constructor(options: CreateApplicationOptions) {
+    const configuredIngress = options.config.trustedIngress;
+    if (
+      configuredIngress !== undefined
+      && options.trustedPrincipal !== undefined
+    ) throw new TypeError('application.principal-binding-conflict');
+    if (
+      (options.config.principalProfile === 'trusted-ingress')
+      !== (configuredIngress !== undefined)
+    ) throw new TypeError('application.principal-profile-invalid');
+    const productionIngress = configuredIngress === undefined
+      ? undefined
+      : new ProxyV2Ingress({
+          preambleTimeoutMs: configuredIngress.preambleTimeoutMs,
+          principals: configuredIngress.principals,
+        });
+    const trustedPrincipal = options.trustedPrincipal ?? (
+      productionIngress === undefined
+        ? undefined
+        : {
+            establishedAssertion: productionIngress.establishedAssertion.bind(
+              productionIngress,
+            ),
+            provider: new TrustedPrincipalProvider(),
+          }
+    );
     this.#config = options.config;
-    this.#lifecycle = options.lifecycle;
     this.#logger = options.logger;
     this.#resourceAdmission = new ResourceAdmission(options.config.gitAdmission);
     this.#projectEventWakeup = new ProjectEventWakeup();
@@ -361,6 +388,24 @@ class CloudApplication implements Application {
       coordination: this.#coordination,
       repository: this.#membershipRepositoryMaintenance,
     });
+    if (
+      productionIngress !== undefined
+      && options.lifecycle === undefined
+      && options.keyring === undefined
+    ) throw new TypeError('application.production-lifecycle-keyring-required');
+    this.#lifecycle = options.lifecycle ?? (
+      productionIngress === undefined || options.keyring === undefined
+        ? undefined
+        : createProductionCloudLifecycleRuntime({
+            config: options.config,
+            coordination: this.#coordination,
+            importer: this.#bundleImporter,
+            keyring: options.keyring,
+            leave: this.#leaveCoordinator,
+            removal: this.#memberRemovalCoordinator,
+            repository: this.#membershipRepositoryMaintenance,
+          })
+    );
     this.#recoveryCoordinator = new ProjectRecoveryCoordinator({
       accept: this.#acceptCoordinator,
       activation: this.#activationCoordinator,
@@ -370,9 +415,9 @@ class CloudApplication implements Application {
       leave: this.#leaveCoordinator,
       membership: this.#joinCoordinator,
       removal: this.#memberRemovalCoordinator,
-      ...(options.lifecycle === undefined
+      ...(this.#lifecycle === undefined
         ? {}
-        : { lifecycle: options.lifecycle.recovery }),
+        : { lifecycle: this.#lifecycle.recovery }),
     });
     this.#membershipWriteAdmission = new ProjectWriteAdmission({
       coordination: this.#coordination,
@@ -469,14 +514,17 @@ class CloudApplication implements Application {
         'requests',
         'tickets',
       ] as const);
-    if (options.trustedPrincipal === undefined) {
+    if (
+      trustedPrincipal === undefined
+      && options.config.principalProfile === 'private-development'
+    ) {
       enabledCapabilities.add('development-bootstrap');
     }
-    if (options.lifecycle !== undefined) {
+    if (this.#lifecycle !== undefined) {
       enabledCapabilities.add('authority-transfer');
       enabledCapabilities.add('project-retirement');
     }
-    if (options.trustedPrincipal !== undefined) {
+    if (trustedPrincipal !== undefined) {
       enabledCapabilities.add('cloud-project-create');
       enabledCapabilities.add('cloud-project-join');
       enabledCapabilities.add('cloud-project-leave');
@@ -512,13 +560,13 @@ class CloudApplication implements Application {
         maxRepositoryBytes: options.config.developmentBootstrap.maxRepositoryBytes,
       },
     });
-    const principalBinding = options.trustedPrincipal === undefined
+    const principalBinding = trustedPrincipal === undefined
       ? {
         principalAdapter: new DevelopmentPrincipalAdapter({
           profile: 'loopback-development',
         }),
       }
-      : { trustedPrincipal: options.trustedPrincipal };
+      : { trustedPrincipal };
     const principalAdapter = 'principalAdapter' in principalBinding
       ? principalBinding.principalAdapter
       : undefined;
@@ -529,7 +577,7 @@ class CloudApplication implements Application {
         principalAdapter,
         profile: bootstrapProfile,
       });
-    const lifecycleControl = options.lifecycle?.control;
+    const lifecycleControl = this.#lifecycle?.control;
     const projectSnapshotRoutes = new ProjectSnapshotRoutes({
       authority: this.#projectReadAuthority,
       maximumJsonBytes: COLLAB_LIMITS.maxJsonPayloadUtf8Bytes,
@@ -547,7 +595,7 @@ class CloudApplication implements Application {
       requestAuthority: this.#projectRequestAuthority,
       ticketAuthority: this.#projectTicketAuthority,
     });
-    const cloudProjectMembershipRoutes = options.trustedPrincipal === undefined
+    const cloudProjectMembershipRoutes = trustedPrincipal === undefined
       ? undefined
       : new CloudProjectMembershipRoutes({
         administration: this.#membershipAdministrationAuthority,
@@ -565,18 +613,18 @@ class CloudApplication implements Application {
           : { claims: this.#transferredMembershipClaimAuthority }),
         ...principalBinding,
       });
-    const projectLifecycleRoutes = options.lifecycle === undefined
+    const projectLifecycleRoutes = this.#lifecycle === undefined
       ? undefined
       : new ProjectLifecycleRoutes({
-        control: options.lifecycle.control,
+        control: this.#lifecycle.control,
         maximumJsonBytes: COLLAB_LIMITS.maxJsonPayloadUtf8Bytes,
         operationTimeoutMs: options.config.repository.operationTimeoutMs,
         ...principalBinding,
       });
-    const authorityTransferArtifactRoutes = options.lifecycle === undefined
+    const authorityTransferArtifactRoutes = this.#lifecycle === undefined
       ? undefined
       : new AuthorityTransferArtifactRoutes({
-        authority: options.lifecycle.artifacts,
+        authority: this.#lifecycle.artifacts,
         limits: {
           'checkpoint.json': COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxManifestBytes,
           'coordination.ndjson': COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxCoordinationBytes,
@@ -609,6 +657,9 @@ class CloudApplication implements Application {
     });
     this.#httpServer = new HttpServer({
       config: options.config.http,
+      ...(productionIngress === undefined
+        ? {}
+        : { connectionIngress: productionIngress }),
       isReady: () => this.#state === 'ready',
       routes: [
         capabilitiesRoute,

@@ -38,7 +38,7 @@ export interface ReadProjectCheckpointRecordsInput {
   readonly excludedOperationId?: string;
   readonly maximumCoordinationBytes: number;
   readonly metadata: ProjectCheckpointSnapshotMetadata;
-  readonly profile: Extract<CollabCheckpointProfile, 'backup' | 'export'>;
+  readonly profile: CollabCheckpointProfile;
   readonly snapshotAt: CollabIsoTimestamp;
 }
 

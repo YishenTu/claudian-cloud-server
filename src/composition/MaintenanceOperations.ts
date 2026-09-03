@@ -51,6 +51,9 @@ import { BackupExportCoordinator } from '../project-authority/checkpoint/BackupE
 import { CloudBackupExportCheckpointSource } from '../project-authority/checkpoint/CloudBackupExportCheckpointSource.js';
 import { ActiveClaimCustodyKeyReferenceGate } from '../project-authority/lifecycle/ActiveClaimCustodyKeyReferenceGate.js';
 import { ActiveRepositoryIntegrityGate } from '../project-authority/lifecycle/ActiveRepositoryIntegrityGate.js';
+import { CloudAuthorityTransferCheckpoint } from '../project-authority/lifecycle/cloud-to-lan/CloudAuthorityTransferCheckpoint.js';
+import { CloudToLanTransferCoordinator } from '../project-authority/lifecycle/cloud-to-lan/CloudToLanTransferCoordinator.js';
+import { ProjectAuthoritySourceFence } from '../project-authority/lifecycle/cloud-to-lan/ProjectAuthoritySourceFence.js';
 import {
   ProjectLifecycleRecoveryDispatcher,
 } from '../project-authority/lifecycle/ProjectLifecycleRecoveryDispatcher.js';
@@ -60,6 +63,10 @@ import { DeletionCoordinator } from '../project-authority/lifecycle/delete/Delet
 import { LeaveCoordinator } from '../project-authority/lifecycle/leave/LeaveCoordinator.js';
 import { ProjectMemberRemovalCoordinator } from '../project-authority/membership/ProjectMemberRemovalCoordinator.js';
 import { RetireCoordinator } from '../project-authority/lifecycle/retire/RetireCoordinator.js';
+import {
+  KeyringAuthorityTransferSigner,
+  ProductionAuthorityTransferTrust,
+} from '../project-authority/lifecycle/ProductionAuthorityTransferCryptography.js';
 import { EnvironmentRestoreRepositoryInspection } from '../repositories/EnvironmentRestoreRepositoryInspection.js';
 import { GitRepositoryAuthority } from '../repositories/GitRepositoryAuthority.js';
 import {
@@ -250,10 +257,32 @@ function backupExportOwners(
     coordination: runtime.coordination,
     repository: runtime.repository,
   });
+  const cloudToLan = keyring === undefined
+    ? Object.freeze({
+      close: () => Promise.resolve(),
+      recover: () => Promise.resolve('waiting-for-external-proof' as const),
+      reserveRecovery: () => Promise.resolve(undefined),
+    })
+    : new CloudToLanTransferCoordinator({
+      checkpoint: new CloudAuthorityTransferCheckpoint({
+        checkpoint: runtime.checkpoint,
+        metadata: { read: () => Promise.resolve(backupMetadata) },
+        repository: runtime.repository,
+      }),
+      coordination: runtime.coordination,
+      custody: new XChaCha20ClaimCustody({
+        activeKeyId: keyring.activeEncryptionKeyId,
+        keys: keyring.encryptionKeys,
+      }),
+      environmentIdentity: backupMetadata.authorityVolumeIdentity,
+      relinquishmentSigner: new KeyringAuthorityTransferSigner(keyring),
+      repository: runtime.repository,
+      sourceFence: new ProjectAuthoritySourceFence(),
+      targetTrust: new ProductionAuthorityTransferTrust(),
+    });
   const authorityTransfer = createMaintenanceAuthorityTransferRecovery({
     checkpoint: runtime.checkpoint,
-    coordination: runtime.coordination,
-    environmentIdentity: backupMetadata.authorityVolumeIdentity,
+    cloudToLan,
     repository: runtime.repository,
   });
   const dispatcher = new ProjectLifecycleRecoveryDispatcher({
@@ -416,7 +445,7 @@ class Operations implements MaintenanceOperations {
         keyring,
       );
       try {
-        await owners.dispatcher.recoverAll(runtime.coordination);
+        await owners.dispatcher.recoverAvailable(runtime.coordination);
       } finally {
         await owners.close();
       }

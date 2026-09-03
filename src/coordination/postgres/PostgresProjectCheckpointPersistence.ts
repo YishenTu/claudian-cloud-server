@@ -8,6 +8,7 @@ import {
   collabMemberRef,
   collabProjectBackupIdempotencyRecordId,
   decodeCollabAuthorityRelinquishmentProof,
+  decodeCollabAuthorityTransferStatus,
   decodeCollabCloudProjectEventMessage,
   decodeCollabProjectBackupCheckpointCoordinationNdjson,
   decodeCollabProjectCheckpointCoordinationNdjson,
@@ -19,6 +20,7 @@ import {
   type CollabCheckpointProfile,
   type CollabControlOperation,
   type CollabIsoTimestamp,
+  type CollabProjectBackupInactiveRepositoryPublication,
   type CollabProjectBackupRecord,
 } from '@claudian-collab/protocol';
 import type { QueryResultRow } from 'pg';
@@ -78,6 +80,123 @@ function parsedJson(value: string): unknown {
   }
 }
 
+const INACTIVE_PUBLICATION_KEYS = [
+  'artifactKey',
+  'bundleByteCount',
+  'bundleSha256',
+  'objectFormat',
+  'operationId',
+  'placementGeneration',
+  'projectId',
+  'publicationMarkerSha256',
+  'refs',
+  'repositoryStorageKey',
+  'status',
+  'storageNodeId',
+  'validationMarkerSha256',
+] as const;
+
+function canonicalInactivePublication(
+  value: string,
+): CollabProjectBackupInactiveRepositoryPublication {
+  const parsed = parsedJson(value);
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return dependencyFailure();
+  }
+  const source = parsed as Record<string, unknown>;
+  if (
+    Object.keys(source).sort().join('\0')
+      !== [...INACTIVE_PUBLICATION_KEYS].sort().join('\0')
+    || !Array.isArray(source.refs)
+  ) return dependencyFailure();
+  const refs = source.refs.map((value: unknown): Readonly<Record<string, unknown>> => {
+    if (
+      typeof value !== 'object'
+      || value === null
+      || Array.isArray(value)
+      || Object.keys(value).sort().join('\0') !== 'name\0oid'
+    ) return dependencyFailure();
+    const ref = value as Record<string, unknown>;
+    return Object.freeze({ name: ref.name, oid: ref.oid });
+  });
+  return Object.freeze({
+    artifactKey: source.artifactKey,
+    bundleByteCount: source.bundleByteCount,
+    bundleSha256: source.bundleSha256,
+    objectFormat: source.objectFormat,
+    operationId: source.operationId,
+    placementGeneration: source.placementGeneration,
+    projectId: source.projectId,
+    publicationMarkerSha256: source.publicationMarkerSha256,
+    refs: Object.freeze(refs),
+    repositoryStorageKey: source.repositoryStorageKey,
+    status: source.status,
+    storageNodeId: source.storageNodeId,
+    validationMarkerSha256: source.validationMarkerSha256,
+  }) as unknown as CollabProjectBackupInactiveRepositoryPublication;
+}
+
+function completedLanToCloudResultSha256(input: Readonly<{
+  readonly batch_revision: string | null;
+  readonly batch_sha256: string | null;
+  readonly checkpoint_sha256: string | null;
+  readonly operation_id: string;
+  readonly project_id: string;
+  readonly relinquishment_proof_json: string | null;
+  readonly source_authority_generation: string | null;
+  readonly source_authority_kind: 'cloud' | 'lan' | null;
+  readonly target_authority_generation: string | null;
+  readonly target_authority_kind: 'cloud' | 'lan' | null;
+  readonly target_url: string | null;
+  readonly transfer_created_at: Date | null;
+  readonly transfer_expires_at: Date | null;
+  readonly updated_at: Date;
+}>): string {
+  if (
+    input.batch_revision === null
+    || input.batch_sha256 === null
+    || input.checkpoint_sha256 === null
+    || input.relinquishment_proof_json === null
+    || input.source_authority_generation === null
+    || input.source_authority_kind !== 'lan'
+    || input.target_authority_generation === null
+    || input.target_authority_kind !== 'cloud'
+    || input.target_url === null
+    || input.transfer_created_at === null
+    || input.transfer_expires_at === null
+  ) return dependencyFailure();
+  try {
+    const status = decodeCollabAuthorityTransferStatus({
+      batchRevision: safeInteger(input.batch_revision),
+      batchSha256: input.batch_sha256,
+      checkpointSha256: input.checkpoint_sha256,
+      createdAt: iso(input.transfer_created_at),
+      direction: 'lan-to-cloud',
+      expiresAt: iso(input.transfer_expires_at),
+      phase: 'completed',
+      projectId: input.project_id,
+      relinquishmentProof: decodeCollabAuthorityRelinquishmentProof(
+        parsedJson(input.relinquishment_proof_json),
+      ),
+      sourceAuthority: Object.freeze({
+        generation: safeInteger(input.source_authority_generation),
+        kind: input.source_authority_kind,
+      }),
+      state: 'completed',
+      targetAuthority: Object.freeze({
+        generation: safeInteger(input.target_authority_generation),
+        kind: input.target_authority_kind,
+      }),
+      targetUrl: input.target_url,
+      transferId: input.operation_id,
+      updatedAt: iso(input.updated_at),
+    });
+    return createHash('sha256').update(JSON.stringify(status)).digest('hex');
+  } catch {
+    return dependencyFailure();
+  }
+}
+
 function recordId(kind: string, identity: string): string {
   const direct = `${kind}:${identity}`;
   if (direct.length <= 128 && IDENTITY_PATTERN.test(direct)) return direct;
@@ -117,7 +236,7 @@ class BoundedCheckpointRecords {
   }
 
   canonical(
-    profile: Extract<CollabCheckpointProfile, 'backup' | 'export'>,
+    profile: CollabCheckpointProfile,
   ): readonly ProjectCheckpointRecord[] {
     const allowed = new Set<string>(profile === 'backup'
       ? COLLAB_PROJECT_BACKUP_RECORD_KINDS
@@ -135,7 +254,7 @@ class BoundedCheckpointRecords {
         )
         : encodeCollabProjectCheckpointCoordinationNdjson(
           sorted as readonly CollabCheckpointPortableRecord[],
-          'export',
+          profile,
         );
       if (Buffer.byteLength(encoded, 'utf8') > this.#maximumBytes) {
         resourceLimit();
@@ -144,7 +263,7 @@ class BoundedCheckpointRecords {
         ? decodeCollabProjectBackupCheckpointCoordinationNdjson(encoded)
         : decodeCollabProjectCheckpointCoordinationNdjson(
           encoded,
-          'export',
+          profile,
         ) as readonly CollabCheckpointPortableRecord[];
     } catch (error: unknown) {
       if (error instanceof CoordinationError) throw error;
@@ -1148,23 +1267,45 @@ implements ProjectCheckpointPersistence {
         | 'retire';
       readonly operation_id: string;
       readonly phase: string;
+      readonly project_id: string;
       readonly recovery_from_phase: string | null;
+      readonly relinquishment_proof_json: string | null;
       readonly request_fingerprint: string;
       readonly result_sha256: string | null;
       readonly scheduled_at: Date;
+      readonly source_authority_generation: string | null;
+      readonly source_authority_kind: 'cloud' | 'lan' | null;
       readonly state: 'active' | 'cancelled' | 'completed' | 'recovery-required';
+      readonly target_authority_generation: string | null;
+      readonly target_authority_kind: 'cloud' | 'lan' | null;
+      readonly target_url: string | null;
+      readonly transfer_created_at: Date | null;
+      readonly transfer_expires_at: Date | null;
       readonly updated_at: Date;
     }>(
-      `SELECT actor_member_id, batch_revision, batch_sha256,
-              checkpoint_sha256, created_at, direction,
-              expected_authority_generation, expected_personal_ref_oid,
-              idempotency_key, kind, operation_id, phase,
-              recovery_from_phase, request_fingerprint, result_sha256,
-              scheduled_at, state, updated_at
-         FROM claudian_cloud.project_lifecycle_journals
-        WHERE project_id = $1
-          AND ($2::text IS NULL OR operation_id <> $2)
-        ORDER BY operation_id`,
+      `SELECT lifecycle.actor_member_id, lifecycle.batch_revision,
+              lifecycle.batch_sha256, lifecycle.checkpoint_sha256,
+              lifecycle.created_at, lifecycle.direction,
+              lifecycle.expected_authority_generation,
+              lifecycle.expected_personal_ref_oid, lifecycle.idempotency_key,
+              lifecycle.kind, lifecycle.operation_id, lifecycle.phase,
+              lifecycle.project_id, lifecycle.recovery_from_phase,
+              transfer.relinquishment_proof_json,
+              lifecycle.request_fingerprint, lifecycle.result_sha256,
+              lifecycle.scheduled_at, transfer.source_authority_generation,
+              transfer.source_authority_kind, lifecycle.state,
+              transfer.target_authority_generation,
+              transfer.target_authority_kind, transfer.target_url,
+              transfer.created_at AS transfer_created_at,
+              transfer.expires_at AS transfer_expires_at,
+              lifecycle.updated_at
+         FROM claudian_cloud.project_lifecycle_journals AS lifecycle
+         LEFT JOIN claudian_cloud.authority_transfer_recovery AS transfer
+           ON transfer.project_id = lifecycle.project_id
+          AND transfer.transfer_id = lifecycle.operation_id
+        WHERE lifecycle.project_id = $1
+          AND ($2::text IS NULL OR lifecycle.operation_id <> $2)
+        ORDER BY lifecycle.operation_id`,
       [this.#projectId, excludedOperationId ?? null],
       records,
     )) records.push(Object.freeze({
@@ -1191,7 +1332,14 @@ implements ProjectCheckpointPersistence {
         projectId: this.#projectId,
         recoveryFromPhase: row.recovery_from_phase,
         requestFingerprint: row.request_fingerprint,
-        resultSha256: row.result_sha256,
+        resultSha256: row.result_sha256 ?? (
+          row.kind === 'authority-transfer'
+            && row.direction === 'lan-to-cloud'
+            && row.phase === 'completed'
+            && row.state === 'completed'
+            ? completedLanToCloudResultSha256(row)
+            : null
+        ),
         scheduledAt: iso(row.scheduled_at),
         state: row.state,
         updatedAt: iso(row.updated_at),
@@ -1587,7 +1735,7 @@ implements ProjectCheckpointPersistence {
           expiresAt: iso(row.expires_at),
           inactivePublication: row.inactive_publication_json === null
             ? null
-            : parsedJson(row.inactive_publication_json),
+            : canonicalInactivePublication(row.inactive_publication_json),
           projectId: this.#projectId,
           relinquishmentProof,
           sourceAuthority: Object.freeze({
@@ -1643,6 +1791,12 @@ implements ProjectCheckpointPersistence {
          FROM claudian_cloud.transferred_membership_claims
         WHERE project_id = $1
           AND ($2::text IS NULL OR transfer_id <> $2)
+          AND batch_revision = (
+            SELECT lifecycle.batch_revision
+              FROM claudian_cloud.project_lifecycle_journals AS lifecycle
+             WHERE lifecycle.project_id = transferred_membership_claims.project_id
+               AND lifecycle.operation_id = transferred_membership_claims.transfer_id
+          )
         ORDER BY transfer_id, member_id`,
       [this.#projectId, excludedOperationId ?? null],
       records,
