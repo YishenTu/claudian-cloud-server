@@ -240,6 +240,36 @@ describe('RepositoryCheckpointAuthority', () => {
         (error: unknown) => error instanceof RepositoryCheckpointError
           && error.code === 'invalid-checkpoint',
       );
+      await writeFile(creationMarker, emptyProjectPublicationMarkerJson({
+        ...plan,
+        initialCommitOid: '0'.repeat(40),
+      }), { mode: 0o600 });
+      const exactIdentity = {
+        placementGeneration: 1,
+        projectId,
+        repositoryStorageKey: plan.repositoryStorageKey,
+        storageNodeId: plan.storageNodeId,
+      } as const;
+      await assert.rejects(
+        checkpoint.removeExactRepository(exactReservation, exactIdentity),
+        (error: unknown) => error instanceof RepositoryCheckpointError
+          && error.code === 'invalid-checkpoint',
+      );
+      await access(creationMarker);
+      await assert.rejects(
+        checkpoint.verifyExactRepository(
+          exactReservation,
+          createRepositoryPlacementLease({
+            active: true,
+            generation: 1,
+            projectId,
+            repositoryStorageKey: plan.repositoryStorageKey,
+            storageNodeId: plan.storageNodeId,
+          }),
+        ),
+        (error: unknown) => error instanceof RepositoryCheckpointError
+          && error.code === 'invalid-checkpoint',
+      );
       await exactReservation.close();
     } finally {
       await Promise.all([creator.close(), checkpoint.close()]);

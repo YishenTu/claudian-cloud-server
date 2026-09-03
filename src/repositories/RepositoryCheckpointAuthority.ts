@@ -849,6 +849,7 @@ async function assertOwnedRepositoryMarker(
       source.emptyTreeOid !== '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
       || typeof source.initialCommitOid !== 'string'
       || source.initialCommitOid.length !== 40
+      || source.initialCommitOid === '0'.repeat(40)
       || !isCollabGitOid(source.initialCommitOid)
       || source.mainRef !== COLLAB_MAIN_REF
       || source.objectFormat !== 'sha1'
