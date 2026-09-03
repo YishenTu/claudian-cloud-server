@@ -932,6 +932,7 @@ implements PortabilityLifecyclePersistence {
     const promoted = await this.#query<{ readonly project_id: string }>(
       `UPDATE claudian_cloud.projects
           SET service_state = 'active',
+              manager_set_generation = GREATEST(manager_set_generation, 1),
               authority_state_revision = authority_state_revision + 1
         WHERE project_id = $1
           AND authority_generation = $2

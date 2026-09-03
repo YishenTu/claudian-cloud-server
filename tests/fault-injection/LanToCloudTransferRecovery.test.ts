@@ -174,6 +174,7 @@ async function importTransfer(
   importer: GitBundleImporter,
   projectId: string,
   transferId: string,
+  managerSetGeneration = 1,
 ): Promise<TransferFixture> {
   const work = join(root, `work-${projectId}`);
   await git(root, ['init', '--initial-branch=main', work]);
@@ -242,7 +243,7 @@ async function importTransfer(
         authorityGeneration: 1,
         createdAt: CREATED_AT,
         expectedMainOid: oid,
-        managerSetGeneration: 1,
+        managerSetGeneration,
         name: projectId,
         projectId,
       }),
@@ -649,6 +650,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
           importer,
           'project-activation-recovery',
           'transfer-activation-recovery',
+          0,
         );
         const failingPublication = createCoordinator(activationTransfer, true);
         const activationBatch = await beginValidateAndRotate(
@@ -672,6 +674,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
           }));
           assert.equal(staged.project?.serviceState, 'maintenance');
           assert.equal(staged.project.authorityGeneration, 2);
+          assert.equal(staged.project.managerSetGeneration, 0);
           assert.equal(staged.request?.revision, 2);
           assert.equal(staged.placement, undefined);
           assert.equal(staged.hostBinding, undefined);
@@ -780,6 +783,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
           );
           assert.equal(failedActivation.journal?.phase, 'source-relinquished');
           assert.equal(failedActivation.project?.serviceState, 'maintenance');
+          assert.equal(failedActivation.project.managerSetGeneration, 0);
           assert.equal(failedActivation.request?.revision, 2);
         } finally {
           await failedActivationLease.close();
@@ -855,6 +859,10 @@ describe('LAN-to-Cloud cross-store recovery', () => {
             journal: await scope.portability.getLifecycleJournal(
               activationTransfer.transferId,
             ),
+            listedMembers: await scope.membership.listProjectMembers({
+              actorRole: 'manager',
+              now: '2026-08-27T00:00:00.000Z',
+            }),
             members: await scope.listMemberships(),
             offlineBinding: await scope.portability.findProjectPrincipalBinding(
               'principal:offline',
@@ -878,6 +886,12 @@ describe('LAN-to-Cloud cross-store recovery', () => {
               .hasPendingResolve('ticket-imported'),
           }));
           assert.equal(activated.project?.authorityGeneration, 2);
+          assert.equal(activated.project.managerSetGeneration, 1);
+          assert.equal(activated.listedMembers.managerSetGeneration, 1);
+          assert.deepEqual(
+            activated.listedMembers.members.map(member => member.memberId),
+            [OFFLINE_MEMBER_ID, COLLATION_MEMBER_ID, HOST_MEMBER_ID],
+          );
           assert.ok(activated.journal);
           const lifecycleResultSha256 = activated.journal.resultSha256;
           assert.equal(activated.journal.phase, 'completed');
@@ -1067,6 +1081,81 @@ describe('LAN-to-Cloud cross-store recovery', () => {
           )), true);
         } finally {
           await incompleteCompletionLease.close();
+        }
+
+        const positiveGenerationTransfer = await importTransfer(
+          root,
+          importer,
+          'project-positive-manager-generation',
+          'transfer-positive-manager-generation',
+          4,
+        );
+        const positiveGenerationCoordinator = createCoordinator(
+          positiveGenerationTransfer,
+        );
+        const positiveGenerationBatch = await beginValidateAndPublish(
+          positiveGenerationCoordinator,
+          positiveGenerationTransfer,
+        );
+        await positiveGenerationCoordinator.commitRelinquishment({
+          principalId: positiveGenerationTransfer.principalId,
+          request: {
+            idempotencyKey: 'relinquish-positive-manager-generation',
+            projectId: positiveGenerationTransfer.projectId,
+            proof: Object.freeze({
+              batchRevision: positiveGenerationBatch.batchRevision,
+              batchSha256: positiveGenerationBatch.batchSha256,
+              certificate: SIGNATURE,
+              certificateAlgorithm: 'ed25519',
+              checkpointSha256: positiveGenerationBatch.checkpointSha256,
+              committedAt: new Date(now += 1_000).toISOString(),
+              operationIntentId: 'relinquish-positive-manager-generation',
+              projectId: positiveGenerationTransfer.projectId,
+              sourceAuthority: Object.freeze({ generation: 1, kind: 'lan' }),
+              sourceHostMemberId: HOST_MEMBER_ID,
+              targetAuthority: Object.freeze({ generation: 2, kind: 'cloud' }),
+              transferId: positiveGenerationTransfer.transferId,
+            }),
+            transferId: positiveGenerationTransfer.transferId,
+          },
+        });
+        const positiveGenerationLease = await coordination.acquireProjectLease(
+          positiveGenerationTransfer.projectId,
+        );
+        try {
+          const positiveGeneration = await positiveGenerationLease.withProjectScope(
+            async scope => ({
+              backup: await scope.checkpoint.readProjectCheckpointRecords({
+                excludedOperationId: 'backup-positive-manager-generation',
+                maximumCoordinationBytes: 1024 * 1024,
+                metadata: {
+                  authorityId: 'authority-real',
+                  authorityVolumeIdentity: 'volume-real',
+                  coordinationSchemaVersion: 11,
+                  maximumServerBuild: 'cloud-build-real',
+                  minimumServerBuild: 'cloud-build-real',
+                  repositoryFormatVersion: 1,
+                  restoreEpoch: 1,
+                },
+                profile: 'backup',
+                snapshotAt: '2026-08-27T00:00:00.000Z',
+              }),
+              listedMembers: await scope.membership.listProjectMembers({
+                actorRole: 'manager',
+                now: '2026-08-27T00:00:00.000Z',
+              }),
+              project: await scope.getProject(),
+            }),
+          );
+          assert.equal(positiveGeneration.project?.managerSetGeneration, 4);
+          assert.equal(positiveGeneration.listedMembers.managerSetGeneration, 4);
+          assert.equal(
+            positiveGeneration.backup.find(record => record.kind === 'project')
+              ?.value.managerSetGeneration,
+            4,
+          );
+        } finally {
+          await positiveGenerationLease.close();
         }
 
         const cancellationTransfer = await importTransfer(
