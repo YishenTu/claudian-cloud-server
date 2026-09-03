@@ -129,6 +129,16 @@ class MemoryPortability {
     const current = this.journal;
     assert.ok(current);
     if (current.phase === input.nextPhase && current.state === input.nextState) {
+      if (
+        current.resultSha256 === undefined
+        && input.resultSha256 !== undefined
+      ) {
+        this.journal = Object.freeze({
+          ...current,
+          resultSha256: input.resultSha256,
+        });
+        return Promise.resolve('advanced');
+      }
       return Promise.resolve('replayed');
     }
     assert.equal(current.phase, input.expectedPhase);
@@ -1168,6 +1178,10 @@ describe('LanToCloudTransferCoordinator', () => {
     });
     assert.equal(completed.phase, 'completed');
     assert.equal(completed.state, 'completed');
+    assert.equal(
+      test.coordination.portability.journal.resultSha256,
+      sha256(JSON.stringify(completed)),
+    );
     assert.equal(test.activation.calls, 1);
     assert.deepEqual(test.activation.receiptKeyIds, ['receipt-key']);
     assert.equal(
@@ -1186,6 +1200,25 @@ describe('LanToCloudTransferCoordinator', () => {
     });
     assert.deepEqual(replayedCompletion, completed);
     assert.equal(test.activation.calls, 1);
+    const completedJournal = test.coordination.portability.journal;
+    assert.ok(completedJournal);
+    test.coordination.portability.journal = Object.freeze({
+      ...completedJournal,
+      resultSha256: undefined,
+    });
+    assert.deepEqual(await test.restart().commitRelinquishment({
+      principalId: HOST_PRINCIPAL_ID,
+      request: {
+        idempotencyKey: 'intent-relinquish-request',
+        projectId: PROJECT_ID,
+        proof,
+        transferId: TRANSFER_ID,
+      },
+    }), completed);
+    assert.equal(
+      test.coordination.portability.journal.resultSha256,
+      sha256(JSON.stringify(completed)),
+    );
     await assertCode(test.restart().commitRelinquishment({
       principalId: HOST_PRINCIPAL_ID,
       request: {

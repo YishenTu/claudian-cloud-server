@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 
 import {
   collabControlOperationCodec,
+  decodeCollabAuthorityTransferStatus,
   decodeCollabTransferredMembershipClaimBatch,
   decodeCollabTransferredMembershipRedemptionReceipt,
   encodeCollabTransferredMembershipClaimBatchDigestInput,
@@ -667,6 +668,45 @@ async function advanceLifecycle(
   }));
 }
 
+async function completeLifecycle(
+  clock: () => Date,
+  lease: PinnedProjectLease,
+  exact: StoredTransfer,
+): Promise<void> {
+  const completedAt = exact.journal.phase === 'completed'
+    ? exact.journal.updatedAt
+    : timestamp(clock, exact.journal.updatedAt);
+  const current = await lease.withProjectScope(scope => (
+    scope.portability.getAuthorityTransferStatus(exact.journal.operationId)
+  ));
+  if (current === undefined || current.direction !== 'lan-to-cloud') {
+    return fail('recovery-required');
+  }
+  const completed = decodeCollabAuthorityTransferStatus({
+    ...current,
+    phase: 'completed',
+    state: 'completed',
+    updatedAt: completedAt,
+  });
+  const resultSha256 = sha256(JSON.stringify(completed));
+  if (exact.journal.resultSha256 !== undefined) {
+    if (exact.journal.resultSha256 !== resultSha256) {
+      return fail('recovery-required');
+    }
+    return;
+  }
+  await lease.withProjectScope(scope => scope.portability.advanceLifecycleJournal({
+    expectedPhase: exact.journal.phase,
+    expectedState: exact.journal.state,
+    nextPhase: 'completed',
+    nextState: 'completed',
+    operationId: exact.journal.operationId,
+    resultSha256,
+    scheduledAt: exact.recovery.expiresAt,
+    updatedAt: completedAt,
+  }));
+}
+
 export interface LanToCloudPostCutoverRecoveryOptions {
   readonly activation: LanToCloudProjectActivationPort;
   readonly checkpoint: LanToCloudTransferCoordinatorOptions['checkpoint'];
@@ -734,17 +774,14 @@ implements ProjectLifecycleRecoveryOwner {
       }
       if (exact.journal.phase === 'cloud-activated') {
         await this.#checkpoint.discardAttempt(checkpointAttempt(exact));
-        await advanceLifecycle(this.#clock, input.lease, exact.journal, {
-          nextPhase: 'completed',
-          nextState: 'completed',
-          scheduledAt: exact.recovery.expiresAt,
-        });
+        await completeLifecycle(this.#clock, input.lease, exact);
         return 'settled';
       }
       if (
         exact.journal.phase !== 'completed'
         || exact.journal.state !== 'completed'
       ) return fail('recovery-required');
+      await completeLifecycle(this.#clock, input.lease, exact);
       return 'settled';
     } catch (error: unknown) {
       dependency(error);
@@ -1222,6 +1259,7 @@ implements ProjectLifecycleRecoveryOwner {
       );
       if (exact.journal.phase === 'completed') {
         this.#assertCommittedRelinquishment(request.proof, exact);
+        await this.#activateIfNeeded(lease, request.transferId);
         return this.#requireStatus(lease, request.transferId);
       }
       if (exact.journal.phase === 'claims-retained') {
