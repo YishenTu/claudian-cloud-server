@@ -25,6 +25,7 @@ import {
   RepositoryCheckpointError,
 } from '../../../src/repositories/RepositoryCheckpointAuthority.js';
 import {
+  emptyProjectPublicationMarkerJson,
   EmptyProjectRepositoryAuthority,
   type EmptyProjectPublicationPlan,
 } from '../../../src/repositories/EmptyProjectRepositoryAuthority.js';
@@ -207,6 +208,24 @@ describe('RepositoryCheckpointAuthority', () => {
       );
       assert.notEqual(ambiguousMarker, canonicalMarker);
       await writeFile(creationMarker, ambiguousMarker, { mode: 0o600 });
+      await assert.rejects(
+        checkpoint.verifyExactRepository(
+          exactReservation,
+          createRepositoryPlacementLease({
+            active: true,
+            generation: 1,
+            projectId,
+            repositoryStorageKey: plan.repositoryStorageKey,
+            storageNodeId: plan.storageNodeId,
+          }),
+        ),
+        (error: unknown) => error instanceof RepositoryCheckpointError
+          && error.code === 'invalid-checkpoint',
+      );
+      await writeFile(creationMarker, emptyProjectPublicationMarkerJson({
+        ...plan,
+        initialCommitOid: 'c'.repeat(64),
+      }), { mode: 0o600 });
       await assert.rejects(
         checkpoint.verifyExactRepository(
           exactReservation,
