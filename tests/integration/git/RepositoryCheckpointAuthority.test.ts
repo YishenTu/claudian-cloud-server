@@ -194,6 +194,33 @@ describe('RepositoryCheckpointAuthority', () => {
         (error: unknown) => error instanceof RepositoryCheckpointError
           && error.code === 'invalid-checkpoint',
       );
+      const creationMarker = join(
+        repositoryRoot,
+        Buffer.from(projectId, 'utf8').toString('hex'),
+        plan.repositoryStorageKey,
+        '.claudian-cloud-creation.json',
+      );
+      const canonicalMarker = await readFile(creationMarker, 'utf8');
+      const ambiguousMarker = canonicalMarker.replace(
+        `"projectId":"${projectId}"`,
+        `"projectId":"project_wrong","projectId":"${projectId}"`,
+      );
+      assert.notEqual(ambiguousMarker, canonicalMarker);
+      await writeFile(creationMarker, ambiguousMarker, { mode: 0o600 });
+      await assert.rejects(
+        checkpoint.verifyExactRepository(
+          exactReservation,
+          createRepositoryPlacementLease({
+            active: true,
+            generation: 1,
+            projectId,
+            repositoryStorageKey: plan.repositoryStorageKey,
+            storageNodeId: plan.storageNodeId,
+          }),
+        ),
+        (error: unknown) => error instanceof RepositoryCheckpointError
+          && error.code === 'invalid-checkpoint',
+      );
       await exactReservation.close();
     } finally {
       await Promise.all([creator.close(), checkpoint.close()]);

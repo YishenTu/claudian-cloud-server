@@ -40,6 +40,10 @@ import {
   removeDurableOwnedTree,
 } from './DurableTreeRemoval.js';
 import {
+  EMPTY_PROJECT_PUBLICATION_MARKER_FILE,
+  emptyProjectPublicationMarkerJson,
+} from './EmptyProjectRepositoryAuthority.js';
+import {
   GitProcessError,
   GitProcessSupervisor,
 } from './GitProcessSupervisor.js';
@@ -335,7 +339,6 @@ const CAPTURE_OWNER_MARKER = '.claudian-cloud-checkpoint-capture-owner.json';
 const VALIDATION_MARKER = '.claudian-cloud-validation.json';
 const PUBLICATION_MARKER = '.claudian-cloud-checkpoint-publication.json';
 const BOOTSTRAP_PUBLICATION_MARKER = '.claudian-cloud-publication.json';
-const CREATION_PUBLICATION_MARKER = '.claudian-cloud-creation.json';
 const STORAGE_KEY_PATTERN = /^[a-z0-9][a-z0-9_-]{0,127}$/u;
 const STORAGE_NODE_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/u;
 
@@ -737,10 +740,11 @@ async function assertOwnedRepositoryMarker(
   for (const name of [
     PUBLICATION_MARKER,
     BOOTSTRAP_PUBLICATION_MARKER,
-    CREATION_PUBLICATION_MARKER,
+    EMPTY_PROJECT_PUBLICATION_MARKER_FILE,
   ]) {
     const path = join(repositoryPath, name);
     let source: Record<string, unknown>;
+    let serialized: string;
     try {
       const entry = await lstat(path);
       if (
@@ -750,7 +754,8 @@ async function assertOwnedRepositoryMarker(
       ) {
         fail('invalid-checkpoint');
       }
-      const value: unknown = JSON.parse(await readFile(path, 'utf8'));
+      serialized = await readFile(path, 'utf8');
+      const value: unknown = JSON.parse(serialized);
       if (typeof value !== 'object' || value === null || Array.isArray(value)) {
         fail('invalid-checkpoint');
       }
@@ -768,7 +773,7 @@ async function assertOwnedRepositoryMarker(
       }
       fail('invalid-checkpoint');
     }
-    const creationMarker = name === CREATION_PUBLICATION_MARKER;
+    const creationMarker = name === EMPTY_PROJECT_PUBLICATION_MARKER_FILE;
     const generation = creationMarker
       ? 1
       : name === PUBLICATION_MARKER
@@ -833,20 +838,35 @@ async function assertOwnedRepositoryMarker(
       || generation !== identity.placementGeneration
       || source.repositoryStorageKey !== identity.repositoryStorageKey
       || source.storageNodeId !== identity.storageNodeId
-      || (creationMarker
-        ? source.emptyTreeOid !== '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
-          || !isCollabGitOid(source.initialCommitOid)
-          || source.mainRef !== COLLAB_MAIN_REF
-          || source.objectFormat !== 'sha1'
-          || creationMemberId === undefined
-          || !isCollabMemberId(creationMemberId)
-          || source.personalRef !== collabMemberRef(creationMemberId)
-          || typeof operationId !== 'string'
-          || !SHA256_PATTERN.test(operationId)
-        : !isCollabOpaqueId(operationId))
     ) {
       fail('invalid-checkpoint');
     }
+    if (!creationMarker) {
+      if (!isCollabOpaqueId(operationId)) fail('invalid-checkpoint');
+      continue;
+    }
+    if (
+      source.emptyTreeOid !== '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+      || !isCollabGitOid(source.initialCommitOid)
+      || source.mainRef !== COLLAB_MAIN_REF
+      || source.objectFormat !== 'sha1'
+      || creationMemberId === undefined
+      || !isCollabMemberId(creationMemberId)
+      || source.personalRef !== collabMemberRef(creationMemberId)
+      || typeof operationId !== 'string'
+      || !SHA256_PATTERN.test(operationId)
+      || serialized !== emptyProjectPublicationMarkerJson({
+        emptyTreeOid: source.emptyTreeOid,
+        initialCommitOid: source.initialCommitOid,
+        mainRef: source.mainRef,
+        objectFormat: source.objectFormat,
+        personalRef: source.personalRef,
+        planSha256: operationId,
+        projectId: identity.projectId,
+        repositoryStorageKey: identity.repositoryStorageKey,
+        storageNodeId: identity.storageNodeId,
+      })
+    ) fail('invalid-checkpoint');
   }
   if (markers !== 1) fail('invalid-checkpoint');
 }
