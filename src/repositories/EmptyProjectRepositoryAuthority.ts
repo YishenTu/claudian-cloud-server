@@ -117,7 +117,7 @@ const STORAGE_NODE_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/u;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const ZERO_SHA1 = '0'.repeat(40);
 const INTENT_FILE = '.claudian-cloud-creation-intent.json';
-const MARKER_FILE = '.claudian-cloud-creation.json';
+export const EMPTY_PROJECT_PUBLICATION_MARKER_FILE = '.claudian-cloud-creation.json';
 const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
 
@@ -176,7 +176,22 @@ function intentJson(plan: EmptyProjectPublicationPlan): string {
   })}\n`;
 }
 
-function markerJson(plan: EmptyProjectPublicationPlan): string {
+export type EmptyProjectPublicationMarker = Readonly<Pick<
+  EmptyProjectPublicationPlan,
+  | 'emptyTreeOid'
+  | 'initialCommitOid'
+  | 'mainRef'
+  | 'objectFormat'
+  | 'personalRef'
+  | 'planSha256'
+  | 'projectId'
+  | 'repositoryStorageKey'
+  | 'storageNodeId'
+>>;
+
+export function emptyProjectPublicationMarkerJson(
+  plan: EmptyProjectPublicationMarker,
+): string {
   return `${JSON.stringify({
     emptyTreeOid: plan.emptyTreeOid,
     initialCommitOid: plan.initialCommitOid,
@@ -229,8 +244,11 @@ function paths(root: string, plan: EmptyProjectPublicationPlan): RepositoryPaths
   return Object.freeze({
     canonical,
     intent: join(canonical, INTENT_FILE),
-    marker: join(canonical, MARKER_FILE),
-    markerPart: join(canonical, `.${MARKER_FILE}.${plan.planSha256}.part`),
+    marker: join(canonical, EMPTY_PROJECT_PUBLICATION_MARKER_FILE),
+    markerPart: join(
+      canonical,
+      `.${EMPTY_PROJECT_PUBLICATION_MARKER_FILE}.${plan.planSha256}.part`,
+    ),
     namespace,
     staging,
     stagingIntent: join(staging, INTENT_FILE),
@@ -358,7 +376,7 @@ export class EmptyProjectRepositoryAuthority implements EmptyProjectRepository {
     try {
       this.#assertReservation(reservation, plan);
       const location = await this.#prepareLocation(plan);
-      const expectedMarker = markerJson(plan);
+      const expectedMarker = emptyProjectPublicationMarkerJson(plan);
       const replayed = await exactFile(location.marker, expectedMarker);
       await this.#initializeAndWriteObjects(location.canonical, plan);
       await this.#establishRefs(location.canonical, plan);
@@ -639,7 +657,7 @@ export class EmptyProjectRepositoryAuthority implements EmptyProjectRepository {
     plan: EmptyProjectPublicationPlan,
     publicationMarkerSha256: string,
   ): Promise<void> {
-    const expectedMarker = markerJson(plan);
+    const expectedMarker = emptyProjectPublicationMarkerJson(plan);
     if (
       sha256(expectedMarker) !== publicationMarkerSha256
       || !await exactFile(location.intent, intentJson(plan))
