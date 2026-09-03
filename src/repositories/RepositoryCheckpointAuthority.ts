@@ -335,6 +335,7 @@ const CAPTURE_OWNER_MARKER = '.claudian-cloud-checkpoint-capture-owner.json';
 const VALIDATION_MARKER = '.claudian-cloud-validation.json';
 const PUBLICATION_MARKER = '.claudian-cloud-checkpoint-publication.json';
 const BOOTSTRAP_PUBLICATION_MARKER = '.claudian-cloud-publication.json';
+const CREATION_PUBLICATION_MARKER = '.claudian-cloud-creation.json';
 const STORAGE_KEY_PATTERN = /^[a-z0-9][a-z0-9_-]{0,127}$/u;
 const STORAGE_NODE_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/u;
 
@@ -733,7 +734,11 @@ async function assertOwnedRepositoryMarker(
   identity: ExactOwnedRepositoryIdentity,
 ): Promise<void> {
   let markers = 0;
-  for (const name of [PUBLICATION_MARKER, BOOTSTRAP_PUBLICATION_MARKER]) {
+  for (const name of [
+    PUBLICATION_MARKER,
+    BOOTSTRAP_PUBLICATION_MARKER,
+    CREATION_PUBLICATION_MARKER,
+  ]) {
     const path = join(repositoryPath, name);
     let source: Record<string, unknown>;
     try {
@@ -763,12 +768,17 @@ async function assertOwnedRepositoryMarker(
       }
       fail('invalid-checkpoint');
     }
-    const generation = name === PUBLICATION_MARKER
-      ? source.placementGeneration
-      : source.generation;
-    const operationId = name === PUBLICATION_MARKER
-      ? source.operationId
-      : source.attemptId;
+    const creationMarker = name === CREATION_PUBLICATION_MARKER;
+    const generation = creationMarker
+      ? 1
+      : name === PUBLICATION_MARKER
+        ? source.placementGeneration
+        : source.generation;
+    const operationId = creationMarker
+      ? source.planSha256
+      : name === PUBLICATION_MARKER
+        ? source.operationId
+        : source.attemptId;
     const expectedKeys = name === PUBLICATION_MARKER
       ? [
         'artifactKey',
@@ -785,19 +795,37 @@ async function assertOwnedRepositoryMarker(
         'storageNodeId',
         'validationMarkerSha256',
       ]
-      : [
-        'artifactKey',
-        'attemptId',
-        'generation',
-        'markerSha256',
-        'objectFormat',
-        'projectId',
-        'refs',
-        'repositoryStorageKey',
-        'schemaVersion',
-        'storageNodeId',
-        'validationMarkerSha256',
-      ];
+      : creationMarker
+        ? [
+          'emptyTreeOid',
+          'initialCommitOid',
+          'mainRef',
+          'objectFormat',
+          'personalRef',
+          'planSha256',
+          'projectId',
+          'repositoryStorageKey',
+          'schemaVersion',
+          'storageNodeId',
+        ]
+        : [
+          'artifactKey',
+          'attemptId',
+          'generation',
+          'markerSha256',
+          'objectFormat',
+          'projectId',
+          'refs',
+          'repositoryStorageKey',
+          'schemaVersion',
+          'storageNodeId',
+          'validationMarkerSha256',
+        ];
+    const creationMemberId = creationMarker
+      && typeof source.personalRef === 'string'
+      && source.personalRef.startsWith(COLLAB_MEMBER_REF_PREFIX)
+      ? source.personalRef.slice(COLLAB_MEMBER_REF_PREFIX.length)
+      : undefined;
     if (
       Object.keys(source).sort().join('\0') !== expectedKeys.sort().join('\0')
       || source.schemaVersion !== 1
@@ -805,7 +833,17 @@ async function assertOwnedRepositoryMarker(
       || generation !== identity.placementGeneration
       || source.repositoryStorageKey !== identity.repositoryStorageKey
       || source.storageNodeId !== identity.storageNodeId
-      || !isCollabOpaqueId(operationId)
+      || (creationMarker
+        ? source.emptyTreeOid !== '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+          || !isCollabGitOid(source.initialCommitOid)
+          || source.mainRef !== COLLAB_MAIN_REF
+          || source.objectFormat !== 'sha1'
+          || creationMemberId === undefined
+          || !isCollabMemberId(creationMemberId)
+          || source.personalRef !== collabMemberRef(creationMemberId)
+          || typeof operationId !== 'string'
+          || !SHA256_PATTERN.test(operationId)
+        : !isCollabOpaqueId(operationId))
     ) {
       fail('invalid-checkpoint');
     }

@@ -25,6 +25,10 @@ import {
   RepositoryCheckpointError,
 } from '../../../src/repositories/RepositoryCheckpointAuthority.js';
 import {
+  EmptyProjectRepositoryAuthority,
+  type EmptyProjectPublicationPlan,
+} from '../../../src/repositories/EmptyProjectRepositoryAuthority.js';
+import {
   GitBundleImporter,
   repositoryCheckpointArtifactKey,
   repositoryCheckpointAttemptId,
@@ -112,6 +116,92 @@ function captureOperationPath(
 }
 
 describe('RepositoryCheckpointAuthority', () => {
+  it('verifies the exact repository published by Cloud Project creation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'claudian-checkpoint-created-project-'));
+    const repositoryRoot = join(root, 'repositories');
+    const operationRoot = join(root, 'checkpoint-operations');
+    const projectId = 'project_cloud_created_exact';
+    await mkdir(repositoryRoot, { mode: 0o700 });
+    const resources = new ResourceAdmission({
+      maxChildren: 2,
+      maxChildrenPerProject: 1,
+      queueMax: 2,
+      queueMaxPerProject: 1,
+      queueTimeoutMs: 1_000,
+    });
+    const plan: EmptyProjectPublicationPlan = Object.freeze({
+      authorEmail: 'cloud@claudian.invalid',
+      authorName: 'Claudian Cloud',
+      commitMessage: 'Initialize Collab project',
+      commitTimestampSeconds: 1788051723,
+      emptyTreeOid: '4b825dc642cb6eb9a060e54bf8d69288fbee4904',
+      initialCommitOid: '6b1a12d6d3b4714801617caa850adf32f9858bf5',
+      mainRef: 'refs/heads/main',
+      objectFormat: 'sha1',
+      personalRef: 'refs/heads/members/member_initial_manager',
+      planSha256: 'b'.repeat(64),
+      projectId,
+      repositoryStorageKey: 'repo_cloud_created_exact',
+      storageNodeId: 'node-a',
+      timezone: '+0000',
+    });
+    const creator = new EmptyProjectRepositoryAuthority({
+      gitExecutable: GIT,
+      operationTimeoutMs: 5_000,
+      outputMaxBytes: 64 * 1024,
+      repositoryRoot,
+      resourceAdmission: resources,
+      storageNodeId: 'node-a',
+    });
+    const checkpoint = new RepositoryCheckpointAuthority({
+      ...REPOSITORY_VALIDATION_LIMITS,
+      gitExecutable: GIT,
+      maximumBundleBytes: 2 * 1024 * 1024,
+      operationRoot,
+      operationTimeoutMs: 5_000,
+      outputMaxBytes: 64 * 1024,
+      placementValidator: new CurrentPlacement(),
+      repositoryRoot,
+      resourceAdmission: resources,
+      storageNodeId: 'node-a',
+    });
+    try {
+      const creationReservation = await creator.reserve(projectId);
+      await creator.publish(creationReservation, plan);
+      await creationReservation.close();
+      const exactReservation = await checkpoint.reserveExactRepositoryOperation(projectId);
+      await checkpoint.verifyExactRepository(
+        exactReservation,
+        createRepositoryPlacementLease({
+          active: true,
+          generation: 1,
+          projectId,
+          repositoryStorageKey: plan.repositoryStorageKey,
+          storageNodeId: plan.storageNodeId,
+        }),
+      );
+      await assert.rejects(
+        checkpoint.verifyExactRepository(
+          exactReservation,
+          createRepositoryPlacementLease({
+            active: true,
+            generation: 2,
+            projectId,
+            repositoryStorageKey: plan.repositoryStorageKey,
+            storageNodeId: plan.storageNodeId,
+          }),
+        ),
+        (error: unknown) => error instanceof RepositoryCheckpointError
+          && error.code === 'invalid-checkpoint',
+      );
+      await exactReservation.close();
+    } finally {
+      await Promise.all([creator.close(), checkpoint.close()]);
+      await resources.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
   it('requires sibling operation and repository authority roots', async () => {
     const root = await mkdtemp(join(tmpdir(), 'claudian-checkpoint-roots-'));
     const repositoryRoot = join(root, 'repositories');
