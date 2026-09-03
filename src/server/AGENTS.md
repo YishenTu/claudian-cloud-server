@@ -16,7 +16,7 @@
 - `events/` streams durable Project invalidations. Process-local notification is only a wake-up mechanism, never event authority.
 - `transfer/` owns bounded authority-transfer artifact streaming after trusted ingress. Rejected incomplete uploads close their connection, and every acquired or late-arriving download stream is deterministically destroyed when transport cannot consume it. This scope never interprets checkpoint contents, derives lifecycle phase, or invents digest headers outside the package binding.
 - `health/` distinguishes liveness, readiness, and version without exposing secrets, storage paths, Project existence, or recovery details.
-- The server consumes package-owned wire v8 and Cloud binding v4 only from exact `@claudian-collab/protocol@4.1.3`. It never registers previous bindings in parallel, creates a compatibility shim/registry, or reinterprets old input as current input.
+- The server consumes package-owned wire v8 and Cloud binding v4 only from exact `@claudian-collab/protocol@4.1.4`. It never registers previous bindings in parallel, creates a compatibility shim/registry, or reinterprets old input as current input.
 - A v4 capability is advertised only after its complete transport-to-owner path and server gate pass. The exact package pin alone advertises nothing; partial JSON or streaming work remains absent.
 - LAN-source-only proposal and Host-acceptance operations remain on the dedicated LAN binding. The Cloud v4 router must not register them or infer a source direction through fallback mutation attempts.
 
