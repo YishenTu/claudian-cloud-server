@@ -116,6 +116,22 @@ function fail(code: 'cancelled' | 'dependency-failed' | 'state-conflict'): never
   throw new CoordinationError(code);
 }
 
+function restoredIdempotencyResponseJson(record: Extract<
+  CollabProjectBackupRecord,
+  { readonly kind: 'idempotency-result' }
+>): string {
+  if (record.value.operation !== 'revokeProjectInvitation') {
+    return record.value.responseJson;
+  }
+  try {
+    const response = collabControlOperationCodec('revokeProjectInvitation')
+      .decodeResponse(JSON.parse(record.value.responseJson) as unknown);
+    return JSON.stringify({ invitationId: response.invitationId });
+  } catch {
+    return fail('state-conflict');
+  }
+}
+
 function assertActive(signal: AbortSignal): void {
   if (signal.aborted) fail('cancelled');
 }
@@ -806,7 +822,7 @@ implements EnvironmentRestorePersistence {
                   record.value.operation,
                   record.value.idempotencyKey,
                   record.value.requestFingerprint,
-                  record.value.responseJson,
+                  restoredIdempotencyResponseJson(record),
                   record.value.createdAt,
                 ],
               );

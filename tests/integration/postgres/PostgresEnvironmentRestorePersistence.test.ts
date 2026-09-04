@@ -103,6 +103,15 @@ const JOIN_RESPONSE_JSON = JSON.stringify(
 const JOIN_RESULT_SHA256 = createHash('sha256')
   .update(JOIN_RESPONSE_JSON)
   .digest('hex');
+const REVOKE_INVITATION_RESPONSE_JSON = JSON.stringify(
+  collabControlOperationCodec('revokeProjectInvitation').decodeResponse({
+    invitationId: 'invitation-restored',
+    projectId: PROJECT_ID,
+    revision: 2,
+    revokedAt: '2026-08-29T00:00:01.000Z',
+    state: 'revoked',
+  }),
+);
 const SOURCE_METADATA = Object.freeze({
   authorityId: 'authority-cloud-one',
   authorityVolumeIdentity: 'volume-identity-one',
@@ -543,6 +552,20 @@ function minimumBackupRecords() {
           retirementId: 'retirement-one',
           terminalExpiresAt: EXPIRES_AT,
         }),
+      }),
+    }),
+    Object.freeze({
+      kind: 'idempotency-result' as const,
+      recordId: `${PROJECT_ID}:member-manager:revokeProjectInvitation:revoke-restored-key`,
+      revision: 1,
+      value: Object.freeze({
+        createdAt: '2026-08-29T00:00:01.000Z',
+        idempotencyKey: 'revoke-restored-key',
+        memberId: 'member-manager',
+        operation: 'revokeProjectInvitation' as const,
+        projectId: PROJECT_ID,
+        requestFingerprint: '7'.repeat(64),
+        responseJson: REVOKE_INVITATION_RESPONSE_JSON,
       }),
     }),
     Object.freeze({
@@ -1713,11 +1736,23 @@ describe('PostgresEnvironmentRestorePersistence', () => {
             WHERE project_id = $1`,
           [PROJECT_ID],
         );
+        const revokedInvitationReplay = await client.query(
+          `SELECT response_json
+             FROM claudian_cloud.idempotency_results
+            WHERE project_id = $1
+              AND member_id = 'member-manager'
+              AND operation = 'revokeProjectInvitation'
+              AND idempotency_key = 'revoke-restored-key'`,
+          [PROJECT_ID],
+        );
         await client.query('COMMIT');
         assert.deepEqual(activeCatalog.rows, [{
           generation: String(repository.placementGeneration),
           repository_storage_key: repository.repositoryStorageKey,
           storage_node_id: repository.storageNodeId,
+        }]);
+        assert.deepEqual(revokedInvitationReplay.rows, [{
+          response_json: { invitationId: 'invitation-restored' },
         }]);
       } finally {
         await client.end();
