@@ -408,6 +408,114 @@ describe('Project checkpoint persistence', () => {
     });
   });
 
+  it('captures the canonical response for a revoked invitation replay fact', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await seed(database);
+      const client = new Client({ connectionString: database.migrationUrl });
+      const store = coordination(database);
+      const invitationId = 'invitation-revoked-checkpoint';
+      const invitationExpiresAt = new Date(
+        Date.parse(CREATED_AT) + COLLAB_PROJECT_MEMBERSHIP_LIMITS.invitationTtlMs,
+      ).toISOString();
+      const replayExpiresAt = new Date(
+        Date.parse(CREATED_AT) + COLLAB_PROJECT_MEMBERSHIP_LIMITS.secretReplayTtlMs,
+      ).toISOString();
+      const revokedAt = new Date(Date.parse(CREATED_AT) + 1_000).toISOString();
+      try {
+        await client.connect();
+        await client.query('BEGIN');
+        await client.query(
+          "SELECT set_config('claudian_cloud.project_id', $1, true)",
+          [PROJECT_ID],
+        );
+        await client.query(
+          `INSERT INTO claudian_cloud.project_invitations (
+             project_id, invitation_id, issued_by_member_id, idempotency_key,
+             request_fingerprint, secret_sha256, state, revision, created_at,
+             expires_at, secret_replay_expires_at, terminal_at
+           ) VALUES ($1, $2, 'member-manager', 'invite-revoked-key',
+                     $3, $4, 'revoked', 2, $5, $6, $7, $8)`,
+          [
+            PROJECT_ID,
+            invitationId,
+            'c'.repeat(64),
+            'd'.repeat(64),
+            CREATED_AT,
+            invitationExpiresAt,
+            replayExpiresAt,
+            revokedAt,
+          ],
+        );
+        await client.query(
+          `INSERT INTO claudian_cloud.protected_invitation_envelopes (
+             project_id, invitation_id, encryption_algorithm, key_id,
+             key_version, nonce, ciphertext, tag, associated_data_sha256,
+             created_at, expires_at
+           ) VALUES ($1, $2, 'xchacha20-poly1305', 'encryption-key', 3,
+                     $3, $4, $5, $6, $7, $8)`,
+          [
+            PROJECT_ID,
+            invitationId,
+            Buffer.alloc(24, 1).toString('base64url'),
+            Buffer.from('ciphertext').toString('base64url'),
+            Buffer.alloc(16, 2).toString('base64url'),
+            'f'.repeat(64),
+            CREATED_AT,
+            invitationExpiresAt,
+          ],
+        );
+        await client.query(
+          `INSERT INTO claudian_cloud.idempotency_results (
+             project_id, member_id, operation, idempotency_key,
+             request_fingerprint, response_json, created_at
+           ) VALUES ($1, 'member-manager', 'revokeProjectInvitation',
+                     'revoke-invitation-checkpoint', $2, $3::jsonb, $4)`,
+          [
+            PROJECT_ID,
+            'e'.repeat(64),
+            JSON.stringify({ invitationId }),
+            revokedAt,
+          ],
+        );
+        await client.query('COMMIT');
+
+        const lease = await store.acquireProjectLease(PROJECT_ID);
+        try {
+          const records = await lease.withProjectScope(scope => (
+            scope.checkpoint.readProjectCheckpointRecords({
+              excludedOperationId: 'backup-one',
+              maximumCoordinationBytes: 1024 * 1024,
+              metadata,
+              profile: 'backup',
+              snapshotAt: revokedAt,
+            })
+          ), { snapshot: 'repeatable-read' });
+          const replay = records.find(record => (
+            record.kind === 'idempotency-result'
+            && record.value.operation === 'revokeProjectInvitation'
+            && record.value.idempotencyKey === 'revoke-invitation-checkpoint'
+          ));
+          assert.ok(replay?.kind === 'idempotency-result');
+          assert.equal(replay.value.responseJson, JSON.stringify(
+            collabControlOperationCodec('revokeProjectInvitation').decodeResponse({
+              invitationId,
+              projectId: PROJECT_ID,
+              revision: 2,
+              revokedAt,
+              state: 'revoked',
+            }),
+          ));
+        } finally {
+          await lease.close();
+        }
+      } finally {
+        await client.end().catch(() => undefined);
+        await store.close();
+      }
+    });
+  });
+
   it('fails before reading additional tables when the configured artifact ceiling is exceeded', async () => {
     await withPostgresTestDatabase(async database => {
       await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();

@@ -699,24 +699,39 @@ implements ProjectCheckpointPersistence {
     for await (const row of this.#queryRows<{
       readonly created_at: Date;
       readonly idempotency_key: string;
+      readonly invitation_id: string | null;
+      readonly invitation_revision: string | null;
+      readonly invitation_state: string | null;
+      readonly invitation_terminal_at: Date | null;
       readonly member_id: string;
       readonly operation: CollabControlOperation;
       readonly request_fingerprint: string;
       readonly response_json: unknown;
     }>(
-      `SELECT created_at, idempotency_key, member_id, operation,
-              request_fingerprint, response_json
-         FROM claudian_cloud.idempotency_results
-        WHERE project_id = $1
-        ORDER BY member_id, operation, idempotency_key`,
+      `SELECT result.created_at, result.idempotency_key, result.member_id,
+              result.operation, result.request_fingerprint,
+              result.response_json, invitation.invitation_id,
+              invitation.revision AS invitation_revision,
+              invitation.state AS invitation_state,
+              invitation.terminal_at AS invitation_terminal_at
+         FROM claudian_cloud.idempotency_results AS result
+         LEFT JOIN claudian_cloud.project_invitations AS invitation
+           ON result.operation = 'revokeProjectInvitation'
+          AND invitation.project_id = result.project_id
+          AND invitation.invitation_id = result.response_json ->> 'invitationId'
+        WHERE result.project_id = $1
+        ORDER BY result.member_id, result.operation, result.idempotency_key`,
       [this.#projectId],
       records,
     )) {
       let responseJson: string;
       try {
+        const response = row.operation === 'revokeProjectInvitation'
+          ? this.#revokedInvitationResponse(row)
+          : row.response_json;
         responseJson = JSON.stringify(
           collabControlOperationCodec(row.operation).decodeResponse(
-            row.response_json,
+            response,
           ),
         );
       } catch {
@@ -835,6 +850,35 @@ implements ProjectCheckpointPersistence {
         }),
       }),
     );
+  }
+
+  #revokedInvitationResponse(row: Readonly<{
+    readonly invitation_id: string | null;
+    readonly invitation_revision: string | null;
+    readonly invitation_state: string | null;
+    readonly invitation_terminal_at: Date | null;
+    readonly response_json: unknown;
+  }>): unknown {
+    if (
+      typeof row.response_json !== 'object'
+      || row.response_json === null
+      || Array.isArray(row.response_json)
+      || Object.keys(row.response_json).length !== 1
+      || !Object.hasOwn(row.response_json, 'invitationId')
+      || typeof (row.response_json as Record<string, unknown>).invitationId !== 'string'
+      || row.invitation_id
+        !== (row.response_json as Record<string, unknown>).invitationId
+      || row.invitation_state !== 'revoked'
+      || row.invitation_terminal_at === null
+      || row.invitation_revision === null
+    ) return dependencyFailure();
+    return Object.freeze({
+      invitationId: row.invitation_id,
+      projectId: this.#projectId,
+      revision: safeInteger(row.invitation_revision),
+      revokedAt: iso(row.invitation_terminal_at),
+      state: 'revoked',
+    });
   }
 
   async #readMembershipIdempotencyTombstones(
