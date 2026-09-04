@@ -86,7 +86,10 @@ export interface PublishedEnvironmentBackupSourceOptions {
     'inspectAttempt' | 'readArtifact'
   >;
   readonly keyReferences?: Readonly<{
-    verify(records: readonly CollabProjectBackupRecord[]): Promise<void>;
+    verify(
+      records: readonly CollabProjectBackupRecord[],
+      profile?: 'project' | 'terminal',
+    ): Promise<void>;
   }>;
 }
 
@@ -208,7 +211,7 @@ implements
           !== input.terminalProject.artifactByteCount
       ) return invalid();
       if (this.#keyReferences === undefined) return invalid();
-      await this.#keyReferences.verify(artifact.records);
+      await this.#keyReferences.verify(artifact.records, 'terminal');
       return artifact;
     } catch (error: unknown) {
       if (error instanceof EnvironmentBackupCatalogVerifierError) throw error;
@@ -347,7 +350,7 @@ implements
       const records = decodeCollabProjectBackupCheckpointCoordinationNdjson(
         coordinationNdjson,
       );
-      await this.#keyReferences?.verify(records);
+      await this.#keyReferences?.verify(records, 'project');
       const catalogRecords = await this.#checkpoint.readPublishedOutboundRecords({
         expectedProfile: 'backup',
         expiresAt: input.project.expiresAt,

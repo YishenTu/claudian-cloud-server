@@ -35,6 +35,8 @@ export interface ClaimCustodyKeyReferenceVerifierOptions {
   readonly membershipCustody?: Pick<ProtectedSecretCustody, 'open'>;
 }
 
+export type ClaimCustodyKeyReferenceProfile = 'project' | 'terminal';
+
 interface CandidateRecord {
   readonly kind?: unknown;
   readonly value?: unknown;
@@ -68,6 +70,15 @@ function rawPublicKey(value: unknown): string {
     || decoded.toString('base64url') !== candidate
   ) return invalid();
   return candidate;
+}
+
+function timestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  try {
+    return new Date(value).toISOString() === value;
+  } catch {
+    return false;
+  }
 }
 
 interface ReceiptKeyReference {
@@ -111,7 +122,10 @@ export class ClaimCustodyKeyReferenceVerifier {
     this.#membershipCustody = options.membershipCustody;
   }
 
-  async verify(records: readonly CandidateRecord[]): Promise<void> {
+  async verify(
+    records: readonly CandidateRecord[],
+    profile: ClaimCustodyKeyReferenceProfile = 'project',
+  ): Promise<void> {
     const encryption = new Set<string>();
     const receipt = new Set<string>();
     const receiptPublicKeys = new Map<string, string>();
@@ -119,6 +133,9 @@ export class ClaimCustodyKeyReferenceVerifier {
     const transferDirections = new Map<string, 'cloud-to-lan' | 'lan-to-cloud'>();
     const cloudTargetKeys = new Map<string, ReceiptKeyReference>();
     const lanTargetKeys = new Map<string, ReceiptKeyReference>();
+    const protectedClaimReceiptKeys = new Map<string, string>();
+    const terminalTargetReceiptKeys = new Map<string, string>();
+    const consumedTerminalReceiptKeys = new Set<string>();
     const relinquishmentProofs = new Map<string, unknown>();
     for (const item of records) {
       if (item.kind === 'lifecycle-journal') {
@@ -224,12 +241,43 @@ export class ClaimCustodyKeyReferenceVerifier {
         if (!receiptPublicKeys.has(`${transferId}\0${receiptKeyId}`)) {
           return invalid();
         }
+        const existing = protectedClaimReceiptKeys.get(transferId);
+        if (existing !== undefined && existing !== receiptKeyId) return invalid();
+        protectedClaimReceiptKeys.set(transferId, receiptKeyId);
+        if (profile === 'terminal') {
+          const terminal = terminalTargetReceiptKeys.get(transferId);
+          if (terminal !== undefined && terminal !== receiptKeyId) return invalid();
+          terminalTargetReceiptKeys.set(transferId, receiptKeyId);
+        }
         encryption.add(keyId(item.value, 'keyId'));
+      } else if (
+        profile === 'terminal'
+        && item.kind === 'transfer-redemption-receipt'
+      ) {
+        const value = record(item.value);
+        const receipt = record(value.receipt);
+        const transferId = keyId(receipt, 'transferId');
+        const receiptKeyId = keyId(receipt, 'receiptKeyId');
+        if (
+          !timestamp(value.acknowledgedAt)
+          || transferDirections.get(transferId) !== 'cloud-to-lan'
+        ) return invalid();
+        const existing = terminalTargetReceiptKeys.get(transferId);
+        if (existing !== undefined && existing !== receiptKeyId) return invalid();
+        terminalTargetReceiptKeys.set(transferId, receiptKeyId);
       } else if (
         item.kind === 'protected-invitation-envelope'
         || item.kind === 'protected-claim-override-envelope'
       ) {
         encryption.add(keyId(item.value, 'keyId'));
+      }
+    }
+    if (profile === 'terminal') {
+      for (const transferId of terminalTargetReceiptKeys.keys()) {
+        if (
+          transferDirections.get(transferId) !== 'cloud-to-lan'
+          || relinquishmentProofs.has(transferId)
+        ) return invalid();
       }
     }
     for (const [transferId, reference] of cloudTargetKeys) {
@@ -244,7 +292,24 @@ export class ClaimCustodyKeyReferenceVerifier {
       if (direction !== 'cloud-to-lan' || relinquishmentProofs.has(transferId)) {
         continue;
       }
-      const target = lanTargetKeys.get(transferId);
+      let target = lanTargetKeys.get(transferId);
+      const protectedClaimReceiptKey = protectedClaimReceiptKeys.get(transferId);
+      if (
+        target !== undefined
+        && protectedClaimReceiptKey !== undefined
+        && target.receiptKeyId !== protectedClaimReceiptKey
+      ) return invalid();
+      const terminalTargetReceiptKey = terminalTargetReceiptKeys.get(transferId);
+      if (target === undefined && terminalTargetReceiptKey !== undefined) {
+        const publicKey = receiptPublicKeys.get(
+          `${transferId}\0${terminalTargetReceiptKey}`,
+        );
+        if (publicKey === undefined) return invalid();
+        target = Object.freeze({
+          publicKey,
+          receiptKeyId: terminalTargetReceiptKey,
+        });
+      }
       if (target === undefined) {
         if ([...receiptPublicKeys.keys()].some(identity => (
           identity.startsWith(`${transferId}\0`)
@@ -256,6 +321,11 @@ export class ClaimCustodyKeyReferenceVerifier {
       const sourceMatches = [...receiptPublicKeys].filter(([identity]) => (
         identity.startsWith(`${transferId}\0`) && identity !== targetIdentity
       ));
+      if (profile === 'terminal') {
+        if (sourceMatches.length !== 0) return invalid();
+        consumedTerminalReceiptKeys.add(targetIdentity);
+        continue;
+      }
       if (sourceMatches.length > 1) return invalid();
       const source = sourceMatches[0];
       if (source !== undefined) {
@@ -265,6 +335,12 @@ export class ClaimCustodyKeyReferenceVerifier {
         });
       }
     }
+    if (
+      profile === 'terminal'
+      && [...receiptPublicKeys.keys()].some(identity => (
+        !consumedTerminalReceiptKeys.has(identity)
+      ))
+    ) return invalid();
     this.#keyring.assertReferences({
       encryptionKeyIds: [...encryption].sort(),
       receiptKeyIds: [...receipt].sort(),
@@ -365,7 +441,7 @@ implements BackupExportCheckpointSource {
     input: Parameters<BackupExportCheckpointSource['snapshot']>[0],
   ): ReturnType<BackupExportCheckpointSource['snapshot']> {
     const snapshot = await this.#source.snapshot(input);
-    await this.#verifier.verify(snapshot.records);
+    await this.#verifier.verify(snapshot.records, 'project');
     return snapshot;
   }
 }

@@ -449,6 +449,168 @@ describe('ClaimCustodyKeyReferenceVerifier', () => {
     assert.deepEqual(opened, [records[0]?.value, records[1]?.value]);
   });
 
+  it('opens retained Cloud-to-LAN terminal claims after recovery removal', async () => {
+    const calls: unknown[] = [];
+    const opened: unknown[] = [];
+    const verifier = new ClaimCustodyKeyReferenceVerifier({
+      custody: {
+        open: envelope => {
+          opened.push(envelope);
+          return Promise.resolve('opaque-claim');
+        },
+      },
+      keyring: {
+        assertReferences: input => calls.push(input),
+        assertReceiptPublicKey: () => assert.fail(
+          'the LAN target key is not a Cloud signing key',
+        ),
+      },
+    });
+    const envelope = {
+      keyId: 'encryption-terminal',
+      receiptKeyId: 'lan-target-key',
+      transferId: 'transfer-terminal',
+    };
+
+    const terminalRecords = [{
+      kind: 'lifecycle-journal',
+      value: {
+        direction: 'cloud-to-lan',
+        operationId: 'transfer-terminal',
+        operationKind: 'authority-transfer',
+      },
+    }, {
+      kind: 'transfer-receipt-key',
+      value: {
+        receiptKeyId: 'lan-target-key',
+        receiptPublicKey: Buffer.alloc(32, 4).toString('base64url'),
+        transferId: 'transfer-terminal',
+      },
+    }, {
+      kind: 'protected-claim-envelope',
+      value: envelope,
+    }];
+
+    await verifier.verify(terminalRecords, 'terminal');
+
+    assert.deepEqual(calls, [{
+      encryptionKeyIds: ['encryption-terminal'],
+      receiptKeyIds: [],
+    }]);
+    assert.deepEqual(opened, [envelope]);
+
+    await assert.rejects(
+      verifier.verify([terminalRecords[0] as NonNullable<
+        typeof terminalRecords[0]
+      >, {
+        kind: 'authority-transfer-recovery',
+        value: {
+          relinquishmentProof: null,
+          sourceAuthority: { generation: 1, kind: 'cloud' },
+          targetAuthority: { generation: 2, kind: 'lan' },
+          targetEvidence: null,
+          transferId: 'transfer-terminal',
+        },
+      }, ...terminalRecords.slice(1)]),
+      /claim-custody-key-reference\.error\.invalid-record/u,
+    );
+  });
+
+  it('uses an acknowledged terminal receipt after every envelope is scrubbed', async () => {
+    const calls: unknown[] = [];
+    const verifier = new ClaimCustodyKeyReferenceVerifier({
+      custody: { open: () => assert.fail('no protected envelope remains') },
+      keyring: {
+        assertReferences: input => calls.push(input),
+        assertReceiptPublicKey: () => assert.fail(
+          'the LAN target key is not a Cloud signing key',
+        ),
+      },
+    });
+
+    const terminalRecords = [{
+      kind: 'lifecycle-journal',
+      value: {
+        direction: 'cloud-to-lan',
+        operationId: 'transfer-redeemed',
+        operationKind: 'authority-transfer',
+      },
+    }, {
+      kind: 'transfer-receipt-key',
+      value: {
+        receiptKeyId: 'lan-target-key',
+        receiptPublicKey: Buffer.alloc(32, 4).toString('base64url'),
+        transferId: 'transfer-redeemed',
+      },
+    }, {
+      kind: 'transfer-redemption-receipt',
+      value: {
+        acknowledgedAt: '2026-09-04T00:00:00.000Z',
+        receipt: {
+          receiptKeyId: 'lan-target-key',
+          transferId: 'transfer-redeemed',
+        },
+      },
+    }];
+
+    await verifier.verify(terminalRecords, 'terminal');
+
+    assert.deepEqual(calls, [{
+      encryptionKeyIds: [],
+      receiptKeyIds: [],
+    }]);
+    await assert.rejects(
+      verifier.verify([...terminalRecords, {
+        kind: 'transfer-receipt-key',
+        value: {
+          receiptKeyId: 'orphan-cloud-source-key',
+          receiptPublicKey: Buffer.alloc(32, 5).toString('base64url'),
+          transferId: 'transfer-redeemed',
+        },
+      }], 'terminal'),
+      /claim-custody-key-reference\.error\.invalid-record/u,
+    );
+
+    for (const records of [[{
+      kind: 'lifecycle-journal',
+      value: {
+        direction: 'cloud-to-lan',
+        operationId: 'transfer-unacknowledged',
+        operationKind: 'authority-transfer',
+      },
+    }, {
+      kind: 'transfer-redemption-receipt',
+      value: {
+        acknowledgedAt: null,
+        receipt: {
+          receiptKeyId: 'lan-target-key',
+          transferId: 'transfer-unacknowledged',
+        },
+      },
+    }], [{
+      kind: 'lifecycle-journal',
+      value: {
+        direction: 'lan-to-cloud',
+        operationId: 'transfer-wrong-direction',
+        operationKind: 'authority-transfer',
+      },
+    }, {
+      kind: 'transfer-redemption-receipt',
+      value: {
+        acknowledgedAt: '2026-09-04T00:00:00.000Z',
+        receipt: {
+          receiptKeyId: 'lan-target-key',
+          transferId: 'transfer-wrong-direction',
+        },
+      },
+    }]]) {
+      await assert.rejects(
+        verifier.verify(records, 'terminal'),
+        /claim-custody-key-reference\.error\.invalid-record/u,
+      );
+    }
+  });
+
   it('fails closed on a malformed referenced record', async () => {
     const verifier = new ClaimCustodyKeyReferenceVerifier({
       custody: { open: () => Promise.resolve('opaque-claim') },

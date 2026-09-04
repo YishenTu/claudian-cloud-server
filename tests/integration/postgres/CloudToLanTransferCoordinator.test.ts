@@ -499,6 +499,70 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
           request: { projectId: PROJECT_ID, transferId: begun.transferId },
         });
         assert.equal(offlineClaim.expiresAt, completed.expiresAt);
+        const offlineEnvelope = await store.withProjectScope(
+          PROJECT_ID,
+          scope => scope.portability.getProtectedClaimEnvelope(
+            begun.transferId,
+            OFFLINE_ID,
+          ),
+        );
+        assert.ok(offlineEnvelope);
+        await coordinator.acknowledgeRedemption({
+          principalId: OFFLINE_PRINCIPAL,
+          request: {
+            idempotencyKey: 'ack-offline-intent-real',
+            projectId: PROJECT_ID,
+            receipt: {
+              checkpointSha256: CHECKPOINT_SHA,
+              claimSha256: offlineEnvelope.associatedData.claimSha256,
+              memberId: OFFLINE_ID,
+              operationIntentId: 'claim-offline-intent-real',
+              projectId: PROJECT_ID,
+              receiptId: 'redemption-receipt-offline-real',
+              receiptKeyId: 'receipt-key-target-real',
+              redeemedAt: completed.updatedAt,
+              signature: SIGNATURE,
+              signatureAlgorithm: 'ed25519',
+              targetAuthorityGeneration: 5,
+              transferId: begun.transferId,
+            },
+            transferId: begun.transferId,
+          },
+        });
+        assert.equal(await store.withProjectScope(
+          PROJECT_ID,
+          scope => scope.portability.getProtectedClaimEnvelope(
+            begun.transferId,
+            OFFLINE_ID,
+          ),
+        ), undefined);
+        const terminalReferences: unknown[] = [];
+        await new ActiveClaimCustodyKeyReferenceGate({
+          coordination: store,
+          metadata: {
+            read: () => Promise.resolve({
+              authorityId: 'authority-real',
+              authorityVolumeIdentity: 'volume-real',
+              coordinationSchemaVersion: 11,
+              repositoryFormatVersion: 1,
+              restoreEpoch: 1,
+              serverBuild: 'cloud-build-real',
+            }),
+          },
+          verifier: new ClaimCustodyKeyReferenceVerifier({
+            custody: custody(claims),
+            keyring: {
+              assertReceiptPublicKey: () => assert.fail(
+                'terminal LAN target keys are not Cloud signing keys',
+              ),
+              assertReferences: references => terminalReferences.push(references),
+            },
+          }),
+        }).verifyAll(new AbortController().signal);
+        assert.deepEqual(terminalReferences, [{
+          encryptionKeyIds: [],
+          receiptKeyIds: [],
+        }]);
         assert.deepEqual(await coordinator.acknowledgeRedemption({
           principalId: MANAGER_PRINCIPAL,
           request: {
