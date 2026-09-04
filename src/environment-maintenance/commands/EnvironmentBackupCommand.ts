@@ -86,7 +86,10 @@ export interface EnvironmentBackupCommandOptions {
     recoverAll(): Promise<void>;
   }>;
   readonly terminalRecords: Readonly<{
-    verify(records: readonly TerminalProjectContinuityRecord[]): Promise<void>;
+    verify(
+      records: readonly TerminalProjectContinuityRecord[],
+      profile?: 'project' | 'terminal',
+    ): Promise<void>;
   }>;
 }
 
@@ -256,7 +259,7 @@ export class EnvironmentBackupCommand {
       for (const projectId of terminalProjects) {
         active(input.signal);
         const records = await this.#projects.readTerminalRecords(projectId);
-        await this.#terminalRecords.verify(records);
+        await this.#terminalRecords.verify(records, 'terminal');
         const artifact = createTerminalProjectContinuityArtifact(
           projectId,
           records,

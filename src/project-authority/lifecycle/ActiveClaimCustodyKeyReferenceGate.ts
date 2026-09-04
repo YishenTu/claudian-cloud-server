@@ -50,7 +50,10 @@ export interface ActiveClaimCustodyKeyReferenceGateOptions {
     read(): Promise<ActiveClaimCustodyKeyReferenceMetadata>;
   }>;
   readonly verifier: Readonly<{
-    verify(records: readonly unknown[]): Promise<void>;
+    verify(
+      records: readonly unknown[],
+      profile?: 'project' | 'terminal',
+    ): Promise<void>;
   }>;
 }
 
@@ -199,7 +202,7 @@ export class ActiveClaimCustodyKeyReferenceGate {
       failure = error;
     }
     if (failure !== undefined || records === undefined) fail();
-    await this.#verifier.verify(records);
+    await this.#verifier.verify(records, 'project');
   }
 
   async #verifyTerminalProject(
@@ -226,7 +229,7 @@ export class ActiveClaimCustodyKeyReferenceGate {
       failure = error;
     }
     if (failure !== undefined || records === undefined) fail();
-    await this.#verifier.verify(records);
+    await this.#verifier.verify(records, 'terminal');
   }
 
   async #verifyRecoveryTransfer(
@@ -299,7 +302,7 @@ export class ActiveClaimCustodyKeyReferenceGate {
     }
     if (failure !== undefined) fail();
     if (records === undefined) fail();
-    await this.#verifier.verify(records);
+    await this.#verifier.verify(records, 'project');
     return true;
   }
 }
