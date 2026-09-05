@@ -154,6 +154,7 @@ export interface ProjectInvitationPersistence {
     readonly status:
       | 'conflict'
       | 'created'
+      | 'permanently-stale'
       | 'quota'
       | 'replayed'
       | 'replay-expired'
@@ -169,6 +170,7 @@ export interface ProjectInvitationPersistence {
     readonly record?: ProjectInvitationRecord;
     readonly status:
       | 'conflict'
+      | 'permanently-stale'
       | 'replayed'
       | 'revoked'
       | 'stale-generation'
@@ -192,6 +194,7 @@ export type MembershipAdministrationStatus =
   | 'conflict'
   | 'created'
   | 'final-manager'
+  | 'permanently-stale'
   | 'replayed'
   | 'stale';
 
@@ -361,6 +364,7 @@ export interface ProjectTransferredMembershipClaimAdministrationPersistence {
       | 'authorization-denied'
       | 'conflict'
       | 'created'
+      | 'permanently-stale'
       | 'replayed'
       | 'replay-expired'
       | 'stale';
@@ -386,6 +390,7 @@ export interface ProjectTransferredMembershipClaimAdministrationPersistence {
       | 'authorization-denied'
       | 'conflict'
       | 'created'
+      | 'permanently-stale'
       | 'replayed'
       | 'stale';
   }>>;
@@ -446,6 +451,7 @@ export interface ProjectMemberRemovalPersistence {
       | 'conflict'
       | 'created'
       | 'final-manager'
+      | 'permanently-stale'
       | 'replayed'
       | 'stale';
   }>>;

@@ -23,6 +23,7 @@ import {
   ProjectRequestAuthority,
   type ProjectRequestAuthorityCoordination,
   type ProjectRequestRepository,
+  type ProjectRequestHeadValidationInput,
 } from '../../src/project-authority/requests/ProjectRequestAuthority.js';
 import { createDevelopmentIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
 import { createRepositoryPlacementLease } from '../../src/repositories/RepositoryPlacement.js';
@@ -224,7 +225,7 @@ class MemoryCoordination implements ProjectRequestAuthorityCoordination {
         const event = {
           ...input,
           projectId: 'project-a',
-          protocolVersion: 8 as const,
+          protocolVersion: 9 as const,
           sequence: this.collaboration.events.length + 1,
         } as CollabCloudProjectEvent;
         this.collaboration.events.push(event);
@@ -289,12 +290,16 @@ class MemoryRepository implements ProjectRequestRepository {
     };
   }
 
-  async validateRequestHead(
-    input: Parameters<ProjectRequestRepository['validateRequestHead']>[0],
-  ): Promise<void> {
-    this.validations += 1;
-    await input.revalidateAuthority();
+  withRequestHeadValidation<T>(
+    _projectId: CollabProjectId,
+    operation: (validateHead: (input: ProjectRequestHeadValidationInput) => Promise<void>) => Promise<T>,
+  ): Promise<T> {
+    return operation(async input => {
+      this.validations += 1;
+      await input.revalidateAuthority();
+    });
   }
+
 }
 
 describe('Project Request authority', () => {

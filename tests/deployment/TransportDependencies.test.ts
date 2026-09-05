@@ -5,9 +5,9 @@ import { describe, it } from 'node:test';
 
 const repositoryRoot = resolve(import.meta.dirname, '../..');
 const protocolPackageName = '@claudian-collab/protocol';
-const protocolVersion = '4.1.4';
-const protocolRegistryArtifact = 'https://registry.npmjs.org/@claudian-collab/protocol/-/protocol-4.1.4.tgz';
-const protocolIntegrity = 'sha512-bf9fBnScpuWEbRism3ng6FUP35TRnCJfAQOgooQxQr1aOGZU2MTYzq6ISDoLkDUmQynQJBxgH8p8svgRo7HV9g==';
+const protocolVersion = '4.2.0';
+const protocolRegistryArtifact = 'https://registry.npmjs.org/@claudian-collab/protocol/-/protocol-4.2.0.tgz';
+const protocolIntegrity = 'sha512-9RDTJpbYNqoxgn3SyybJ3Y/n/Ujulww7IfSBjN4RY0qPz7ca7M7SlmsFY7OhUwkenaEubiUGoYu9A2jFewMeNQ==';
 
 interface PackageManifest {
   readonly dependencies: Readonly<Record<string, string>>;
@@ -78,8 +78,8 @@ describe('Cloud transport dependency baseline', () => {
   it('loads the Step 14 contract only from the exact installed registry artifact', async () => {
     const protocol = await import('@claudian-collab/protocol');
 
-    assert.equal(protocol.COLLAB_PROTOCOL_VERSION, 8);
-    assert.equal(protocol.COLLAB_CLOUD_BINDING_VERSION, 4);
+    assert.equal(protocol.COLLAB_PROTOCOL_VERSION, 9);
+    assert.equal(protocol.COLLAB_CLOUD_BINDING_VERSION, 5);
     assert.equal(protocol.COLLAB_PROJECT_BACKUP_COORDINATION_FORMAT_VERSION, 3);
     assert.deepEqual(protocol.COLLAB_PROJECT_MEMBERSHIP_OPERATIONS, [
       'createCloudProject',

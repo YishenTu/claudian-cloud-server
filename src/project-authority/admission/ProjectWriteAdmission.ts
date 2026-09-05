@@ -144,6 +144,17 @@ export class ProjectWriteAdmission {
     ));
   }
 
+  runAfterPreflight<T>(
+    principal: IngressPrincipal,
+    projectId: CollabProjectId,
+    operation: (write: AuthorizedProjectWrite) => Promise<T>,
+    options: AcquireProjectLeaseOptions = {},
+  ): Promise<T> {
+    return this.#track(options, signal => this.#run(
+      principal, projectId, operation, signal, false,
+    ));
+  }
+
   preflight(
     principal: IngressPrincipal,
     projectId: CollabProjectId,
@@ -185,6 +196,7 @@ export class ProjectWriteAdmission {
     projectId: CollabProjectId,
     operation: (write: AuthorizedProjectWrite) => Promise<T>,
     signal: AbortSignal,
+    allowRecovery = true,
   ): Promise<T> {
     let recovered = false;
     for (;;) {
@@ -212,7 +224,8 @@ export class ProjectWriteAdmission {
           || recoveryState.lifecycle !== undefined
         ) {
           if (
-            recovered
+            !allowRecovery
+            || recovered
             || recoveryState.bootstrap?.state === 'recovery-required'
             || recoveryState.accept?.phase === 'recovery-required'
             || recoveryState.lifecycle?.state === 'recovery-required'

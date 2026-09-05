@@ -18,6 +18,7 @@ import {
   type UpdateMyRequestMetadataResponse,
 } from '@claudian-collab/protocol';
 
+import { OperationDrain } from '../OperationDrain.js';
 import { CoordinationError } from '../../coordination/CoordinationError.js';
 import type { ProjectScope } from '../../coordination/ProjectCoordination.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
@@ -245,6 +246,7 @@ export class ProjectRequestAuthority {
   readonly #createRelationId: () => string;
   readonly #createRequestId: () => string;
   readonly #now: () => Date;
+  readonly #publications = new OperationDrain();
   readonly #readAdmission: ProjectCollaborationReadAdmission;
   readonly #repository: ProjectRequestRepository;
 
@@ -263,6 +265,7 @@ export class ProjectRequestAuthority {
 
   async close(): Promise<void> {
     await Promise.all([
+      this.#publications.close(),
       this.#admission.close(),
       this.#readAdmission.close(),
     ]);
@@ -583,7 +586,17 @@ export class ProjectRequestAuthority {
     }
   }
 
-  async ensureMyRequest(
+  ensureMyRequest(
+    principal: IngressPrincipal,
+    request: EnsureMyRequestRequest,
+    options: Readonly<{ readonly signal?: AbortSignal }> = {},
+  ): Promise<EnsureMyRequestResponse> {
+    return this.#publications.run(options, signal => (
+      this.#ensureMyRequest(principal, request, { signal })
+    )).catch(mapInfrastructureError);
+  }
+
+  async #ensureMyRequest(
     principal: IngressPrincipal,
     request: EnsureMyRequestRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
@@ -605,116 +618,121 @@ export class ProjectRequestAuthority {
         headOid: request.headOid,
         projectId: request.projectId,
       });
-      return await this.#admission.run(
-        principal,
+      await this.#admission.preflight(principal, request.projectId, options);
+      return await this.#repository.withRequestHeadValidation(
         request.projectId,
-        async write => {
-          const identity = {
-            idempotencyKey: request.idempotencyKey,
-            memberId: write.memberId,
-            operation: 'ensureMyRequest' as const,
-            requestFingerprint,
-          };
-          const replay = await write.transact(scope => (
-            scope.collaboration.idempotency.find(identity)
-          ));
-          if (replay.kind === 'conflict') {
-            throw domainError('idempotency-conflict', 'request-idempotency-key-reused');
-          }
-          if (replay.kind === 'replay') return decodeEnsureResponse(replay.response);
-          if (write.expectedMainOid !== request.expectedMainOid) {
-            throw domainError('stale-main', 'request-main-not-expected', true);
-          }
-          await this.#repository.validateRequestHead({
-            expectedMainOid: write.expectedMainOid,
-            headOid: request.headOid,
-            memberId: write.memberId,
-            personalRef: collabMemberRef(write.memberId),
-            placement: write.placement,
-            projectId: write.projectId,
-            revalidateAuthority: write.revalidate,
-            signal: write.signal,
-          });
-          return write.transact(async scope => {
-            const concurrent = await scope.collaboration.idempotency.find(identity);
-            if (concurrent.kind === 'conflict') {
+        validateHead => this.#admission.runAfterPreflight(
+          principal,
+          request.projectId,
+          async write => {
+            const identity = {
+              idempotencyKey: request.idempotencyKey,
+              memberId: write.memberId,
+              operation: 'ensureMyRequest' as const,
+              requestFingerprint,
+            };
+            const replay = await write.transact(scope => (
+              scope.collaboration.idempotency.find(identity)
+            ));
+            if (replay.kind === 'conflict') {
               throw domainError('idempotency-conflict', 'request-idempotency-key-reused');
             }
-            if (concurrent.kind === 'replay') {
-              return decodeEnsureResponse(concurrent.response);
+            if (replay.kind === 'replay') return decodeEnsureResponse(replay.response);
+            if (write.expectedMainOid !== request.expectedMainOid) {
+              throw domainError('stale-main', 'request-main-not-expected', true);
             }
-            const relations = await this.#resolveRelations(scope, parsed.references);
-            const existing = await scope.collaboration.requests.findOpenByMember(
-              write.memberId,
-            );
-            const occurredAt = this.#now().toISOString();
-            let changed = false;
-            let result;
-            if (existing === undefined) {
-              result = await scope.collaboration.requests.create({
-                createdAt: occurredAt,
-                description,
-                firstBaseOid: write.expectedMainOid,
-                latestHeadOid: request.headOid,
-                memberId: write.memberId,
-                requestId: this.#createRequestId(),
-              });
-              await scope.collaboration.requests.replacePendingRelations({
-                actorMemberId: write.memberId,
-                commitOid: request.headOid,
-                relations,
-                requestId: result.id,
-                updatedAt: occurredAt,
-              });
-              result = await scope.collaboration.requests.find(result.id) ?? result;
-              changed = true;
-            } else if (
-              existing.latestHeadOid === request.headOid
-              && existing.description === description
-              && sameRelations(existing.ticketRelations, relations)
-            ) {
-              result = existing;
-            } else {
-              await scope.collaboration.requests.replacePendingRelations({
-                actorMemberId: write.memberId,
-                commitOid: request.headOid,
-                relations,
-                requestId: existing.id,
-                updatedAt: occurredAt,
-              });
-              result = await scope.collaboration.requests.updateOpen({
-                description,
-                expectedRevision: existing.revision,
-                latestHeadOid: request.headOid,
-                requestId: existing.id,
-                updatedAt: occurredAt,
-              });
-              if (result === undefined) {
-                throw domainError('stale-request-head', 'request-changed', true);
-              }
-              changed = true;
-            }
-            const response = { mainOid: write.expectedMainOid, request: result };
-            if (changed) {
-              await scope.appendProjectEvent({
-                kind: 'request.updated',
-                occurredAt,
-                payload: { requestId: result.id },
-              });
-            }
-            const stored = await scope.collaboration.idempotency.store({
-              ...identity,
-              createdAt: occurredAt,
-              response: { ...response },
+            await validateHead({
+              expectedMainOid: write.expectedMainOid,
+              headOid: request.headOid,
+              memberId: write.memberId,
+              personalRef: collabMemberRef(write.memberId),
+              placement: write.placement,
+              projectId: write.projectId,
+              revalidateAuthority: write.revalidate,
+              signal: write.signal,
             });
-            if (stored.kind === 'conflict') {
-              throw domainError('idempotency-conflict', 'request-idempotency-key-reused');
-            }
-            return stored.kind === 'replay'
-              ? decodeEnsureResponse(stored.response)
-              : response;
-          });
-        },
+            return write.transact(async scope => {
+              const concurrent = await scope.collaboration.idempotency.find(identity);
+              if (concurrent.kind === 'conflict') {
+                throw domainError('idempotency-conflict', 'request-idempotency-key-reused');
+              }
+              if (concurrent.kind === 'replay') {
+                return decodeEnsureResponse(concurrent.response);
+              }
+              const relations = await this.#resolveRelations(scope, parsed.references);
+              const existing = await scope.collaboration.requests.findOpenByMember(
+                write.memberId,
+              );
+              const occurredAt = this.#now().toISOString();
+              let changed = false;
+              let result;
+              if (existing === undefined) {
+                result = await scope.collaboration.requests.create({
+                  createdAt: occurredAt,
+                  description,
+                  firstBaseOid: write.expectedMainOid,
+                  latestHeadOid: request.headOid,
+                  memberId: write.memberId,
+                  requestId: this.#createRequestId(),
+                });
+                await scope.collaboration.requests.replacePendingRelations({
+                  actorMemberId: write.memberId,
+                  commitOid: request.headOid,
+                  relations,
+                  requestId: result.id,
+                  updatedAt: occurredAt,
+                });
+                result = await scope.collaboration.requests.find(result.id) ?? result;
+                changed = true;
+              } else if (
+                existing.latestHeadOid === request.headOid
+                && existing.description === description
+                && sameRelations(existing.ticketRelations, relations)
+              ) {
+                result = existing;
+              } else {
+                await scope.collaboration.requests.replacePendingRelations({
+                  actorMemberId: write.memberId,
+                  commitOid: request.headOid,
+                  relations,
+                  requestId: existing.id,
+                  updatedAt: occurredAt,
+                });
+                result = await scope.collaboration.requests.updateOpen({
+                  description,
+                  expectedRevision: existing.revision,
+                  latestHeadOid: request.headOid,
+                  requestId: existing.id,
+                  updatedAt: occurredAt,
+                });
+                if (result === undefined) {
+                  throw domainError('stale-request-head', 'request-changed', true);
+                }
+                changed = true;
+              }
+              const response = { mainOid: write.expectedMainOid, request: result };
+              if (changed) {
+                await scope.appendProjectEvent({
+                  kind: 'request.updated',
+                  occurredAt,
+                  payload: { requestId: result.id },
+                });
+              }
+              const stored = await scope.collaboration.idempotency.store({
+                ...identity,
+                createdAt: occurredAt,
+                response: { ...response },
+              });
+              if (stored.kind === 'conflict') {
+                throw domainError('idempotency-conflict', 'request-idempotency-key-reused');
+              }
+              return stored.kind === 'replay'
+                ? decodeEnsureResponse(stored.response)
+                : response;
+            });
+          },
+          options,
+        ),
         options,
       );
     } catch (error: unknown) {

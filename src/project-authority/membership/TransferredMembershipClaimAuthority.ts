@@ -11,6 +11,7 @@ import {
 } from '@claudian-collab/protocol';
 
 import type { ProtectedClaimOverrideEnvelope } from '../../coordination/ProjectMembershipPersistence.js';
+import { ProjectMutationRejection } from '../ProjectMutationRejection.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
 import type { ProjectWriteAdmission } from '../admission/ProjectWriteAdmission.js';
 import {
@@ -70,6 +71,12 @@ export function encodeClaimOverrideAssociatedData(input: Readonly<{
 }
 
 function mapStatus(status: string): never {
+  if (status === 'permanently-stale') {
+    throw new ProjectMutationRejection({
+      code: 'authority-not-synchronized',
+      safeContext: { reason: 'claim-expected-state' },
+    });
+  }
   if (status === 'authorization-denied') {
     throw domainError('authorization-denied', 'claim-administration-denied');
   }

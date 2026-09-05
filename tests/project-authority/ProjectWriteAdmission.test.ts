@@ -125,6 +125,28 @@ class MemoryCoordination {
 }
 
 describe('ProjectWriteAdmission', () => {
+  it('defers a new lifecycle discovered after capacity-free preflight', async () => {
+    const coordination = new MemoryCoordination();
+    coordination.lifecycle = undefined;
+    const admission = new ProjectWriteAdmission({
+      coordination,
+      recovery: {
+        recoverProject: () => Promise.reject(new Error('recovery-cannot-run-with-reserved-capacity')),
+      },
+    });
+    const principal = createDevelopmentIngressPrincipal('member-manager');
+    try {
+      await admission.preflight(principal, 'project-a');
+      coordination.lifecycle = activeLifecycle();
+      await assert.rejects(
+        admission.runAfterPreflight(principal, 'project-a', () => Promise.resolve('published')),
+        error => error instanceof ProjectWriteAdmissionError && error.code === 'recovery-required',
+      );
+    } finally {
+      await admission.close();
+    }
+  });
+
   it('recovers a nonterminal lifecycle journal before ordinary authorization', async () => {
     const coordination = new MemoryCoordination();
     let recoveryCount = 0;

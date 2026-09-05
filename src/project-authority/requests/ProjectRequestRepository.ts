@@ -55,5 +55,9 @@ export interface ProjectRequestHeadValidationInput {
 
 export interface ProjectRequestRepository {
   inspectRequest(input: ProjectRequestInspectionInput): Promise<ProjectRequestInspection>;
-  validateRequestHead(input: ProjectRequestHeadValidationInput): Promise<void>;
+  withRequestHeadValidation<T>(
+    projectId: CollabProjectId,
+    operation: (validateHead: (input: ProjectRequestHeadValidationInput) => Promise<void>) => Promise<T>,
+    options?: Readonly<{ readonly signal?: AbortSignal }>,
+  ): Promise<T>;
 }

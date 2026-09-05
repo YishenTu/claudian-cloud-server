@@ -88,7 +88,7 @@ async function request(
 }
 
 describe('ProjectLifecycleRoutes', () => {
-  it('binds a trusted principal and dispatches a Cloud v4 lifecycle operation', async () => {
+  it('binds a trusted principal and dispatches a Cloud v5 lifecycle operation', async () => {
     const calls: unknown[] = [];
     const response = await request({
       execute: (operation, context) => {

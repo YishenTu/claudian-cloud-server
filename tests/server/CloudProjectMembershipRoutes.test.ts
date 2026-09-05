@@ -9,6 +9,7 @@ import {
   decodeCollabCloudSuccessEnvelope,
 } from '@claudian-collab/protocol';
 
+import { ProjectMutationRejection } from '../../src/project-authority/ProjectMutationRejection.js';
 import { TrustedPrincipalProvider } from '../../src/request-context/TrustedPrincipalProvider.js';
 import { CloudProjectMembershipRoutes } from '../../src/server/control/CloudProjectMembershipRoutes.js';
 
@@ -25,6 +26,71 @@ afterEach(async () => {
 });
 
 describe('CloudProjectMembershipRoutes creation entry', () => {
+  it('preserves exact negative-settlement evidence only from the authority error', async () => {
+    let failure: CollabError = new ProjectMutationRejection({
+      code: 'authorization-denied',
+    });
+    const routes = new CloudProjectMembershipRoutes({
+      creation: { create: () => { throw new Error('unused'); } },
+      join: { join: () => Promise.reject(failure) },
+      maximumJsonBytes: 64 * 1024,
+      operationTimeoutMs: 2_000,
+      trustedPrincipal: {
+        establishedAssertion: () => ({
+          principalId: 'principal_route',
+          provenance: {
+            kind: 'operator-protected-channel',
+            providerId: 'test-provider',
+          },
+        }),
+        provider: new TrustedPrincipalProvider(),
+      },
+    });
+    const server = createServer((request, response) => {
+      if (!routes.handle(request, response)) {
+        response.writeHead(404);
+        response.end();
+      }
+    });
+    servers.add(server);
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const route = collabCloudProjectOperationRoute(PROJECT_ID, 'joinCloudProject');
+    const submit = async () => {
+      const response = await fetch(
+        `http://127.0.0.1:${String(address.port)}${route.target}`,
+        {
+          body: JSON.stringify({
+            data: {
+              displayName: 'Joined member',
+              idempotencyKey: 'join-rejected-route-key',
+              invitationId: 'invitation-route',
+              projectId: PROJECT_ID,
+              secret: Buffer.alloc(32, 7).toString('base64url'),
+            },
+            protocolVersion: 9,
+            requestId: 'request-join-rejected',
+          }),
+          headers: { 'content-type': 'application/json' },
+          method: route.method,
+        },
+      );
+      assert.equal(response.status, 403);
+      return await response.json() as Record<string, unknown>;
+    };
+    const rejected = await submit();
+    assert.equal(rejected.requestId, 'request-join-rejected');
+    assert.equal(decodeCollabCloudErrorEnvelope(rejected).mutationOutcome, 'rejected');
+
+    failure = new CollabError({ code: 'authorization-denied' });
+    assert.equal(Object.hasOwn(await submit(), 'mutationOutcome'), false);
+    failure = Object.assign(new CollabError({ code: 'authorization-denied' }), {
+      mutationOutcome: 'rejected',
+    });
+    assert.equal(Object.hasOwn(await submit(), 'mutationOutcome'), false);
+  });
+
   it('maps a personal-ref divergence to one state conflict', async () => {
     const routes = new CloudProjectMembershipRoutes({
       creation: { create: () => { throw new Error('unused'); } },
@@ -68,7 +134,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
             projectId: PROJECT_ID,
             secret: Buffer.alloc(32, 7).toString('base64url'),
           },
-          protocolVersion: 8,
+          protocolVersion: 9,
           requestId: 'request-join-diverged',
         }),
         headers: { 'content-type': 'application/json' },
@@ -135,7 +201,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
             projectId: PROJECT_ID,
             projectName: 'Cloud Route Project',
           },
-          protocolVersion: 8,
+          protocolVersion: 9,
           requestId: 'route_request',
         }),
         headers: {
@@ -472,7 +538,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
     for (const [operation, data] of requests) {
       const route = collabCloudProjectOperationRoute(PROJECT_ID, operation);
       const response = await fetch(`${base}${route.target}`, {
-        body: JSON.stringify({ data, protocolVersion: 8, requestId: `request-${operation}` }),
+        body: JSON.stringify({ data, protocolVersion: 9, requestId: `request-${operation}` }),
         headers: { 'content-type': 'application/json' },
         method: route.method,
       });

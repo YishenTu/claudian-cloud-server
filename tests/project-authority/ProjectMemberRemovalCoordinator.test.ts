@@ -25,6 +25,7 @@ describe('ProjectMemberRemovalCoordinator', () => {
   it('settles membership before deleting the exact persisted personal ref', async () => {
     const effects: string[] = [];
     let competingLifecycle = true;
+    let stalePreparedJournal = true;
     let journal: ProjectMemberRemovalJournal | undefined;
     const response = Object.freeze({
       discardedRequestId: 'request-open',
@@ -50,6 +51,7 @@ describe('ProjectMemberRemovalCoordinator', () => {
         return { journal, status: 'created' as const };
       },
       async settleRemoval() {
+        if (stalePreparedJournal) return { status: 'stale' as const };
         effects.push('settle');
         assert.ok(journal);
         journal = Object.freeze({
@@ -173,12 +175,30 @@ describe('ProjectMemberRemovalCoordinator', () => {
     assert.deepEqual(effects, []);
 
     competingLifecycle = false;
+    for (const staleRequest of [
+      { ...request, expectedManagerSetGeneration: 2 },
+      { ...request, expectedTargetMembershipRevision: 6 },
+    ]) {
+      await assert.rejects(coordinator.remove(principal, staleRequest), {
+        code: 'authority-not-synchronized', name: 'ProjectMutationRejection',
+      });
+      assert.equal(journal, undefined);
+      assert.deepEqual(effects, []);
+    }
+
+    await assert.rejects(coordinator.remove(principal, request), {
+      code: 'authority-not-synchronized', name: 'CollabError',
+    });
+    assert.equal((await membership.getRemoval())?.phase, 'prepared');
+    assert.deepEqual(effects, ['read', 'verify']);
+    stalePreparedJournal = false;
     assert.deepEqual(await coordinator.remove(
       principal,
       request,
     ), response);
     assert.deepEqual(effects, [
       'read',
+      'verify',
       'verify',
       'settle',
       'event',

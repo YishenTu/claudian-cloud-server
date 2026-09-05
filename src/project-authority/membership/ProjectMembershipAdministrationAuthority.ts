@@ -18,6 +18,7 @@ import {
 } from '@claudian-collab/protocol';
 
 import type { MembershipAdministrationStatus } from '../../coordination/ProjectMembershipPersistence.js';
+import { ProjectMutationRejection } from '../ProjectMutationRejection.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
 import type { ProjectWriteAdmission } from '../admission/ProjectWriteAdmission.js';
 
@@ -57,6 +58,12 @@ function fingerprint(operation: string, request: object): string {
 }
 
 function mapStatus(status: MembershipAdministrationStatus): never {
+  if (status === 'permanently-stale') {
+    throw new ProjectMutationRejection({
+      code: 'authority-not-synchronized',
+      safeContext: { reason: 'membership-expected-state' },
+    });
+  }
   if (status === 'authorization-denied') {
     throw domainError('authorization-denied', 'membership-administration-denied');
   }

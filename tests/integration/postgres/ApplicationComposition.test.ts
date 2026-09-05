@@ -174,7 +174,7 @@ async function projectOperation(
   const response = await fetch(`${baseUrl}${route.target}`, {
     body: JSON.stringify({
       data,
-      protocolVersion: 8,
+      protocolVersion: 9,
       requestId: `request-${operation}-${principalId}`,
     }),
     headers: {
@@ -199,7 +199,7 @@ async function rejectedProjectOperation(
   const response = await fetch(`${baseUrl}${route.target}`, {
     body: JSON.stringify({
       data,
-      protocolVersion: 8,
+      protocolVersion: 9,
       requestId: `request-rejected-${operation}-${principalId}`,
     }),
     headers: {
@@ -239,7 +239,7 @@ async function proxiedProjectOperation(
   const route = collabCloudProjectOperationRoute(projectId, operation);
   const body = JSON.stringify({
     data,
-    protocolVersion: 8,
+    protocolVersion: 9,
     requestId: `request-proxy-${operation}`,
   });
   const request = Buffer.from(
@@ -1476,7 +1476,7 @@ while :; do sleep 1; done`,
       const snapshotResponse = await fetch(`${baseUrl}${snapshotRoute.target}`, {
         body: JSON.stringify({
           data: { projectId },
-          protocolVersion: 8,
+          protocolVersion: 9,
           requestId: 'request-production-snapshot',
         }),
         headers: {

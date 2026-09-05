@@ -25,7 +25,7 @@ class MemoryClaimAdministration
 implements ProjectTransferredMembershipClaimAdministrationPersistence {
   record: TransferredMembershipClaimOverrideRecord | undefined;
   transferId = 'transfer-imported';
-  status: 'created' | 'replayed' | 'stale' = 'created';
+  status: 'created' | 'permanently-stale' | 'replayed' | 'stale' = 'created';
 
   getImportedMembershipClaimFacts() {
     return Promise.resolve({
@@ -41,7 +41,7 @@ implements ProjectTransferredMembershipClaimAdministrationPersistence {
       'reissueTransferredMembershipClaim'
     ]
   >[0]) {
-    if (this.status === 'stale') return Promise.resolve({ status: this.status });
+    if ((this.status === 'stale' || this.status === 'permanently-stale')) return Promise.resolve({ status: this.status });
     if (this.record === undefined) {
       this.record = Object.freeze({
         claimGeneration: input.claimGeneration,
@@ -69,8 +69,8 @@ implements ProjectTransferredMembershipClaimAdministrationPersistence {
   }
 
   revokeTransferredMembershipClaim() {
-    return Promise.resolve(this.status === 'stale'
-      ? { status: 'stale' as const }
+    return Promise.resolve((this.status === 'stale' || this.status === 'permanently-stale')
+      ? { status: this.status }
       : {
         response: {
           claimGeneration: this.record?.claimGeneration ?? 0,
@@ -170,6 +170,19 @@ describe('TransferredMembershipClaimAuthority', () => {
     assert.equal(JSON.stringify(persistence.record).includes(CLAIM), false);
     persistence.transferId = 'transfer-newer-import';
     assert.deepEqual(await authority.reissue(PRINCIPAL, request), created);
+  });
+
+  it('preserves only authority-proved negative settlement for claim mutations', async () => {
+    const request = { expectedClaimGeneration: 0, expectedManagerSetGeneration: 1,
+      expectedMembershipRevision: 1, idempotencyKey: 'claim-negative', memberId: MEMBER_ID, projectId: PROJECT_ID };
+    for (const status of ['permanently-stale', 'stale'] as const) {
+      const { authority, persistence } = fixture();
+      persistence.status = status;
+      const expected = { code: 'authority-not-synchronized',
+        name: status === 'permanently-stale' ? 'ProjectMutationRejection' : 'CollabError' };
+      await assert.rejects(authority.reissue(PRINCIPAL, request), expected);
+      await assert.rejects(authority.revoke(PRINCIPAL, request), expected);
+    }
   });
 
   it('revokes the exact highest generation and fails closed on stale state', async () => {
