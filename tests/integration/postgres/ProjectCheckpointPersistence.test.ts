@@ -12,7 +12,7 @@ import {
 import { Client } from 'pg';
 
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import {
   type PostgresTestDatabase,
   withPostgresTestDatabase,
@@ -118,7 +118,7 @@ const metadata = Object.freeze({
 describe('Project checkpoint persistence', () => {
   it('captures completed Removal recovery and exact replay continuity', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const client = new Client({ connectionString: database.migrationUrl });
       const store = coordination(database);
@@ -231,7 +231,7 @@ describe('Project checkpoint persistence', () => {
 
   it('captures Cloud membership replay state only in backup v3', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const client = new Client({ connectionString: database.migrationUrl });
       const store = coordination(database);
@@ -410,7 +410,7 @@ describe('Project checkpoint persistence', () => {
 
   it('captures the canonical response for a revoked invitation replay fact', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const client = new Client({ connectionString: database.migrationUrl });
       const store = coordination(database);
@@ -518,7 +518,7 @@ describe('Project checkpoint persistence', () => {
 
   it('fails before reading additional tables when the configured artifact ceiling is exceeded', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const store = coordination(database);
       const lease = await store.acquireProjectLease(PROJECT_ID);
@@ -549,7 +549,7 @@ describe('Project checkpoint persistence', () => {
 
   it('pages large rows within the heap budget and rejects their cumulative artifact size', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const writer = new Client({ connectionString: database.migrationUrl });
       const store = coordination(database);
@@ -610,7 +610,7 @@ describe('Project checkpoint persistence', () => {
 
   it('round-trips a canonical backup with a zero-event cursor and canonical idempotency JSON', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const store = coordination(database);
       const lease = await store.acquireProjectLease(PROJECT_ID);
@@ -671,7 +671,7 @@ describe('Project checkpoint persistence', () => {
 
   it('captures every lifecycle record when no current operation is excluded', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const store = coordination(database);
       try {
@@ -708,7 +708,7 @@ describe('Project checkpoint persistence', () => {
 
   it('captures terminal responder principals only for backup', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const store = coordination(database);
       try {
@@ -782,7 +782,7 @@ describe('Project checkpoint persistence', () => {
 
   it('holds one repeatable read snapshot across a concurrent committed change', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const store = coordination(database);
       const lease = await store.acquireProjectLease(PROJECT_ID);
@@ -837,7 +837,7 @@ describe('Project checkpoint persistence', () => {
 
   it('preserves idempotency results whose member-scoped keys are equal', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const writer = new Client({ connectionString: database.migrationUrl });
       const store = coordination(database);

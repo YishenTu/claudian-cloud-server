@@ -13,7 +13,7 @@ import type {
   CollabAuthorityTransferStatus,
 } from '@claudian-collab/protocol';
 
-import { PostgresMigrator } from '../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import type { PostgresCoordination } from '../../src/coordination/postgres/PostgresCoordination.js';
 import { createMaintenanceAuthorityTransferRecovery } from '../../src/composition/MaintenanceAuthorityTransferRecovery.js';
 import type { CloudToLanTransferCoordinator } from '../../src/project-authority/lifecycle/cloud-to-lan/CloudToLanTransferCoordinator.js';
@@ -279,7 +279,7 @@ describe('Cloud-to-LAN cross-store recovery', () => {
   it('lets the offline maintenance owner finish every locally actionable phase', async () => {
     await withPostgresTestDatabase(async database => {
       await withDurableRoot(async durableRoot => {
-        await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+        await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
         const cases = [
           ['collecting-readiness', 'cloud-quiesced', 'checkpoint-captured'],
           ['cloud-quiesced', 'checkpoint-captured', 'checkpoint-captured'],
@@ -360,7 +360,7 @@ describe('Cloud-to-LAN cross-store recovery', () => {
   it('recovers forward after process death at every durable transfer phase', async () => {
     await withPostgresTestDatabase(async database => {
       await withDurableRoot(async durableRoot => {
-        await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+        await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
         const phases = [
           'collecting-readiness',
           'cloud-quiesced',
@@ -470,7 +470,7 @@ describe('Cloud-to-LAN cross-store recovery', () => {
   it('reopens the same generation after process death at every cancellation phase', async () => {
     await withPostgresTestDatabase(async database => {
       await withDurableRoot(async durableRoot => {
-        await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+        await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
         const cases = [
           ['cancel-intent', 'target-invalidated'],
           ['target-invalidated', 'target-cleaned'],

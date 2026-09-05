@@ -5,13 +5,13 @@ import {
   CURRENT_POSTGRES_SCHEMA_VERSION,
   supportsPostgresSchemaVersion,
 } from '../../src/config/PostgresSchemaCompatibility.js';
-import { POSTGRES_SCHEMAS } from '../../src/coordination/postgres/PostgresSchema.js';
+import { CURRENT_POSTGRES_SCHEMA } from '../../src/coordination/postgres/PostgresSchema.js';
 
 describe('Postgres schema compatibility', () => {
   it('declares one exact current schema', () => {
     assert.equal(CURRENT_POSTGRES_SCHEMA_VERSION, 11);
     assert.equal(
-      POSTGRES_SCHEMAS.at(-1)?.version,
+      CURRENT_POSTGRES_SCHEMA.version,
       CURRENT_POSTGRES_SCHEMA_VERSION,
     );
   });

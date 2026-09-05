@@ -57,7 +57,7 @@ virtual machine or persistent container per Project.
    Smart HTTP routing, and recovery coordination are modules in one process.
    PostgreSQL and repository storage remain external resources with separate
    lifecycle contracts.
-6. **Logical isolation is mandatory from migration 1.** Every Project-scoped
+6. **Logical isolation is mandatory from initialization.** Every Project-scoped
    coordination relation and constraint carries `project_id`; every repository
    is resolved through authoritative placement.
 7. **Virtualization is incremental.** The service and database use separate
@@ -1187,7 +1187,7 @@ Deletion is the idempotent journal in §12.7. Participant-local copies are never
 10. enumerate the bounded active-placement and terminal-responder catalogs, re-enter each Project under its canonical lock, and verify authority generation, live Git integrity, exact allowed refs, tombstones, and protected-claim continuity;
 11. start HTTP admission and publish readiness.
 
-Clean initialization is a separate one-shot command using the migration role and one global advisory lock. On an empty database, the complete checksum-pinned catalog and all applied records commit in one transaction. The exact completed current catalog is a no-op; partial history, gaps, drift, unsupported versions, and nontransactional statements fail closed. Current-schema code updates build one immutable candidate, stop runtime, verify the candidate against unchanged authority, complete environment and Project recovery, then start that exact image. A verification failure before recovery may reopen the unchanged previous image; after recovery starts, failure remains closed and never invokes an in-place migration or rollback.
+Clean initialization is a separate one-shot command using the migration role and one global advisory lock. When the canonical schema is absent, one checksum-pinned current SQL resource and its singleton version/checksum metadata commit in one transaction. An exact current schema is verified without writes; an existing incompatible schema is rejected without adoption, repair, or upgrade. The private environment-restore fence may already exist outside the canonical schema. Current-schema code updates build one immutable candidate, stop runtime, verify the candidate against unchanged authority, complete environment and Project recovery, then start that exact image. A verification failure before recovery may reopen the unchanged previous image; after recovery starts, failure remains closed and never invokes an in-place migration or rollback.
 
 ### 19.2 Shutdown
 
@@ -1230,7 +1230,7 @@ Ticket numbers, descriptions, and Member names, then prove:
 
 ### 20.3 PostgreSQL integration tests
 
-- migrations apply to an empty supported PostgreSQL instance;
+- the current schema initializes atomically in an empty supported PostgreSQL instance;
 - runtime-role permissions and RLS are effective;
 - the runtime role is not a table owner, cannot bypass or disable RLS, and
   receives no Project rows without an explicit Project context;
@@ -1314,7 +1314,7 @@ The local milestone followed this critical path:
 
 1. scaffold Node.js 24, strict TypeScript, configuration, safe logging, health,
    version, lifecycle, tests, and one composition root;
-2. add PostgreSQL migrations, runtime/migration roles, Project isolation, and
+2. add PostgreSQL initialization, runtime/migration roles, Project isolation, and
    placement records, plus the canonical advisory Project lock and separate
    ordinary, pinned-lease, and reserved connection budgets;
 3. add the bare repository authority, real Git integration, path containment,
@@ -1345,7 +1345,7 @@ The local milestone advanced through six ordered proof gates: `G5` bootstrap and
 
 The completed local-milestone merge order was: the original shared protocol producer in Claudian; Cloud foundation; the original Cloud protocol consumer; Cloud bootstrap; Claudian bootstrap; Cloud read plane; Claudian read/binding; Cloud personal write; Cloud collaboration; Claudian Publish; Cloud Accept; and Claudian final integration. After `GI`, the separate ownership migration published the standalone protocol release and converted Claudian and Cloud into exact registry consumers. Steps 9 and 10 then passed on the merged exact consumers. Every future branch starts from the latest merged `origin/main`; neither consumer uses unmerged protocol source, and capability advertisement occurs only after the complete authority path and its gate evidence exist.
 
-The clean schema baseline is one serial, checksum-verified catalog from `0001_foundation.sql` through `0011_cloud_project_membership.sql`. Empty-database initialization applies the full catalog atomically; an existing database must already contain that exact completed history. Each schema change owns its checksum registry entry, least-privilege grants, forced-RLS policy, and real PostgreSQL evidence. Gates freeze that ordered catalog; they do not become a second migration owner.
+The clean schema baseline is `CurrentPostgresSchema.sql`, with one checksum and current version descriptor. Initialization creates its final tables, functions, constraints, indexes, and grants atomically, together with singleton `schema_metadata`. Cloud has no deployed legacy schema or backup baseline, so no historical SQL scripts, upgrade registry, or migration states are retained. Schema changes update this baseline and its real PostgreSQL evidence for atomic rollback, serialization, cancellation, least-privilege grants, and forced RLS.
 
 Shared contract files, compatibility policy, and releases belong to the standalone protocol repository. Claudian and Cloud own their consumer package manifests and lockfiles; no later transport tranche edits those manifests opportunistically. Published `4.2.0`, wire v9, Cloud binding v5, and backup coordination format v3 are the implemented baseline. Step 11 followed a producer-first order for exact `3.2.1` with wire v6, Cloud binding v2, and backup coordination format v2. Step 12 then published exact `3.3.0`, retained wire v6 and Cloud binding v2, and directly replaced the pre-production backup format with v3 before either consumer converged. The corrective `3.3.1` and `3.3.2` patches completed that backup contract. Step 14 advanced the authority-transfer contract through exact producer releases to `4.1.3`, then published the compatible `4.1.4` backup-continuity correction; Cloud review then added exact negative settlement in `4.2.0`, wire v9 and Cloud binding v5, allowing an owning client to release only a permanently rejected mutation intent. Both consumers converge on that immutable artifact before final acceptance. The exact pin alone advertises nothing; each new capability is advertised only after its complete server and client path passes.
 

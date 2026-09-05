@@ -10,7 +10,7 @@ import { Client } from 'pg';
 import { CoordinationError } from '../../../src/coordination/CoordinationError.js';
 import type { PrepareAcceptInput } from '../../../src/coordination/AcceptPersistence.js';
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import {
   ProjectWriteAdmission,
   ProjectWriteAdmissionError,
@@ -234,9 +234,9 @@ async function expectStateConflict(operation: Promise<unknown>): Promise<void> {
 }
 
 describe('Accept journal persistence', () => {
-  it('applies migration 0005 with forced RLS, composite locality, and least privilege', async () => {
+  it('initializes current storage with forced RLS, composite locality, and least privilege', async () => {
     await withPostgresTestDatabase(async database => {
-      const migrator = new PostgresMigrator({ connectionString: database.migrationUrl });
+      const migrator = new PostgresSchemaInitializer({ connectionString: database.migrationUrl });
       await migrator.apply();
       await migrator.apply();
 
@@ -245,21 +245,6 @@ describe('Accept journal persistence', () => {
       try {
         await migration.connect();
         await runtime.connect();
-        const history = await migration.query<{
-          readonly name: string;
-          readonly state: string;
-          readonly version: number;
-        }>(
-          `SELECT version, name, state
-             FROM claudian_cloud.schema_migrations
-            ORDER BY version`,
-        );
-        assert.deepEqual(history.rows.find(row => row.version === 5), {
-          name: 'accept-recovery',
-          state: 'applied',
-          version: 5,
-        });
-
         const relations = ['accept_journal_relations', 'accept_journals'];
         const rls = await migration.query<{
           readonly forced: boolean;
@@ -355,7 +340,7 @@ describe('Accept journal persistence', () => {
 
   it('persists the exact plan, phases, candidate, replay, and one nonterminal journal', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-a');
       await seedProject(database, 'project-b');
       const store = coordination(database);
@@ -453,7 +438,7 @@ describe('Accept journal persistence', () => {
 
   it('classifies exact journal recovery state and removes scheduling visibility', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-recovery');
       const store = coordination(database);
       try {
@@ -529,7 +514,7 @@ describe('Accept journal persistence', () => {
 
   it('persists contained Accept without inventing commit material', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-contained');
       const store = coordination(database);
       try {
@@ -579,7 +564,7 @@ describe('Accept journal persistence', () => {
 
   it('atomically completes Request, relations, Tickets, main, event, and idempotency', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-complete');
       const store = coordination(database);
       try {
@@ -713,7 +698,7 @@ describe('Accept journal persistence', () => {
 
   it('rolls terminal completion back as one transaction', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-rollback');
       const store = coordination(database);
       try {

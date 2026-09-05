@@ -226,7 +226,7 @@ describe('canonical Collab protocol consumer contract', () => {
       assert.doesNotMatch(source, /@claudian-collab\/protocol\//u, path);
       assert.doesNotMatch(
         source,
-        /['"`]\/(?:collab\/capabilities|v2\/(?:development|projects)\/)/u,
+        /['"`]\/(?:collab\/capabilities|v\d+\/(?:development|projects)\/)/u,
         path,
       );
     }

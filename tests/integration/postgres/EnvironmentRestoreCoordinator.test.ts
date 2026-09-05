@@ -34,7 +34,7 @@ import { Client } from 'pg';
 
 import { CURRENT_POSTGRES_SCHEMA_VERSION } from '../../../src/config/PostgresSchemaCompatibility.js';
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import { EnvironmentBackupCatalogVerifier } from '../../../src/environment-maintenance/restore/EnvironmentBackupCatalog.js';
 import {
   EnvironmentRestoreCoordinator,
@@ -586,7 +586,7 @@ class RealPostgresRestorePort implements EnvironmentRestoreCoordinationPort {
     readonly authorityVolumeId: string;
   }>): Promise<Readonly<{ readonly authorityVolumeId: string }>> {
     assert.equal(input.authorityVolumeId, this.#database.authorityVolumeId);
-    await new PostgresMigrator({
+    await new PostgresSchemaInitializer({
       connectionString: this.#database.migrationUrl,
     }).apply();
     this.#store = postgresCoordination(this.#database);

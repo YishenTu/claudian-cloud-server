@@ -5,7 +5,7 @@ import { Client } from 'pg';
 
 import { CoordinationError } from '../../../src/coordination/CoordinationError.js';
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import {
   ActiveRepositoryIntegrityGate,
   type ActiveRepositoryIntegrityRepository,
@@ -140,7 +140,7 @@ async function seedActiveProjects(
 describe('recovery candidate catalog', () => {
   it('removes an isolated unknown Project from startup integrity enumeration', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       await seedActiveProjects(database, ['project-forward', 'project-healthy']);
@@ -207,7 +207,7 @@ describe('recovery candidate catalog', () => {
 
   it('keeps a healthy Project active when an unknown candidate settles before lease acquisition', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       await seedActiveProjects(database, ['project-forward']);
@@ -267,7 +267,7 @@ describe('recovery candidate catalog', () => {
 
   it('returns a safe sentinel for a forward recovery kind', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       const store = coordination(database);
@@ -305,7 +305,7 @@ describe('recovery candidate catalog', () => {
 
   it('enumerates stable 100-row keyset pages containing metadata only', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       const store = coordination(database);
@@ -417,7 +417,7 @@ describe('recovery candidate catalog', () => {
 
   it('allows duplicate scanners but serializes journal recovery on the canonical Project lock', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       const store = coordination(database);

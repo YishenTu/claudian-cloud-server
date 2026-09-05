@@ -16,7 +16,7 @@ import type {
 import { Client } from 'pg';
 
 import { PostgresCoordination } from '../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import { createMaintenanceAuthorityTransferRecovery } from '../../src/composition/MaintenanceAuthorityTransferRecovery.js';
 import type {
   PinnedProjectLease,
@@ -502,7 +502,7 @@ async function acknowledgeBatch(
 describe('LAN-to-Cloud cross-store recovery', () => {
   it('replays publication and cleanup after PostgreSQL CAS loss with real Git', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const root = await mkdtemp(join(tmpdir(), 'claudian-lan-cloud-recovery-'));
       const operationRoot = join(root, 'operations');
       const repositoryRoot = join(root, 'repositories');

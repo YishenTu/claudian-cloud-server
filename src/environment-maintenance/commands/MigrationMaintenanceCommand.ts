@@ -1,6 +1,6 @@
 import { decodeMigrationConfig } from '../../config/MigrationConfig.js';
 import type { ConfigSource } from '../../config/configDecoder.js';
-import { PostgresMigrator } from '../../coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../coordination/postgres/PostgresSchemaInitializer.js';
 import { MaintenanceCommandError } from './MaintenanceCommandRegistry.js';
 
 export interface MigrationMaintenanceCommandInput {
@@ -24,7 +24,7 @@ export async function runMigrationMaintenanceCommand(
     || (input.arguments.length !== 0 && input.arguments.length !== 1)
   ) throw new MaintenanceCommandError('invalid-command');
   const config = decodeMigrationConfig(input.source);
-  const migrator = new PostgresMigrator({ connectionString: config.postgresUrl });
+  const migrator = new PostgresSchemaInitializer({ connectionString: config.postgresUrl });
   active(input.signal);
   if (command === 'preflight') {
     const plan = await migrator.preflight(input.signal);

@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import { Client } from 'pg';
 
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import {
   type PostgresTestDatabase,
   withPostgresTestDatabase,
@@ -61,9 +61,9 @@ async function seedProject(
 }
 
 describe('Collaboration persistence', () => {
-  it('applies migration 0004 with forced Project RLS and composite locality', async () => {
+  it('initializes current storage with forced Project RLS and composite locality', async () => {
     await withPostgresTestDatabase(async database => {
-      const migrator = new PostgresMigrator({
+      const migrator = new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       });
       await migrator.apply();
@@ -72,29 +72,6 @@ describe('Collaboration persistence', () => {
       const client = new Client({ connectionString: database.migrationUrl });
       try {
         await client.connect();
-        const history = await client.query<{
-          readonly name: string;
-          readonly state: string;
-          readonly version: number;
-        }>(
-          `SELECT version, name, state
-             FROM claudian_cloud.schema_migrations
-            ORDER BY version`,
-        );
-        assert.deepEqual(history.rows, [
-          { name: 'foundation', state: 'applied', version: 1 },
-          { name: 'development-bootstrap', state: 'applied', version: 2 },
-          { name: 'project-read-events', state: 'applied', version: 3 },
-          { name: 'collaboration', state: 'applied', version: 4 },
-          { name: 'accept-recovery', state: 'applied', version: 5 },
-          { name: 'portability-lifecycle', state: 'applied', version: 6 },
-          { name: 'lan-to-cloud-transfer', state: 'applied', version: 7 },
-          { name: 'cloud-to-lan-transfer', state: 'applied', version: 8 },
-          { name: 'terminal-project-lifecycle', state: 'applied', version: 9 },
-          { name: 'terminal-continuity-catalog', state: 'applied', version: 10 },
-          { name: 'cloud-project-membership', state: 'applied', version: 11 },
-        ]);
-
         const relations = [
           'change_requests',
           'idempotency_results',
@@ -200,7 +177,7 @@ describe('Collaboration persistence', () => {
 
   it('stores and reads a Request only through its Project transaction', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-a');
       await seedProject(database, 'project-b');
       const store = coordination(database);
@@ -248,7 +225,7 @@ describe('Collaboration persistence', () => {
 
   it('preserves the protocol UTF-16 title limit independently of UTF-8 bytes', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-a');
       await seedProject(database, 'project-b');
       const store = coordination(database);

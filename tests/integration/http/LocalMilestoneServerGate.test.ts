@@ -38,7 +38,7 @@ import {
 
 import { createApplication } from '../../../src/composition/createApplication.js';
 import type { ServerConfig } from '../../../src/config/ServerConfig.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import { SafeLogger } from '../../../src/observability/SafeLogger.js';
 import {
   acquirePostgresTestDatabase,
@@ -375,7 +375,7 @@ describe('localhost milestone server gate', { concurrency: false }, () => {
 
   before(async () => {
     database = await acquirePostgresTestDatabase();
-    await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+    await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
     root = await mkdtemp(join(tmpdir(), 'claudian-local-milestone-'));
     repositoryRoot = join(root, 'repositories');
     stagingRoot = join(root, 'staging');

@@ -94,8 +94,11 @@ import { PostgresPortabilityLifecyclePersistence } from './PostgresPortabilityLi
 import { PostgresProjectCheckpointPersistence } from './PostgresProjectCheckpointPersistence.js';
 import { PostgresCloudProjectCreationPersistence } from './PostgresCloudProjectCreationPersistence.js';
 import { PostgresProjectMembershipPersistence } from './PostgresProjectMembershipPersistence.js';
-import { POSTGRES_SCHEMAS } from './PostgresSchema.js';
-import { supportsPostgresSchemaVersion } from '../../config/PostgresSchemaCompatibility.js';
+import {
+  CURRENT_POSTGRES_SCHEMA,
+  isCurrentPostgresSchema,
+  type PostgresSchemaMetadata,
+} from './PostgresSchema.js';
 
 export interface PostgresCoordinationOptions {
   readonly onProjectEventCommitted?: (projectId: CollabProjectId) => void;
@@ -136,13 +139,6 @@ interface ProjectRow {
   readonly project_id: string;
   readonly project_name: string;
   readonly service_state: string;
-}
-
-interface MigrationRow {
-  readonly checksum: string;
-  readonly name: string;
-  readonly state: string;
-  readonly version: number;
 }
 
 interface ProjectEventRow {
@@ -2097,43 +2093,24 @@ export class PostgresCoordination
       }
       const relation = await safeQuery<{ readonly relation: string | null }>(
         client,
-        "SELECT to_regclass('claudian_cloud.schema_migrations')::text AS relation",
+        "SELECT to_regclass('claudian_cloud.schema_metadata')::text AS relation",
         [],
         checkedOut.markBroken,
       );
       if (relation[0]?.relation === null) {
         throw new CoordinationError('schema-incompatible');
       }
-      const rows = await safeQuery<MigrationRow>(
+      const rows = await safeQuery<PostgresSchemaMetadata>(
         client,
-        `SELECT version, name, checksum, state
-           FROM claudian_cloud.schema_migrations
-          ORDER BY version`,
+        `SELECT singleton, version, checksum
+           FROM claudian_cloud.schema_metadata`,
         [],
         checkedOut.markBroken,
       );
-      const currentVersion = rows.at(-1)?.version;
-      if (!supportsPostgresSchemaVersion(currentVersion)) {
+      if (!isCurrentPostgresSchema(rows)) {
         throw new CoordinationError('schema-incompatible');
       }
-      const expectedSchemas = POSTGRES_SCHEMAS.filter(
-        schema => schema.version <= currentVersion,
-      );
-      if (rows.length !== expectedSchemas.length) {
-        throw new CoordinationError('schema-incompatible');
-      }
-      for (const [index, schema] of expectedSchemas.entries()) {
-        const row = rows[index];
-        if (
-          row?.version !== schema.version
-          || row.name !== schema.name
-          || row.checksum !== schema.checksum
-          || row.state !== 'applied'
-        ) {
-          throw new CoordinationError('schema-incompatible');
-        }
-      }
-      return currentVersion;
+      return CURRENT_POSTGRES_SCHEMA.version;
     } finally {
       checkedOut.release();
     }

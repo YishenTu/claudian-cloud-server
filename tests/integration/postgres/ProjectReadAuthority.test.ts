@@ -9,7 +9,7 @@ import { describe, it } from 'node:test';
 import { Client } from 'pg';
 
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import {
   ProjectReadAuthority,
   ProjectReadAuthorityError,
@@ -42,7 +42,7 @@ function coordination(database: PostgresTestDatabase): PostgresCoordination {
 describe('Project read authority integration', () => {
   it('binds real repeatable SQL facts to the exact placed Git main', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const root = await mkdtemp(join(tmpdir(), 'claudian-project-read-'));
       const work = join(root, 'work');
       const projectId = 'project-read';

@@ -11,7 +11,7 @@ import { CollabError, collabMemberRef } from '@claudian-collab/protocol';
 import { Client } from 'pg';
 
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import { ProjectRequestAuthority } from '../../../src/project-authority/requests/ProjectRequestAuthority.js';
 import { ProjectPersonalRefAuthority } from '../../../src/project-authority/writes/ProjectPersonalRefAuthority.js';
 import { GitRepositoryAuthority } from '../../../src/repositories/GitRepositoryAuthority.js';
@@ -138,7 +138,7 @@ function barrier(): Readonly<{ promise: Promise<void>; resolve(): void }> {
 describe('Project Request concurrency', () => {
   it('completes Publish and receive advertisement without a Project lock/capacity cycle', { timeout: 20_000 }, async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const root = await mkdtemp(join(tmpdir(), 'claudian-request-concurrency-'));
       const repositoryRoot = join(root, 'repositories');
       await mkdir(repositoryRoot);

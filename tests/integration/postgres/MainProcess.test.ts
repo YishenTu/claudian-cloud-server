@@ -9,7 +9,7 @@ import { describe, it } from 'node:test';
 
 import { Client } from 'pg';
 
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import { withPostgresTestDatabase } from '../../helpers/PostgresTestDatabase.js';
 
 const MAIN_PROCESS_ENTRY = 'tests/integration/postgres/MainProcessWithKeyring.ts';
@@ -17,7 +17,7 @@ const MAIN_PROCESS_ENTRY = 'tests/integration/postgres/MainProcessWithKeyring.ts
 describe('main process with foundation dependencies', () => {
   it('publishes readiness and restarts cleanly after SIGTERM', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       const authorityRoot = await mkdtemp(join(tmpdir(), 'claudian-main-authority-'));
@@ -93,7 +93,7 @@ describe('main process with foundation dependencies', () => {
 
   it('contains an idle PostgreSQL client failure inside coordination', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       const authorityRoot = await mkdtemp(join(tmpdir(), 'claudian-main-idle-error-'));
@@ -168,7 +168,7 @@ describe('main process with foundation dependencies', () => {
 
   it('stops cleanly when SIGTERM interrupts a blocked startup query', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       const authorityRoot = await mkdtemp(join(tmpdir(), 'claudian-main-startup-stop-'));
@@ -191,7 +191,7 @@ describe('main process with foundation dependencies', () => {
         await blocker.connect();
         await blocker.query('BEGIN');
         await blocker.query(
-          'LOCK TABLE claudian_cloud.schema_migrations IN ACCESS EXCLUSIVE MODE',
+          'LOCK TABLE claudian_cloud.schema_metadata IN ACCESS EXCLUSIVE MODE',
         );
         const spawned = spawn(process.execPath, ['--import', 'tsx', MAIN_PROCESS_ENTRY], {
           cwd: process.cwd(),

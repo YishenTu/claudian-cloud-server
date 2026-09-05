@@ -29,7 +29,7 @@ import type {
   ProjectScope,
 } from '../../src/coordination/postgres/PostgresCoordination.js';
 import { PostgresCoordination } from '../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import { createDevelopmentIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
 import {
   ProjectActivationCoordinator,
@@ -462,7 +462,7 @@ async function seedReadyAttempt(
 describe('Project activation restart recovery', () => {
   it('settles the exact result after process death at every durable phase and filesystem effect', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const authorityRoot = await mkdtemp(join(tmpdir(), 'claudian-activation-'));
       const stagingRoot = join(authorityRoot, 'staging');
       const repositoryRoot = join(authorityRoot, 'repositories');

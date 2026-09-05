@@ -22,7 +22,7 @@ import type {
   EnvironmentRestorePersistenceProject,
   EnvironmentRestorePersistenceRepository,
 } from '../EnvironmentRestorePersistence.js';
-import { PostgresMigrator } from './PostgresMigrator.js';
+import { PostgresSchemaInitializer } from './PostgresSchemaInitializer.js';
 import { PostgresProjectCheckpointPersistence } from './PostgresProjectCheckpointPersistence.js';
 import type { TerminalProjectContinuityRecord } from '../ProjectCheckpointPersistence.js';
 import { createTerminalProjectContinuityArtifact } from '../../environment-maintenance/restore/TerminalProjectContinuityArtifact.js';
@@ -366,7 +366,7 @@ implements EnvironmentRestorePersistence {
     });
 
     try {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: this.#connectionString,
       }).apply(input.signal);
     } catch (error: unknown) {

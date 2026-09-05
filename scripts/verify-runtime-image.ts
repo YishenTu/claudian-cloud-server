@@ -20,7 +20,7 @@ import {
   decodeCollabCloudCapabilityDocument,
 } from '@claudian-collab/protocol';
 
-import { PostgresMigrator } from '../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../src/coordination/postgres/PostgresSchemaInitializer.js';
 import { acquirePostgresTestDatabase } from '../tests/helpers/PostgresTestDatabase.js';
 
 const execFileAsync = promisify(execFile);
@@ -155,7 +155,7 @@ async function verifyRuntimeImage(): Promise<void> {
   let volumeCreated = false;
 
   try {
-    await new PostgresMigrator({
+    await new PostgresSchemaInitializer({
       connectionString: database.migrationUrl,
     }).apply();
     const port = await findAvailablePort();

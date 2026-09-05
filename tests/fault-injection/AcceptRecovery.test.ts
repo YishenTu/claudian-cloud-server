@@ -26,7 +26,7 @@ import type {
   ProjectScope,
 } from '../../src/coordination/ProjectCoordination.js';
 import { PostgresCoordination } from '../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import {
   ProjectAcceptCoordinator,
   ProjectAcceptCoordinatorError,
@@ -473,7 +473,7 @@ function acceptRequest(
 describe('Accept cross-store recovery', () => {
   it('restarts to the exact result after every committed SQL and Git effect', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const root = await mkdtemp(join(tmpdir(), 'claudian-cloud-accept-recovery-'));
       const store = coordination(database);
       const resources = new ResourceAdmission({

@@ -5,7 +5,7 @@ import { COLLAB_CLOUD_BINDING_LIMITS } from '@claudian-collab/protocol';
 import { Client } from 'pg';
 
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import {
   type PostgresTestDatabase,
   withPostgresTestDatabase,
@@ -66,7 +66,7 @@ async function seedProject(
 describe('Collaboration snapshot projection', () => {
   it('sorts nonempty Requests and exposes the newest five open Ticket summaries', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-a', 2);
       await seedProject(database, 'project-b', 2);
       const store = coordination(database);
@@ -145,7 +145,7 @@ describe('Collaboration snapshot projection', () => {
 
   it('admits 100 bounded Requests and fails closed at collection or byte limits', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-count', 101);
       await seedProject(database, 'project-bytes', 30);
       const store = coordination(database);

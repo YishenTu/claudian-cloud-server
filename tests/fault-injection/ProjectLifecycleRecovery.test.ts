@@ -10,7 +10,7 @@ import type {
   ProjectLifecycleJournalRecord,
 } from '../../src/coordination/PortabilityLifecyclePersistence.js';
 import { PostgresCoordination } from '../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import {
   ProjectWriteAdmission,
   ProjectWriteAdmissionError,
@@ -221,7 +221,7 @@ async function within<Result>(
 describe('Project lifecycle cross-store recovery', () => {
   it('settles exact replay after failure at every shared durable edge', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const repositoryRoot = await mkdtemp(join(
         tmpdir(),
         'claudian-lifecycle-recovery-',
@@ -337,7 +337,7 @@ describe('Project lifecycle cross-store recovery', () => {
 
   it('allows an unrelated Project to recover while another owner is blocked', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const repositoryRoot = await mkdtemp(join(
         tmpdir(),
         'claudian-lifecycle-isolation-',

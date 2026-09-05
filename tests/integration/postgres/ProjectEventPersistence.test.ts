@@ -5,7 +5,7 @@ import type { CollabProjectId } from '@claudian-collab/protocol';
 import { Client } from 'pg';
 
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import { ProjectEventWakeup } from '../../../src/project-authority/reads/ProjectEventWakeup.js';
 import {
   type PostgresTestDatabase,
@@ -95,9 +95,9 @@ async function seedProject(
 }
 
 describe('Project event persistence', () => {
-  it('applies migration 0003 with forced RLS and least-privilege grants', async () => {
+  it('initializes current storage with forced RLS and least-privilege grants', async () => {
     await withPostgresTestDatabase(async database => {
-      const migrator = new PostgresMigrator({
+      const migrator = new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       });
       await migrator.apply();
@@ -106,29 +106,6 @@ describe('Project event persistence', () => {
       const client = new Client({ connectionString: database.migrationUrl });
       try {
         await client.connect();
-        const history = await client.query<{
-          readonly name: string;
-          readonly state: string;
-          readonly version: number;
-        }>(
-          `SELECT version, name, state
-             FROM claudian_cloud.schema_migrations
-            ORDER BY version`,
-        );
-        assert.deepEqual(history.rows, [
-          { name: 'foundation', state: 'applied', version: 1 },
-          { name: 'development-bootstrap', state: 'applied', version: 2 },
-          { name: 'project-read-events', state: 'applied', version: 3 },
-          { name: 'collaboration', state: 'applied', version: 4 },
-          { name: 'accept-recovery', state: 'applied', version: 5 },
-          { name: 'portability-lifecycle', state: 'applied', version: 6 },
-          { name: 'lan-to-cloud-transfer', state: 'applied', version: 7 },
-          { name: 'cloud-to-lan-transfer', state: 'applied', version: 8 },
-          { name: 'terminal-project-lifecycle', state: 'applied', version: 9 },
-          { name: 'terminal-continuity-catalog', state: 'applied', version: 10 },
-          { name: 'cloud-project-membership', state: 'applied', version: 11 },
-        ]);
-
         const rls = await client.query<{
           readonly forced: boolean;
           readonly relation: string;
@@ -175,7 +152,7 @@ describe('Project event persistence', () => {
 
   it('assigns isolated monotonic sequences and returns exact keyset replay facts', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-a');
       await seedProject(database, 'project-b');
       const store = coordination(database);
@@ -264,7 +241,7 @@ describe('Project event persistence', () => {
 
   it('wakes after committed event transactions and never after rollback', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-commit-wakeup');
       const wakeup = new ProjectEventWakeup();
       let wakeups = 0;
@@ -333,7 +310,7 @@ describe('Project event persistence', () => {
 
   it('retains the newest 10,000 events and every event younger than 30 days', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-retention');
 
       const client = new Client({ connectionString: database.migrationUrl });
@@ -409,7 +386,7 @@ describe('Project event persistence', () => {
 
   it('runs same-Project reads concurrently against repeatable snapshots', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-concurrent-read');
       const store = coordination(database);
       const entered = deferred();

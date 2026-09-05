@@ -5,7 +5,7 @@ import { Client } from 'pg';
 
 import type { CreateProjectInvitationPersistenceInput, ProjectMembershipPersistence } from '../../../src/coordination/ProjectMembershipPersistence.js';
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import {
   type PostgresTestDatabase,
   withPostgresTestDatabase,
@@ -151,7 +151,7 @@ function invitationInput(
 describe('Postgres Project invitation persistence', () => {
   it('revokes and scrubs Cloud-only membership authorities at relinquishment', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const store = coordination(database);
       try {
@@ -210,7 +210,7 @@ describe('Postgres Project invitation persistence', () => {
 
   it('persists Removal and atomically revokes the target authority surfaces', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const store = coordination(database);
       try {
@@ -275,7 +275,7 @@ describe('Postgres Project invitation persistence', () => {
 
   it('atomically promotes an acknowledged successor when the final Manager leaves', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const migration = new Client({ connectionString: database.migrationUrl });
       try {
@@ -400,7 +400,7 @@ describe('Postgres Project invitation persistence', () => {
 
   it('atomically reserves capacity, replays exact custody, revokes, and scrubs plaintext replay', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const store = coordination(database);
       try {
@@ -453,7 +453,7 @@ describe('Postgres Project invitation persistence', () => {
 
   it('stores membership operation results in the shared idempotency relation', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const store = coordination(database);
       try {
@@ -516,7 +516,7 @@ describe('Postgres Project invitation persistence', () => {
 
   it('persists the forward-only Join phases and atomically activates membership', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const store = coordination(database);
       try {
@@ -636,7 +636,7 @@ describe('Postgres Project invitation persistence', () => {
 
   it('counts one pending Join as one durable membership slot', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       await seedCapacityMembers(database, 95);
       const store = coordination(database);
@@ -698,7 +698,7 @@ describe('Postgres Project invitation persistence', () => {
 
   it('distinguishes permanently stale demotion from replay and future expected state', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const store = coordination(database);
       try {
@@ -739,7 +739,7 @@ describe('Postgres Project invitation persistence', () => {
 
   it('settles delayed management requests only for strictly advanced durable generations', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const store = coordination(database);
       const lease = await store.acquireProjectLease(PROJECT_ID);
@@ -812,7 +812,7 @@ describe('Postgres Project invitation persistence', () => {
 
   it('settles advanced invitation and offer revisions after exact replay lookup', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const store = coordination(database);
       const lease = await store.acquireProjectLease(PROJECT_ID);
@@ -860,7 +860,7 @@ describe('Postgres Project invitation persistence', () => {
 
   it('projects redacted members and atomically transfers Manager responsibility', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const store = coordination(database);
       try {
@@ -983,7 +983,7 @@ describe('Postgres Project invitation persistence', () => {
 
   it('compacts terminal responsibility payloads after 30 days without reusing idempotency', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const store = coordination(database);
       const terminalAt = '2026-08-30T03:00:00.000Z';
@@ -1252,7 +1252,7 @@ describe('Postgres Project invitation persistence', () => {
 
   it('serializes concurrent responsibility offers to one current target authority', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const store = coordination(database);
       try {

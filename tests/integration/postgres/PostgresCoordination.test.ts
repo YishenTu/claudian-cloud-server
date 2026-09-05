@@ -8,7 +8,7 @@ import {
   type PinnedProjectLease,
   PostgresCoordination,
 } from '../../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import { createRepositoryPlacementLease } from '../../../src/repositories/RepositoryPlacement.js';
 import {
   type PostgresTestDatabase,
@@ -278,7 +278,7 @@ async function waitForNoCloudConnections(adminUrl: string): Promise<void> {
   throw new Error('postgres-test-cloud-connection-survived');
 }
 
-async function replaceMigrationChecksum(
+async function replaceSchemaChecksum(
   database: PostgresTestDatabase,
   checksum: string,
 ): Promise<void> {
@@ -286,9 +286,9 @@ async function replaceMigrationChecksum(
   try {
     await client.connect();
     await client.query(
-      `UPDATE claudian_cloud.schema_migrations
+      `UPDATE claudian_cloud.schema_metadata
           SET checksum = $1
-        WHERE version = 1`,
+        WHERE singleton`,
       [checksum],
     );
   } finally {
@@ -299,7 +299,7 @@ async function replaceMigrationChecksum(
 describe('PostgresCoordination', () => {
   it('hands Project admission to a cross-process upload fence without a gap', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       const first = new PostgresCoordination({
@@ -349,7 +349,7 @@ describe('PostgresCoordination', () => {
 
   it('cancels a blocked pinned Project transaction and releases its lock', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       const coordination = new PostgresCoordination({
@@ -394,7 +394,7 @@ describe('PostgresCoordination', () => {
 
   it('cancels a blocked pinned lifecycle read and releases its lock', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       const coordination = new PostgresCoordination({
@@ -439,7 +439,7 @@ describe('PostgresCoordination', () => {
 
   it('owns Project scope, lock contention, pool isolation, and placement reads', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       await seedProject(database, {
@@ -612,14 +612,14 @@ describe('PostgresCoordination', () => {
         assert.equal(recoveredPlacement?.generation, 1);
         await recoveredLease.close();
 
-        await replaceMigrationChecksum(database, '0'.repeat(64));
+        await replaceSchemaChecksum(database, '0'.repeat(64));
         await expectCoordinationError(
           coordination.verifySchemaCompatibility(),
           'schema-incompatible',
         );
-        await replaceMigrationChecksum(
+        await replaceSchemaChecksum(
           database,
-          '5e883d93536b2569f3655cc9f3982c4ad7e8e3daf7871500dc5d4f471e8504bb',
+          '836255d673eecde0c6fae6df35edff9f1528cfcdccd37b81c8dadb72fdc922a7',
         );
         await coordination.verifySchemaCompatibility();
 
@@ -655,7 +655,7 @@ describe('PostgresCoordination', () => {
 
   it('recovers every pool after an idle client connection fails', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       await seedProject(database, {
@@ -700,7 +700,7 @@ describe('PostgresCoordination', () => {
 
   it('contains connection loss for an ordinary checked-out client', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       await seedProject(database, {
@@ -752,7 +752,7 @@ describe('PostgresCoordination', () => {
 
   it('revokes active clients from every pool during bounded close', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       await seedProject(database, {
@@ -781,7 +781,7 @@ describe('PostgresCoordination', () => {
         await blocker.query('BEGIN');
         await blocker.query(
           `LOCK TABLE claudian_cloud.repository_placements,
-                      claudian_cloud.schema_migrations
+                      claudian_cloud.schema_metadata
              IN ACCESS EXCLUSIVE MODE`,
         );
 

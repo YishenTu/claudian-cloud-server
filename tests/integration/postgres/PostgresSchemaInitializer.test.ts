@@ -4,109 +4,15 @@ import { describe, it } from 'node:test';
 import { Client } from 'pg';
 
 import {
-  assertTransactionalMigrationSql,
-  PostgresMigrationError,
-  PostgresMigrator,
-} from '../../../src/coordination/postgres/PostgresMigrator.js';
+  PostgresSchemaError,
+  PostgresSchemaInitializer,
+} from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import {
   type PostgresTestDatabase,
   withPostgresTestDatabase,
 } from '../../helpers/PostgresTestDatabase.js';
 
-const FOUNDATION_CHECKSUM = '5e883d93536b2569f3655cc9f3982c4ad7e8e3daf7871500dc5d4f471e8504bb';
-const DEVELOPMENT_BOOTSTRAP_CHECKSUM = '18d367c9ef8a0d39d0d072bc2ed89b1b6f75bf306585adb6138c66b3e5a9afe6';
-const PROJECT_READ_EVENTS_CHECKSUM = 'd490c9083abc5e0294c9d144d832b5070040276d716555d398ca80456aecf9d8';
-const COLLABORATION_CHECKSUM = '805b760962abb27c085e97b977cf443c5febbfb3cd1fc3024f9f94e157dc7c40';
-const ACCEPT_RECOVERY_CHECKSUM = '0f0e91dd7be0ac961222c8802925425b87d6b540f87f1eebca89bde3efb4a1bd';
-const PORTABILITY_LIFECYCLE_CHECKSUM = 'a7c4773253250fc0c02e0e6f02026b22ef7f1767a19ff922947a30f843160de6';
-const LAN_TO_CLOUD_TRANSFER_CHECKSUM = '432a787b07efbee791ea62b583334860f48343689c5b67e9ae101aa1927322b7';
-const CLOUD_TO_LAN_TRANSFER_CHECKSUM = '12e60f0ef26d2906687635cc4bdc59f33cb3bbfbc2095d2e7196b57417eb0e12';
-const TERMINAL_PROJECT_LIFECYCLE_CHECKSUM = 'cc494cde24e15af6b3c171a12d0754fb82d7c1cd301744eebb744bcadce79711';
-const TERMINAL_CONTINUITY_CATALOG_CHECKSUM = '5be7f9a48ab505d9a950c310605d696abc8b11b9435018cd72f41769a2b917f1';
-const CLOUD_PROJECT_MEMBERSHIP_CHECKSUM = '1d745589d66d8636537be28a7b3e9e987d0996e5cac98f68cf7fae703a6e9b9a';
-
-const MIGRATION_HISTORY = Object.freeze([
-  { checksum: FOUNDATION_CHECKSUM, name: 'foundation', version: 1 },
-  {
-    checksum: DEVELOPMENT_BOOTSTRAP_CHECKSUM,
-    name: 'development-bootstrap',
-    version: 2,
-  },
-  {
-    checksum: PROJECT_READ_EVENTS_CHECKSUM,
-    name: 'project-read-events',
-    version: 3,
-  },
-  { checksum: COLLABORATION_CHECKSUM, name: 'collaboration', version: 4 },
-  { checksum: ACCEPT_RECOVERY_CHECKSUM, name: 'accept-recovery', version: 5 },
-  {
-    checksum: PORTABILITY_LIFECYCLE_CHECKSUM,
-    name: 'portability-lifecycle',
-    version: 6,
-  },
-  {
-    checksum: LAN_TO_CLOUD_TRANSFER_CHECKSUM,
-    name: 'lan-to-cloud-transfer',
-    version: 7,
-  },
-  {
-    checksum: CLOUD_TO_LAN_TRANSFER_CHECKSUM,
-    name: 'cloud-to-lan-transfer',
-    version: 8,
-  },
-  {
-    checksum: TERMINAL_PROJECT_LIFECYCLE_CHECKSUM,
-    name: 'terminal-project-lifecycle',
-    version: 9,
-  },
-  {
-    checksum: TERMINAL_CONTINUITY_CATALOG_CHECKSUM,
-    name: 'terminal-continuity-catalog',
-    version: 10,
-  },
-  {
-    checksum: CLOUD_PROJECT_MEMBERSHIP_CHECKSUM,
-    name: 'cloud-project-membership',
-    version: 11,
-  },
-]);
-
-function verifyNontransactionalSqlRejection(): void {
-  const rejected = [
-    'COMMIT; CREATE TABLE leaked (value integer);',
-    'ROLLBACK; CREATE TABLE leaked (value integer);',
-    'START TRANSACTION; SELECT 1;',
-    'VACUUM claudian_cloud.projects;',
-    'CREATE UNIQUE INDEX CONCURRENTLY leaked ON projects (project_id);',
-    'ALTER SYSTEM SET application_name = \'leaked\';',
-    'REINDEX DATABASE cloud;',
-    'REINDEX SCHEMA claudian_cloud;',
-    'REINDEX SYSTEM cloud;',
-    'CLUSTER;',
-  ];
-  for (const sql of rejected) {
-    assert.throws(
-      () => assertTransactionalMigrationSql(sql, 10),
-      error => {
-        assert.ok(error instanceof PostgresMigrationError);
-        assert.equal(error.code, 'migration-nontransactional');
-        assert.equal(error.version, 10);
-        assert.doesNotMatch(JSON.stringify(error), /COMMIT|ROLLBACK|leaked/i);
-        return true;
-      },
-    );
-  }
-
-  assert.doesNotThrow(() => assertTransactionalMigrationSql(
-    `-- COMMIT must stay inert\n
-     CREATE FUNCTION example() RETURNS void LANGUAGE plpgsql AS $body$\n
-     BEGIN\n
-       RAISE NOTICE 'ROLLBACK';\n
-     END;\n
-     $body$;`,
-    10,
-  ));
-}
+const CURRENT_CHECKSUM = '836255d673eecde0c6fae6df35edff9f1528cfcdccd37b81c8dadb72fdc922a7';
 
 async function execute(connectionString: string, sql: string): Promise<void> {
   const client = new Client({ connectionString });
@@ -119,27 +25,25 @@ async function execute(connectionString: string, sql: string): Promise<void> {
 }
 
 async function expectMigrationError(
-  migrator: PostgresMigrator,
-  code: PostgresMigrationError['code'],
-  version?: number,
+  migrator: PostgresSchemaInitializer,
+  code: PostgresSchemaError['code'],
 ): Promise<void> {
   await assert.rejects(
     migrator.apply(),
     error => {
-      assert.ok(error instanceof PostgresMigrationError);
+      assert.ok(error instanceof PostgresSchemaError);
       assert.equal(error.code, code);
-      assert.equal(error.version, version);
       assert.doesNotMatch(JSON.stringify(error), /postgresql:|CREATE TABLE|duplicate/i);
       return true;
     },
   );
 }
 
-async function verifyMigrationFailureState(database: PostgresTestDatabase): Promise<void> {
-  const migrator = new PostgresMigrator({ connectionString: database.migrationUrl });
+async function verifyUnmanagedSchemaRejection(database: PostgresTestDatabase): Promise<void> {
+  const migrator = new PostgresSchemaInitializer({ connectionString: database.migrationUrl });
 
   await expectMigrationError(
-    new PostgresMigrator({ connectionString: database.adminUrl }),
+    new PostgresSchemaInitializer({ connectionString: database.adminUrl }),
     'migration-role-mismatch',
   );
 
@@ -148,14 +52,14 @@ async function verifyMigrationFailureState(database: PostgresTestDatabase): Prom
     `CREATE SCHEMA claudian_cloud AUTHORIZATION claudian_cloud_migration;
      CREATE TABLE claudian_cloud.projects (conflict integer);`,
   );
-  await expectMigrationError(migrator, 'schema-drift');
+  await expectMigrationError(migrator, 'schema-incompatible');
 
   const dirtyClient = new Client({ connectionString: database.migrationUrl });
   try {
     await dirtyClient.connect();
     const result = await dirtyClient.query<{ readonly relation: string | null }>(
       `SELECT to_regclass(
-         'claudian_cloud.schema_migrations'
+         'claudian_cloud.schema_metadata'
        )::text AS relation`,
     );
     assert.deepEqual(result.rows, [{ relation: null }]);
@@ -163,101 +67,24 @@ async function verifyMigrationFailureState(database: PostgresTestDatabase): Prom
     await dirtyClient.end();
   }
 
-  await expectMigrationError(migrator, 'schema-drift');
+  await expectMigrationError(migrator, 'schema-incompatible');
   await execute(database.migrationUrl, 'DROP SCHEMA claudian_cloud CASCADE');
 }
 
-async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<void> {
-  const migrator = new PostgresMigrator({ connectionString: database.migrationUrl });
+async function verifyCurrentSchema(database: PostgresTestDatabase): Promise<void> {
+  const migrator = new PostgresSchemaInitializer({ connectionString: database.migrationUrl });
   await migrator.apply();
   await migrator.apply();
 
   const client = new Client({ connectionString: database.migrationUrl });
   try {
     await client.connect();
-    const migration = await client.query<{
-      readonly checksum: string;
-      readonly name: string;
-      readonly state: string;
-      readonly version: number;
-    }>(
-      `SELECT version, name, checksum, state
-         FROM claudian_cloud.schema_migrations
-        ORDER BY version`,
-    );
-    assert.deepEqual(migration.rows, [
-      {
-        checksum: FOUNDATION_CHECKSUM,
-        name: 'foundation',
-        state: 'applied',
-        version: 1,
-      },
-      {
-        checksum: DEVELOPMENT_BOOTSTRAP_CHECKSUM,
-        name: 'development-bootstrap',
-        state: 'applied',
-        version: 2,
-      },
-      {
-        checksum: PROJECT_READ_EVENTS_CHECKSUM,
-        name: 'project-read-events',
-        state: 'applied',
-        version: 3,
-      },
-      {
-        checksum: COLLABORATION_CHECKSUM,
-        name: 'collaboration',
-        state: 'applied',
-        version: 4,
-      },
-      {
-        checksum: ACCEPT_RECOVERY_CHECKSUM,
-        name: 'accept-recovery',
-        state: 'applied',
-        version: 5,
-      },
-      {
-        checksum: PORTABILITY_LIFECYCLE_CHECKSUM,
-        name: 'portability-lifecycle',
-        state: 'applied',
-        version: 6,
-      },
-      {
-        checksum: LAN_TO_CLOUD_TRANSFER_CHECKSUM,
-        name: 'lan-to-cloud-transfer',
-        state: 'applied',
-        version: 7,
-      },
-      {
-        checksum: CLOUD_TO_LAN_TRANSFER_CHECKSUM,
-        name: 'cloud-to-lan-transfer',
-        state: 'applied',
-        version: 8,
-      },
-      {
-        checksum: TERMINAL_PROJECT_LIFECYCLE_CHECKSUM,
-        name: 'terminal-project-lifecycle',
-        state: 'applied',
-        version: 9,
-      },
-      {
-        checksum: TERMINAL_CONTINUITY_CATALOG_CHECKSUM,
-        name: 'terminal-continuity-catalog',
-        state: 'applied',
-        version: 10,
-      },
-      {
-        checksum: CLOUD_PROJECT_MEMBERSHIP_CHECKSUM,
-        name: 'cloud-project-membership',
-        state: 'applied',
-        version: 11,
-      },
-    ]);
-    const transactions = await client.query<{ readonly count: string }>(
-      `SELECT count(DISTINCT xmin::text)::text AS count
-         FROM claudian_cloud.schema_migrations`,
-    );
-    assert.deepEqual(transactions.rows, [{ count: '1' }]);
+    const metadata = await client.query<{ readonly singleton: boolean; readonly version: number; readonly checksum: string; readonly transaction: string }>('SELECT singleton, version, checksum, xmin::text AS transaction FROM claudian_cloud.schema_metadata');
+    const transaction = metadata.rows[0]?.transaction;
+    assert.deepEqual(metadata.rows, [{ singleton: true, version: 11, checksum: CURRENT_CHECKSUM, transaction }]);
+    await migrator.preflight();
+    await migrator.apply();
+    assert.deepEqual((await client.query('SELECT xmin::text AS transaction FROM claudian_cloud.schema_metadata')).rows, [{ transaction }]);
 
     const relations = await client.query<{ readonly relation: string }>(
       `SELECT table_name AS relation
@@ -308,7 +135,7 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
         'repository_placements',
         'request_comments',
         'request_ticket_relations',
-        'schema_migrations',
+        'schema_metadata',
         'secret_replay_tombstones',
         'source_protected_claim_envelopes',
         'ticket_comments',
@@ -347,35 +174,19 @@ async function verifyMigrationHistory(database: PostgresTestDatabase): Promise<v
       return true;
     });
 
-    await client.query(
-      `UPDATE claudian_cloud.schema_migrations
-          SET checksum = repeat('0', 64)
-        WHERE version = 1`,
-    );
-    await expectMigrationError(migrator, 'schema-drift', 1);
-    await client.query(
-      `UPDATE claudian_cloud.schema_migrations
-          SET checksum = $1
-        WHERE version = 1`,
-      [FOUNDATION_CHECKSUM],
-    );
-
-    await client.query(
-      `INSERT INTO claudian_cloud.schema_migrations
-        (version, name, checksum, state, applied_at)
-       VALUES (12, 'unexpected', repeat('1', 64), 'applied', clock_timestamp())`,
-    );
-    await expectMigrationError(migrator, 'schema-newer', 12);
-    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 12');
-
-    await client.query('DELETE FROM claudian_cloud.schema_migrations WHERE version = 1');
-    await expectMigrationError(migrator, 'schema-gap', 2);
-    await client.query(
-      `INSERT INTO claudian_cloud.schema_migrations
-        (version, name, checksum, state, applied_at)
-       VALUES (1, 'foundation', $1, 'applied', clock_timestamp())`,
-      [FOUNDATION_CHECKSUM],
-    );
+    for (const update of [
+      "SET checksum = repeat('0', 64)",
+      'SET version = 10',
+      'SET version = 12',
+    ]) {
+      await client.query(`UPDATE claudian_cloud.schema_metadata ${update}`);
+      await expectMigrationError(migrator, 'schema-incompatible');
+      await assert.rejects(migrator.preflight(), { code: 'schema-incompatible' });
+      await client.query('UPDATE claudian_cloud.schema_metadata SET version = 11, checksum = $1', [CURRENT_CHECKSUM]);
+    }
+    await client.query('DELETE FROM claudian_cloud.schema_metadata');
+    await expectMigrationError(migrator, 'schema-incompatible');
+    await client.query('INSERT INTO claudian_cloud.schema_metadata VALUES (true, 11, $1)', [CURRENT_CHECKSUM]);
   } finally {
     await client.end();
   }
@@ -515,7 +326,7 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       { owner: 'claudian_cloud_migration', relation: 'repository_placements' },
       { owner: 'claudian_cloud_migration', relation: 'request_comments' },
       { owner: 'claudian_cloud_migration', relation: 'request_ticket_relations' },
-      { owner: 'claudian_cloud_migration', relation: 'schema_migrations' },
+      { owner: 'claudian_cloud_migration', relation: 'schema_metadata' },
       { owner: 'claudian_cloud_migration', relation: 'secret_replay_tombstones' },
       { owner: 'claudian_cloud_migration', relation: 'source_protected_claim_envelopes' },
       { owner: 'claudian_cloud_migration', relation: 'ticket_comments' },
@@ -642,7 +453,7 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       repository_placements: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       request_comments: ['DELETE', 'INSERT', 'SELECT'],
       request_ticket_relations: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
-      schema_migrations: ['SELECT'],
+      schema_metadata: ['SELECT'],
       secret_replay_tombstones: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       source_protected_claim_envelopes: ['DELETE', 'INSERT', 'SELECT'],
       ticket_comments: ['DELETE', 'INSERT', 'SELECT'],
@@ -1107,69 +918,66 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
   }
 }
 
-describe('PostgresMigrator', () => {
-  it('rejects transaction control and nontransactional statements', () => {
-    verifyNontransactionalSqlRejection();
+describe('PostgresSchemaInitializer', () => {
+  it('initializes one current schema metadata row', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
+      const client = new Client({ connectionString: database.runtimeUrl });
+      try {
+        await client.connect();
+        const result = await client.query('SELECT singleton, version FROM claudian_cloud.schema_metadata');
+        assert.deepEqual(result.rows, [{ singleton: true, version: 11 }]);
+      } finally {
+        await client.end();
+      }
+    });
   });
 
   it('rejects adopted state and atomically establishes the PostgreSQL 18 schema', async () => {
     await withPostgresTestDatabase(async database => {
-      await verifyMigrationFailureState(database);
-      await verifyMigrationHistory(database);
+      await verifyUnmanagedSchemaRejection(database);
+      await verifyCurrentSchema(database);
       await verifySchemaContract(database);
     });
   });
 
-  it('rejects an applied schema prefix instead of upgrading it in place', async () => {
+  it('rolls back late DDL failure and can retry from an absent schema', async () => {
     await withPostgresTestDatabase(async database => {
-      const migrator = new PostgresMigrator({
-        connectionString: database.migrationUrl,
-      });
-      const client = new Client({ connectionString: database.migrationUrl });
+      const initializer = new PostgresSchemaInitializer({ connectionString: database.migrationUrl });
+      await execute(database.adminUrl, `
+        CREATE FUNCTION public.reject_current_schema() RETURNS event_trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF to_regclass('claudian_cloud.cloud_project_join_journals') IS NOT NULL THEN
+            RAISE EXCEPTION 'late-schema-failure';
+          END IF;
+        END; $$;
+        CREATE EVENT TRIGGER reject_current_schema ON ddl_command_end
+          EXECUTE FUNCTION public.reject_current_schema();
+      `);
+      await expectMigrationError(initializer, 'migration-failed');
+      const admin = new Client({ connectionString: database.adminUrl });
       try {
-        await client.connect();
-        await client.query(
-          `CREATE SCHEMA claudian_cloud AUTHORIZATION claudian_cloud_migration;
-           CREATE TABLE claudian_cloud.schema_migrations (
-             version integer PRIMARY KEY,
-             name text NOT NULL,
-             checksum text NOT NULL,
-             state text NOT NULL,
-             applied_at timestamptz
-           )`,
-        );
-        for (const applied of MIGRATION_HISTORY.slice(0, 10)) {
-          await client.query(
-            `INSERT INTO claudian_cloud.schema_migrations (
-               version, name, checksum, state, applied_at
-             ) VALUES ($1, $2, $3, 'applied', clock_timestamp())`,
-            [applied.version, applied.name, applied.checksum],
-          );
-        }
+        await admin.connect();
+        assert.deepEqual((await admin.query("SELECT to_regnamespace('claudian_cloud')::text AS schema")).rows, [{ schema: null }]);
+        await admin.query('DROP EVENT TRIGGER reject_current_schema; DROP FUNCTION public.reject_current_schema()');
       } finally {
-        await client.end();
+        await admin.end();
       }
-      for (const operation of [
-        () => migrator.preflight(),
-        () => migrator.apply(),
-      ]) await assert.rejects(operation(), error => {
-        assert.ok(error instanceof PostgresMigrationError);
-        assert.equal(error.code as string, 'schema-upgrade-unsupported');
-        assert.equal(error.version, 10);
-        return true;
-      });
+      assert.deepEqual(await initializer.preflight(), { currentVersion: 0, targetVersion: 11 });
+      await Promise.all([initializer.apply(), initializer.apply()]);
+      assert.deepEqual(await initializer.preflight(), { currentVersion: 11, targetVersion: 11 });
     });
   });
 
   it('sanitizes connection failures', async () => {
     const credential = 'migration-secret-sentinel';
-    const migrator = new PostgresMigrator({
+    const migrator = new PostgresSchemaInitializer({
       connectionString: `postgresql://migration:${credential}@127.0.0.1:1/cloud`,
     });
     await assert.rejects(
       migrator.apply(),
       error => {
-        assert.ok(error instanceof PostgresMigrationError);
+        assert.ok(error instanceof PostgresSchemaError);
         assert.equal(error.code, 'migration-failed');
         assert.doesNotMatch(JSON.stringify(error), new RegExp(credential));
         assert.doesNotMatch(String(error), /ECONNREFUSED|127\.0\.0\.1/);
@@ -1188,12 +996,26 @@ describe('PostgresMigrator', () => {
           'SELECT pg_advisory_lock($1::integer, $2::integer)',
           [1_665_883_532, 1],
         );
-        const preflight = new PostgresMigrator({
+        const preflight = new PostgresSchemaInitializer({
           connectionString: database.migrationUrl,
         }).preflight(controller.signal);
+        const deadline = Date.now() + 2_000;
+        let waiting = false;
+        while (Date.now() < deadline) {
+          const result = await blocker.query<{ readonly waiting: boolean }>(
+            `SELECT EXISTS (
+               SELECT 1 FROM pg_stat_activity
+                WHERE application_name = 'claudian-cloud-migration'
+                  AND wait_event = 'advisory'
+             ) AS waiting`,
+          );
+          if (result.rows[0]?.waiting === true) { waiting = true; break; }
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
         controller.abort();
+        assert.equal(waiting, true, 'initializer reached the held advisory lock');
         await assert.rejects(preflight, error => {
-          assert.ok(error instanceof PostgresMigrationError);
+          assert.ok(error instanceof PostgresSchemaError);
           assert.equal(error.code, 'migration-failed');
           return true;
         });

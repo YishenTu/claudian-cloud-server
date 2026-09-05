@@ -7,8 +7,7 @@ import { Client } from 'pg';
 
 import { CoordinationError } from '../../../src/coordination/CoordinationError.js';
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
-import { CLOUD_PROJECT_MEMBERSHIP_SCHEMA } from '../../../src/coordination/postgres/PostgresSchema.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import { LeaveCoordinator } from '../../../src/project-authority/lifecycle/leave/LeaveCoordinator.js';
 import { RetireCoordinator } from '../../../src/project-authority/lifecycle/retire/RetireCoordinator.js';
 import { DeletionCoordinator } from '../../../src/project-authority/lifecycle/delete/DeletionCoordinator.js';
@@ -176,27 +175,12 @@ const PROJECT_TABLES = Object.freeze([
 describe('portability lifecycle persistence', () => {
   it('applies lifecycle schemas with authority generation and forced Project RLS', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       const migration = new Client({ connectionString: database.migrationUrl });
       try {
         await migration.connect();
-        const history = await migration.query<{
-          readonly checksum: string;
-          readonly name: string;
-          readonly state: string;
-          readonly version: number;
-        }>(
-          `SELECT version, name, checksum, state
-             FROM claudian_cloud.schema_migrations
-            ORDER BY version`,
-        );
-        assert.deepEqual(history.rows.at(-1), {
-          ...CLOUD_PROJECT_MEMBERSHIP_SCHEMA,
-          state: 'applied',
-        });
-
         const projectColumns = await migration.query<{
           readonly column_default: string | null;
           readonly column_name: string;
@@ -271,7 +255,7 @@ describe('portability lifecycle persistence', () => {
 
   it('advances service state and authority generation through exact CAS', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-authority-state');
       await seedPlacement(database, 'project-authority-state');
       let store = coordination(database);
@@ -374,7 +358,7 @@ describe('portability lifecycle persistence', () => {
 
   it('constructs an ordinary read facade with lifecycle fences but no mutations', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const store = coordination(database);
       try {
         await store.withProjectReadScope('project-read-facade', scope => {
@@ -416,7 +400,7 @@ describe('portability lifecycle persistence', () => {
 
   it('rejects malformed recovery cursor kinds before pagination', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const store = coordination(database);
       try {
         await expectInvalidRecord(store.listRecoveryCandidates({
@@ -435,7 +419,7 @@ describe('portability lifecycle persistence', () => {
 
   it('persists lifecycle phase CAS and recovery metadata through restart', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       let store = coordination(database);
       const journal = {
         actorMemberId: 'member-manager',
@@ -562,7 +546,7 @@ describe('portability lifecycle persistence', () => {
 
   it('scopes lifecycle idempotency by actor and operation kind', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const store = coordination(database);
       try {
         await store.withProjectScope('project-idempotency', async scope => {
@@ -674,7 +658,7 @@ describe('portability lifecycle persistence', () => {
 
   it('persists typed transfer recovery facts and proofs through restart', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       let store = coordination(database);
       const projectId = 'project-transfer-recovery';
       const transferId = 'transfer-recovery';
@@ -831,7 +815,7 @@ describe('portability lifecycle persistence', () => {
 
   it('persists exact LAN cancellation evidence and deletes target claim hashes', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const store = coordination(database);
       const projectId = 'project-lan-cancellation';
       const transferId = 'transfer-lan-cancellation';
@@ -973,7 +957,7 @@ describe('portability lifecycle persistence', () => {
 
   it('limits Leave recovery to the exact revoked former principal', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const projectId = 'project-leave-replay';
       const memberId = 'member-leaving';
       await seedProject(database, projectId);
@@ -1101,7 +1085,7 @@ describe('portability lifecycle persistence', () => {
 
   it('settles Leave membership and all principal bindings through exact replay', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const projectId = 'project-leave-settlement';
       const memberId = 'member-leaving';
       const principalId = 'principal:leaving';
@@ -1194,7 +1178,7 @@ describe('portability lifecycle persistence', () => {
 
   it('scopes equal Leave idempotency keys to their exact membership actors', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const projectId = 'project-leave-actor-scope';
       const actors = [
         { memberId: 'member-leaving-a', oid: '8'.repeat(40),
@@ -1273,7 +1257,7 @@ describe('portability lifecycle persistence', () => {
 
   it('atomically terminalizes Retire and creates one deletion handoff', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const projectId = 'project-retire-settlement';
       const memberId = 'member-manager';
       const principalId = 'principal:manager';
@@ -1444,7 +1428,7 @@ describe('portability lifecycle persistence', () => {
 
   it('separates target claim hashes from protected source custody', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-claims');
       await seedMembership(database, 'project-claims', 'member-offline');
       const store = coordination(database);
@@ -1790,7 +1774,7 @@ describe('portability lifecycle persistence', () => {
 
   it('keeps imported claim overrides monotonic and resolves one effective redemption authority', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const projectId = 'project-claim-overrides';
       const transferId = 'transfer-claim-overrides';
       const newerTransferId = 'transfer-claim-overrides-next';
@@ -2151,7 +2135,7 @@ describe('portability lifecycle persistence', () => {
 
   it('rotates complete claim batches and permanently revokes older revisions', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const store = coordination(database);
       const transferId = 'transfer-rotation';
       const projectId = 'project-rotation';
@@ -2358,7 +2342,7 @@ describe('portability lifecycle persistence', () => {
 
   it('replaces uncommitted protected claim custody as one complete set', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const store = coordination(database);
       const projectId = 'project-envelope-rotation';
       const transferId = 'transfer-envelope-rotation';
@@ -2465,7 +2449,7 @@ describe('portability lifecycle persistence', () => {
 
   it('accepts only exact terminal cloud-to-LAN transfer responses', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const store = coordination(database);
       const projectId = 'project-transfer-terminal';
       const transferId = 'transfer-terminal';
@@ -2588,7 +2572,7 @@ describe('portability lifecycle persistence', () => {
 
   it('persists terminal, deletion, tombstone, and backup continuity facts', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const store = coordination(database);
       try {
         await store.withProjectScope('project-terminal', async scope => {
@@ -2737,7 +2721,7 @@ describe('portability lifecycle persistence', () => {
 
   it('removes Project content while preserving the exact deletion partition', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const projectId = 'project-delete-content';
       await seedProject(database, projectId);
       await seedMembership(database, projectId, 'member-manager');
@@ -2956,7 +2940,7 @@ describe('portability lifecycle persistence', () => {
 
   it('enumerates and expires codec-validated terminal responders', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const store = coordination(database);
       const responders = [
         { operationId: 'retirement-catalog-a', projectId: 'project-catalog-a' },
@@ -3093,7 +3077,7 @@ describe('portability lifecycle persistence', () => {
 
   it('isolates overlapping lifecycle, claim, deletion, and backup identities', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const store = coordination(database);
       const projects = [
         { claimSha256: '1'.repeat(64), projectId: 'project-isolated-a' },

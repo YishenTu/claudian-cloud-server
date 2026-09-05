@@ -5,7 +5,7 @@ import { Client } from 'pg';
 
 import { CoordinationError } from '../../../src/coordination/CoordinationError.js';
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import {
   type PostgresTestDatabase,
   withPostgresTestDatabase,
@@ -49,9 +49,9 @@ async function expectCoordinationError(
 }
 
 describe('development bootstrap persistence', () => {
-  it('applies and reapplies migration 0002 with forced-RLS runtime grants', async () => {
+  it('initializes development bootstrap storage with forced-RLS runtime grants', async () => {
     await withPostgresTestDatabase(async database => {
-      const migrator = new PostgresMigrator({
+      const migrator = new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       });
       await migrator.apply();
@@ -60,29 +60,6 @@ describe('development bootstrap persistence', () => {
       const migration = new Client({ connectionString: database.migrationUrl });
       try {
         await migration.connect();
-        const history = await migration.query<{
-          readonly name: string;
-          readonly state: string;
-          readonly version: number;
-        }>(
-          `SELECT version, name, state
-             FROM claudian_cloud.schema_migrations
-            ORDER BY version`,
-        );
-        assert.deepEqual(history.rows, [
-          { name: 'foundation', state: 'applied', version: 1 },
-          { name: 'development-bootstrap', state: 'applied', version: 2 },
-          { name: 'project-read-events', state: 'applied', version: 3 },
-          { name: 'collaboration', state: 'applied', version: 4 },
-          { name: 'accept-recovery', state: 'applied', version: 5 },
-          { name: 'portability-lifecycle', state: 'applied', version: 6 },
-          { name: 'lan-to-cloud-transfer', state: 'applied', version: 7 },
-          { name: 'cloud-to-lan-transfer', state: 'applied', version: 8 },
-          { name: 'terminal-project-lifecycle', state: 'applied', version: 9 },
-          { name: 'terminal-continuity-catalog', state: 'applied', version: 10 },
-          { name: 'cloud-project-membership', state: 'applied', version: 11 },
-        ]);
-
         const relations = await migration.query<{
           readonly forced: boolean;
           readonly relation: string;
@@ -209,7 +186,7 @@ describe('development bootstrap persistence', () => {
 
   it('persists exact attempts, two reports, upload, activation, and cancellation phases', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       const store = coordination(database);
@@ -674,7 +651,7 @@ describe('development bootstrap persistence', () => {
 
   it('returns mixed-case reporters in canonical en-US order', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const store = coordination(database);
       try {
         await store.withProjectScope('project-order', async scope => {
@@ -718,7 +695,7 @@ describe('development bootstrap persistence', () => {
 
   it('serializes live attempts while unrelated Projects continue', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       const store = coordination(database);
@@ -785,7 +762,7 @@ describe('development bootstrap persistence', () => {
 
   it('rolls back a journal when its recovery candidate cannot be claimed', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       const store = coordination(database);

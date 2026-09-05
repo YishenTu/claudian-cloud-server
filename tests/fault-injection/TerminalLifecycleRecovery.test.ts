@@ -10,7 +10,7 @@ import { describe, it } from 'node:test';
 
 import { CollabError } from '@claudian-collab/protocol';
 
-import { PostgresMigrator } from '../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import { DeletionCoordinator } from '../../src/project-authority/lifecycle/delete/DeletionCoordinator.js';
 import {
   LeaveCoordinator,
@@ -161,7 +161,7 @@ async function expectMissing(path: string): Promise<void> {
 describe('terminal lifecycle cross-store recovery', () => {
   it('recovers exact Leave after membership settlement and store restart', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const root = await mkdtemp(join(tmpdir(), 'claudian-leave-recovery-'));
       const repositoryRoot = join(root, 'repositories');
       const operationRoot = join(root, 'operations');
@@ -302,7 +302,7 @@ describe('terminal lifecycle cross-store recovery', () => {
 
   it('recovers every deletion phase after process death with PostgreSQL and real Git', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       const root = await mkdtemp(join(tmpdir(), 'claudian-terminal-recovery-'));
       const repositoryRoot = join(root, 'repositories');
       const operationRoot = join(root, 'operations');

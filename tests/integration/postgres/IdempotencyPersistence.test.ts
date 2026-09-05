@@ -5,7 +5,7 @@ import { collabControlOperationCodec } from '@claudian-collab/protocol';
 import { Client } from 'pg';
 
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import {
   type PostgresTestDatabase,
   withPostgresTestDatabase,
@@ -59,7 +59,7 @@ async function seedProject(database: PostgresTestDatabase, projectId: string): P
 describe('Collaboration idempotency persistence', () => {
   it('stores a valid escaped Ticket response up to the protocol envelope limit', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-a');
       const store = coordination(database);
       const body = '\\'.repeat(32 * 1024);
@@ -106,7 +106,7 @@ describe('Collaboration idempotency persistence', () => {
 
   it('returns exact replay and reports a changed normalized fingerprint', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-a');
       const store = coordination(database);
       const identity = {
@@ -155,7 +155,7 @@ describe('Collaboration idempotency persistence', () => {
 
   it('serializes concurrent same-key stores into one durable result', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-a');
       const store = coordination(database);
       const input = {
@@ -193,7 +193,7 @@ describe('Collaboration idempotency persistence', () => {
 
   it('retains results for the Project lifetime after membership state changes', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-a');
       const store = coordination(database);
       const identity = {
@@ -245,7 +245,7 @@ describe('Collaboration idempotency persistence', () => {
 
   it('rolls back collaboration state, idempotency, and event append together', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seedProject(database, 'project-a');
       const store = coordination(database);
       const identity = {

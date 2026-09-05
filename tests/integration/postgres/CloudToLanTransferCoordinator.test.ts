@@ -14,7 +14,7 @@ import {
 import { Client } from 'pg';
 
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import { ClaimCustodyKeyReferenceVerifier } from '../../../src/environment-maintenance/commands/ClaimCustodyKeyReferenceVerifier.js';
 import { ActiveClaimCustodyKeyReferenceGate } from '../../../src/project-authority/lifecycle/ActiveClaimCustodyKeyReferenceGate.js';
 import {
@@ -178,7 +178,7 @@ function custody(claims: Map<string, string>): CloudToLanClaimCustodyPort {
 describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
   it('commits protected custody, one-way relinquishment, and deletion handoff', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const store = coordination(database);
       const claims = new Map<string, string>();
@@ -581,7 +581,7 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
 
   it('compacts accepted-target cancellation proof into exact terminal replay before backup', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
       const store = coordination(database);
       const claims = new Map<string, string>();

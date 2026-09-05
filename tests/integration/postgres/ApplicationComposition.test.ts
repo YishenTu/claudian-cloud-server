@@ -37,7 +37,7 @@ import { ComposedCloudLifecycleRuntime } from '../../../src/composition/CloudLif
 import { TerminalResponderExpiryReconciler } from '../../../src/composition/TerminalResponderExpiryReconciler.js';
 import { decodeClaimCustodyKeyring } from '../../../src/config/ClaimCustodyKeyringConfig.js';
 import type { ServerConfig } from '../../../src/config/ServerConfig.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
 import { SafeLogger } from '../../../src/observability/SafeLogger.js';
 import { TrustedPrincipalProvider } from '../../../src/request-context/TrustedPrincipalProvider.js';
@@ -417,7 +417,7 @@ describe('application composition', { concurrency: false }, () => {
 
   before(async () => {
     database = await acquirePostgresTestDatabase();
-    await new PostgresMigrator({
+    await new PostgresSchemaInitializer({
       connectionString: database.migrationUrl,
     }).apply();
     authorityRoot = await mkdtemp(join(tmpdir(), 'claudian-app-authority-'));
@@ -875,7 +875,7 @@ while :; do sleep 1; done`,
       await blocker.connect();
       await blocker.query('BEGIN');
       await blocker.query(
-        'LOCK TABLE claudian_cloud.schema_migrations IN ACCESS EXCLUSIVE MODE',
+        'LOCK TABLE claudian_cloud.schema_metadata IN ACCESS EXCLUSIVE MODE',
       );
 
       const starting = application.start();
@@ -1082,7 +1082,7 @@ while :; do sleep 1; done`,
     const sourceA = '100.64.0.10';
     const sourceB = '100.64.0.11';
     const productionDatabase = await acquirePostgresTestDatabase();
-    await new PostgresMigrator({
+    await new PostgresSchemaInitializer({
       connectionString: productionDatabase.migrationUrl,
     }).apply();
     const productionAuthorityRoot = await mkdtemp(join(
@@ -1217,7 +1217,7 @@ while :; do sleep 1; done`,
 
   it('returns the imported transfer descriptor and replays the durable claim', async () => {
     const database = await acquirePostgresTestDatabase();
-    await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+    await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
     const authorityRoot = await mkdtemp(join(tmpdir(), 'claudian-reissue-descriptor-'));
     const repositoryRoot = join(authorityRoot, 'repositories');
     await mkdir(repositoryRoot, { mode: 0o700 });

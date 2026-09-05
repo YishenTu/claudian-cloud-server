@@ -36,7 +36,7 @@ import {
 } from '../../../src/composition/createApplication.js';
 import type { ServerConfig } from '../../../src/config/ServerConfig.js';
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import { SafeLogger } from '../../../src/observability/SafeLogger.js';
 import {
   acquirePostgresTestDatabase,
@@ -533,7 +533,7 @@ describe('Accept recovery gate', { concurrency: false }, () => {
     const seed = new Client({ connectionString: database.migrationUrl });
     let application: Application | undefined;
     try {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await mkdir(repositoryRoot, { mode: 0o700 });
       await mkdir(stagingRoot, { mode: 0o700 });
       await writeFile(

@@ -3,7 +3,7 @@
 ## Test ownership
 
 - `contract/` proves the one shared Cloud protocol registry, codecs, compatibility behavior, safe errors, and trusted-principal binding.
-- `integration/postgres/` uses real PostgreSQL for migrations, grants, RLS, advisory locks, pool budgets, idempotency, events, and concurrency.
+- `integration/postgres/` uses real PostgreSQL for current-schema initialization, grants, RLS, advisory locks, pool budgets, idempotency, events, and concurrency.
 - `integration/git/` uses real Git and bare repositories for Smart HTTP, refs, placement generations, path containment, quotas, sandboxing, and process lifecycle.
 - `fault-injection/` kills work after every documented durable phase and proves exact completion, idempotent replay, permitted staging cleanup, or `recovery-required` isolation.
 - `capacity/` exercises the staged workloads and provisional limits in `ARCHITECTURE.md`; results revise configuration and do not silently become product commitments.

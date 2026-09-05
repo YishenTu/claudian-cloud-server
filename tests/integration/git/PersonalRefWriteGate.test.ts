@@ -23,7 +23,7 @@ import { Client } from 'pg';
 
 import { createApplication, type Application } from '../../../src/composition/createApplication.js';
 import type { ServerConfig } from '../../../src/config/ServerConfig.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import { SafeLogger } from '../../../src/observability/SafeLogger.js';
 import { acquirePostgresTestDatabase } from '../../helpers/PostgresTestDatabase.js';
 
@@ -294,7 +294,7 @@ describe('personal ref write gate', { concurrency: false }, () => {
     const seed = new Client({ connectionString: database.migrationUrl });
     let application: Application | undefined;
     try {
-      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await mkdir(repositoryRoot, { mode: 0o700 });
       await mkdir(stagingRoot, { mode: 0o700 });
       await writeFile(

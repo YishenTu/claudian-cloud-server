@@ -6,7 +6,7 @@ import { Client } from 'pg';
 
 import type { PrepareCloudProjectCreationInput } from '../../../src/coordination/CloudProjectCreationPersistence.js';
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
-import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
+import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import {
   type PostgresTestDatabase,
   withPostgresTestDatabase,
@@ -92,7 +92,7 @@ function withProject(
 describe('Postgres Cloud Project creation persistence', () => {
   it('scopes equal creation operation IDs to their Projects', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       const store = coordination(database);
@@ -124,7 +124,7 @@ describe('Postgres Cloud Project creation persistence', () => {
 
   it('keeps prepared authority invisible and atomically activates its exact facts', async () => {
     await withPostgresTestDatabase(async database => {
-      await new PostgresMigrator({
+      await new PostgresSchemaInitializer({
         connectionString: database.migrationUrl,
       }).apply();
       const store = coordination(database);
