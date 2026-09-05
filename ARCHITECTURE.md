@@ -202,18 +202,11 @@ is not a client-writable Cloud protocol field. Preventing direct backend access
 and forged ingress identity is a deployment requirement, not Cloud domain
 policy. The private-development exception is defined in §10.1.
 
-The production profile contract decides which attribution is mandatory.
-Managed ingress must supply both the stable Account ID and device-credential ID
-established upstream. The supported self-hosted production profile accepts one
-bounded PROXY protocol v2 source assertion only from the operator-owned loopback
-TCP ingress and resolves it through an immutable operator source-to-principal
-mapping. The operator authenticates the connection and owns that mapping;
-Cloud Server neither validates caller credentials nor treats a direct socket
-peer, ordinary header, or identity-bearing PROXY TLV as a principal. Missing or
-unmapped attribution fails closed for every principal-bound route. In this
-self-hosted profile, each mapped principal is the authenticated device's stable
-Claudian installation key; LAN-to-Cloud source proof binds that same key so a
-proof captured by one admitted installation cannot be replayed by another.
+The deployment profile decides which attribution is mandatory. The supported self-hosted profile admits one bounded PROXY protocol v2 source frame from the operator-owned loopback TCP ingress and checks an immutable source allowlist. That source only admits the channel; it does not select identity. Each request then carries one `x-claudian-ingress-principal` header and optionally one `x-claudian-ingress-device-credential` header. Cloud Server validates assertion shape, binds configured provider provenance, and derives Project membership and role from its own state. It neither parses nor verifies the caller's credential. Missing, duplicate, malformed, or unprotected assertions fail closed.
+
+A public ingress must authenticate the caller and replace incoming identity headers with the established assertion. An operator may explicitly skip authentication in a private Tailscale test environment and forward client assertions unchanged. That is a trusted test policy, not proof that Tailscale authenticated a Vault identity. Neither mode maps a device or IP address to a Project Member.
+
+The client stores one random Cloud credential per Project inside the Vault. Its opaque principal is stable across synchronized devices and endpoint relocation; another Vault with a different credential has another identity. LAN-to-Cloud source proof binds the same Vault principal used by the Cloud connection. Physical LAN Host ownership, process admission, and recovery remain installation-bound.
 
 The request may carry the target `projectId` and operation parameters. It may
 not supply authoritative `accountId`, `deviceId`, `memberId`, role,

@@ -4,7 +4,7 @@
 
 - This repository owns the Cloud authority for Claudian Collab: canonical Git repositories, authoritative coordination state, Project authorization and routing, and their data lifecycles.
 - Project is the membership, authorization, and managed-service eligibility scope. Do not introduce a separate Team entity without a new product decision.
-- Endpoint reachability, entry-access policy, caller authentication, presented credential validation, and device credential issuance belong to the deployment operator's trusted ingress and, for managed deployments, the private Control Plane. This server consumes a trusted ingress principal; it does not implement or own those access and authentication mechanisms.
+- Endpoint reachability, entry-access policy, caller authentication, presented credential validation, and caller credential issuance belong to the deployment operator's trusted ingress and, for managed deployments, the private Control Plane. This server consumes a trusted ingress principal; it does not implement or own those access and authentication mechanisms.
 - Clients may select a target Project, but they cannot assert authoritative Account, Member, role, entitlement, service-state, or repository-placement values. This server derives Project membership and role from its own state, authorizes the operation, and resolves its routing.
 - Claudian coding agents run on participant devices. The Cloud authority must not execute provider-backed coding-agent workloads or ingest provider sessions, conversations, credentials, transcripts, or private Vault state.
 - Project collaboration data is limited to the explicit Project repository and its coordination records. Do not broaden that boundary implicitly.

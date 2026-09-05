@@ -4,8 +4,8 @@
 
 - Transport adapters operate only after the deployment-owned trusted ingress. They bind an accepted `IngressPrincipal`, decode the canonical Cloud protocol, dispatch to owning application modules, stream responses, and map only safe errors.
 - This repository does not authenticate callers or validate presented caller credentials. Do not add login, token parsing, credential lookup, refresh, revocation, or identity-provider behavior here.
-- Fail closed when the trusted principal is absent, malformed, or presented through an unsupported backend path. Client bodies, query parameters, Git fields, and ordinary public headers cannot populate or override ingress identity.
-- In the self-hosted production profile, the loopback listener may consume one bounded PROXY protocol v2 frame from the operator-owned TCP ingress and attach only its exact allowlisted source-to-principal assertion to the accepted socket. Raw HTTP, ordinary forwarded headers, unmapped sources, malformed frames, and a second frame never establish identity; public health and capability routes remain principal-free.
+- Fail closed when the trusted principal is absent, malformed, or presented through an unsupported backend path. Client bodies, query parameters, Git fields, and headers outside the admitted ingress channel cannot populate or override ingress identity.
+- In the self-hosted production profile, the loopback listener may consume one bounded PROXY protocol v2 frame from the operator-owned TCP ingress and admit only its exact allowlisted source, then bind the operator-established identity header separately for each request. Raw HTTP, headers without an admitted channel, unlisted sources, malformed frames, and a second frame never establish identity; public health and capability routes remain principal-free.
 - Server code never issues SQL, resolves repository paths, or invokes raw Git.
 
 ## Surface ownership

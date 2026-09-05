@@ -1,8 +1,6 @@
 import type { IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
 
-import type { TrustedIngressPrincipalConfig } from '../config/ServerConfig.js';
-
 const SIGNATURE = Buffer.from([
   0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d,
   0x0a, 0x51, 0x55, 0x49, 0x54, 0x0a,
@@ -13,14 +11,16 @@ const IPV6_ADDRESS_BYTES = 36;
 
 export interface ProxyV2IngressOptions {
   readonly preambleTimeoutMs: number;
-  readonly principals: readonly TrustedIngressPrincipalConfig[];
+  readonly allowedSources: readonly string[];
+  readonly providerId: string;
 }
 
 /** Consumes only operator-supplied PROXY v2 framing and retains no address metadata. */
 export class ProxyV2Ingress {
-  readonly #assertions = new WeakMap<Socket, unknown>();
+  readonly #admitted = new WeakSet<Socket>();
   readonly #preambleTimeoutMs: number;
-  readonly #principalsBySource: ReadonlyMap<string, unknown>;
+  readonly #allowedSources: ReadonlySet<string>;
+  readonly #providerId: string;
 
   constructor(options: ProxyV2IngressOptions) {
     if (
@@ -29,19 +29,29 @@ export class ProxyV2Ingress {
       || options.preambleTimeoutMs > 60_000
     ) throw new TypeError('proxy-v2-ingress.preamble-timeout-invalid');
     this.#preambleTimeoutMs = options.preambleTimeoutMs;
-    this.#principalsBySource = new Map(
-      options.principals.map(entry => [entry.sourceAddress, entry.assertion]),
-    );
+    this.#allowedSources = new Set(options.allowedSources);
+    this.#providerId = options.providerId;
   }
 
   establishedAssertion(request: IncomingMessage): unknown {
-    return this.#assertions.get(request.socket);
+    if (!this.#admitted.has(request.socket)) return undefined;
+    const principal = assertionHeader(request, 'x-claudian-ingress-principal');
+    const device = assertionHeader(request, 'x-claudian-ingress-device-credential');
+    if (principal === undefined || principal === null || device === null) return undefined;
+    return {
+      principalId: principal,
+      ...(device === undefined ? {} : { deviceCredentialId: device }),
+      provenance: {
+        kind: 'operator-protected-channel',
+        providerId: this.#providerId,
+      },
+    };
   }
 
   accept(socket: Socket, acceptHttp: (socket: Socket) => void): void {
     socket.pause();
     let buffered = Buffer.alloc(0);
-    let parsed: Readonly<{ readonly assertion: unknown; readonly bytes: number }> | undefined;
+    let parsed: number | undefined;
     let settled = false;
     const timeout = setTimeout(() => reject(), this.#preambleTimeoutMs);
     timeout.unref();
@@ -62,11 +72,11 @@ export class ProxyV2Ingress {
       clearPreambleListeners(true);
       socket.destroy();
     };
-    const accept = (bytes: Buffer, assertion?: unknown): void => {
+    const accept = (bytes: Buffer, admitted = false): void => {
       if (settled) return;
       settled = true;
       clearPreambleListeners(false);
-      if (assertion !== undefined) this.#assertions.set(socket, assertion);
+      if (admitted) this.#admitted.add(socket);
       if (bytes.length > 0) socket.unshift(bytes);
       acceptHttp(socket);
       socket.resume();
@@ -101,15 +111,15 @@ export class ProxyV2Ingress {
           return;
         }
       }
-      if (buffered.length <= parsed.bytes) return;
-      const remainder = buffered.subarray(parsed.bytes);
+      if (buffered.length <= parsed) return;
+      const remainder = buffered.subarray(parsed);
       const prefixLength = Math.min(remainder.length, SIGNATURE.length);
       if (remainder.subarray(0, prefixLength).equals(SIGNATURE.subarray(0, prefixLength))) {
         if (remainder.length < SIGNATURE.length) return;
         reject();
         return;
       }
-      accept(remainder, parsed.assertion);
+      accept(remainder, true);
     };
     const onEnd = (): void => reject();
     const onError = (): void => reject();
@@ -127,7 +137,7 @@ export class ProxyV2Ingress {
 
   #parseHeader(
     value: Buffer,
-  ): Readonly<{ readonly assertion: unknown; readonly bytes: number }> | undefined {
+  ): number | undefined {
     const family = value[13];
     const expectedAddressBytes = family === 0x11
       ? IPV4_ADDRESS_BYTES
@@ -141,10 +151,7 @@ export class ProxyV2Ingress {
     const sourceAddress = family === 0x11
       ? ipv4Address(value.subarray(FIXED_HEADER_BYTES, FIXED_HEADER_BYTES + 4))
       : ipv6Address(value.subarray(FIXED_HEADER_BYTES, FIXED_HEADER_BYTES + 16));
-    const assertion = this.#principalsBySource.get(sourceAddress);
-    return assertion === undefined
-      ? undefined
-      : Object.freeze({ assertion, bytes: totalBytes });
+    return this.#allowedSources.has(sourceAddress) ? totalBytes : undefined;
   }
 }
 
@@ -180,4 +187,14 @@ function ipv6Address(value: Buffer): string {
   const left = groups.slice(0, bestStart).join(':');
   const right = groups.slice(bestStart + bestLength).join(':');
   return `${left}::${right}`;
+}
+
+function assertionHeader(request: IncomingMessage, name: string): string | null | undefined {
+  let value: string | undefined;
+  for (let index = 0; index < request.rawHeaders.length; index += 2) {
+    if (request.rawHeaders[index]?.toLowerCase() !== name) continue;
+    if (value !== undefined) return null;
+    value = request.rawHeaders[index + 1];
+  }
+  return value;
 }

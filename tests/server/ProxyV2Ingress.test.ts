@@ -20,20 +20,86 @@ afterEach(async () => {
 });
 
 describe('ProxyV2Ingress', () => {
-  it('binds only an exact mapped fragmented PROXY v2 source assertion', async () => {
+  it('uses the Vault assertion across devices and separates Vaults on one device', async () => {
     const ingress = new ProxyV2Ingress({
       preambleTimeoutMs: 1_000,
-      principals: [{
-        assertion: {
-          deviceCredentialId: 'mac-a',
-          principalId: 'account-a',
-          provenance: {
-            kind: 'operator-protected-channel',
-            providerId: 'tailscale-serve',
-          },
-        },
-        sourceAddress: '100.64.0.10',
-      }],
+      allowedSources: ['100.64.0.10', '100.64.0.11'],
+      providerId: 'test-ingress',
+    });
+    const server = new HttpServer({
+      config: { host: '127.0.0.1', port: 0 },
+      connectionIngress: ingress,
+      isReady: () => true,
+      routes: [new PrincipalRoute(bindingFor(ingress))],
+    });
+    running.add(server);
+    const { port } = await server.start();
+    for (const [source, principal] of [
+      ['100.64.0.10', 'vault-a'],
+      ['100.64.0.11', 'vault-a'],
+      ['100.64.0.10', 'vault-b'],
+    ] as const) {
+      const response = await rawRequest(port, [
+        proxyV2Ipv4Frame(source),
+        Buffer.from(`GET /principal HTTP/1.1\r\nHost: cloud\r\nx-claudian-ingress-principal: ${principal}\r\nConnection: close\r\n\r\n`),
+      ]);
+      assert.equal(response.split('\r\n\r\n')[1], `${principal}:`);
+    }
+  });
+
+  it('rejects missing, malformed, and duplicate assertions on an admitted channel', async () => {
+    const ingress = ingressFor('100.64.0.10');
+    const server = new HttpServer({
+      config: { host: '127.0.0.1', port: 0 },
+      connectionIngress: ingress,
+      isReady: () => true,
+      routes: [new PrincipalRoute(bindingFor(ingress))],
+    });
+    running.add(server);
+    const { port } = await server.start();
+    for (const headers of [
+      '',
+      'x-claudian-ingress-principal: \r\n',
+      'x-claudian-ingress-principal: invalid principal\r\n',
+      'x-claudian-ingress-principal: vault-a\r\nX-Claudian-Ingress-Principal: vault-a\r\n',
+      'x-claudian-ingress-principal: vault-a\r\nx-claudian-ingress-device-credential: a\r\nx-claudian-ingress-device-credential: b\r\n',
+    ]) {
+      const response = await rawRequest(port, [proxyV2Ipv4Frame('100.64.0.10'), Buffer.from(
+        `GET /principal HTTP/1.1\r\nHost: cloud\r\n${headers}Connection: close\r\n\r\n`,
+      )]);
+      assert.match(response, /^HTTP\/1\.1 401/u);
+    }
+  });
+
+  it('binds every keep-alive request separately without retaining a previous Vault identity', async () => {
+    const ingress = ingressFor('100.64.0.10');
+    const server = new HttpServer({
+      config: { host: '127.0.0.1', port: 0 },
+      connectionIngress: ingress,
+      isReady: () => true,
+      routes: [new PrincipalRoute(bindingFor(ingress))],
+    });
+    running.add(server);
+    const { port } = await server.start();
+    const response = await rawRequest(port, [proxyV2Ipv4Frame('100.64.0.10'), Buffer.from(
+      'GET /principal HTTP/1.1\r\nHost: cloud\r\nx-claudian-ingress-principal: vault-a\r\n\r\n'
+      + 'GET /principal HTTP/1.1\r\nHost: cloud\r\nx-claudian-ingress-principal: vault-b\r\n\r\n'
+      + 'GET /principal HTTP/1.1\r\nHost: cloud\r\nConnection: close\r\n\r\n',
+    )]);
+    assert.deepEqual(response.split('HTTP/1.1 ').slice(1).map(part => ({
+      status: part.slice(0, 3), body: part.split('\r\n\r\n')[1],
+    })), [
+      { status: '200', body: 'vault-a:' },
+      { status: '200', body: 'vault-b:' },
+      { status: '401', body: '' },
+    ]);
+  });
+
+  it('binds the request assertion after a fragmented allowed PROXY v2 source', async () => {
+    const ingress = new ProxyV2Ingress({
+      preambleTimeoutMs: 1_000,
+      allowedSources: ['100.64.0.10'],
+      providerId: 'test-ingress',
     });
     const binding = new RequestPrincipalBinding({
       trustedPrincipal: {
@@ -54,14 +120,14 @@ describe('ProxyV2Ingress', () => {
       frame.subarray(0, 5),
       frame.subarray(5, 15),
       frame.subarray(15),
-      Buffer.from('GET /principal HTTP/1.1\r\nHost: cloud\r\nConnection: close\r\n\r\n'),
+      Buffer.from('GET /principal HTTP/1.1\r\nHost: cloud\r\nx-claudian-ingress-principal: account-a\r\nConnection: close\r\n\r\n'),
     ]);
 
     assert.match(response, /^HTTP\/1\.1 200 OK/mu);
-    assert.match(response, /account-a:mac-a/u);
+    assert.match(response, /account-a:/u);
   });
 
-  it('binds a mapped assertion when the PROXY frame and HTTP request coalesce', async () => {
+  it('binds an assertion when the allowed PROXY frame and HTTP request coalesce', async () => {
     const ingress = ingressFor('100.64.0.10');
     const binding = bindingFor(ingress);
     const server = new HttpServer({
@@ -74,7 +140,7 @@ describe('ProxyV2Ingress', () => {
     const address = await server.start();
     const response = await rawRequest(address.port, [Buffer.concat([
       proxyV2Ipv4Frame('100.64.0.10'),
-      Buffer.from('GET /principal HTTP/1.1\r\nHost: cloud\r\nConnection: close\r\n\r\n'),
+      Buffer.from('GET /principal HTTP/1.1\r\nHost: cloud\r\nx-claudian-ingress-principal: account-a\r\nConnection: close\r\n\r\n'),
     ])]);
 
     assert.match(response, /^HTTP\/1\.1 200 OK/mu);
@@ -97,7 +163,7 @@ describe('ProxyV2Ingress', () => {
     assert.equal(health.status, 200);
     const protectedResponse = await fetch(
       `http://127.0.0.1:${String(address.port)}/principal`,
-      { headers: { 'x-claudian-trusted-principal': 'account-a' } },
+      { headers: { 'x-claudian-ingress-principal': 'account-a' } },
     );
     assert.equal(protectedResponse.status, 401);
   });
@@ -111,7 +177,7 @@ describe('ProxyV2Ingress', () => {
     });
     running.add(server);
     const address = await server.start();
-    const request = Buffer.from('GET /livez HTTP/1.1\r\nHost: cloud\r\nConnection: close\r\n\r\n');
+    const request = Buffer.from('GET /livez HTTP/1.1\r\nHost: cloud\r\nx-claudian-ingress-principal: account-a\r\nConnection: close\r\n\r\n');
 
     const unmapped = await rawRequest(address.port, [
       proxyV2Ipv4Frame('100.64.0.11'),
@@ -150,7 +216,8 @@ describe('ProxyV2Ingress', () => {
   it('bounds an incomplete PROXY signature before HTTP ownership begins', async () => {
     const ingress = new ProxyV2Ingress({
       preambleTimeoutMs: 20,
-      principals: ingressPrincipals('100.64.0.10'),
+      allowedSources: ['100.64.0.10'],
+      providerId: 'test-ingress',
     });
     const server = new HttpServer({
       config: { host: '127.0.0.1', port: 0 },
@@ -224,21 +291,9 @@ class PrincipalRoute implements HttpRouteHandler {
 function ingressFor(sourceAddress: string): ProxyV2Ingress {
   return new ProxyV2Ingress({
     preambleTimeoutMs: 1_000,
-    principals: ingressPrincipals(sourceAddress),
+    allowedSources: [sourceAddress],
+    providerId: 'test-ingress',
   });
-}
-
-function ingressPrincipals(sourceAddress: string) {
-  return [{
-      assertion: {
-        principalId: 'account-a',
-        provenance: {
-          kind: 'operator-protected-channel',
-          providerId: 'tailscale-serve',
-        },
-      },
-      sourceAddress,
-    }] as const;
 }
 
 function bindingFor(ingress: ProxyV2Ingress): RequestPrincipalBinding {

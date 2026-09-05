@@ -28,6 +28,7 @@ import {
   collabMemberRef,
   decodeCollabCloudCapabilityDocument,
   decodeCollabCloudSuccessEnvelope,
+  type CollabCloudJsonOperation,
   type CollabControlOperation,
   type ListProjectMembersResponse,
 } from '@claudian-collab/protocol';
@@ -232,8 +233,9 @@ function proxyV2Frame(sourceAddress: string): Buffer {
 async function proxiedProjectOperation(
   port: number,
   sourceAddress: string,
+  principalId: string,
   projectId: string,
-  operation: CollabControlOperation,
+  operation: CollabCloudJsonOperation,
   data: unknown,
 ): Promise<unknown> {
   const route = collabCloudProjectOperationRoute(projectId, operation);
@@ -245,6 +247,7 @@ async function proxiedProjectOperation(
   const request = Buffer.from(
     `${route.method} ${route.target} HTTP/1.1\r\n`
       + 'Host: cloud\r\n'
+      + `x-claudian-ingress-principal: ${principalId}\r\n`
       + 'Connection: close\r\n'
       + 'Content-Type: application/json\r\n'
       + `Content-Length: ${String(Buffer.byteLength(body))}\r\n\r\n${body}`,
@@ -1039,16 +1042,8 @@ while :; do sleep 1; done`,
         trustedIngress: Object.freeze({
           mode: 'proxy-v2' as const,
           preambleTimeoutMs: 5_000,
-          principals: Object.freeze([Object.freeze({
-            assertion: Object.freeze({
-              principalId: 'principal-production',
-              provenance: Object.freeze({
-                kind: 'operator-protected-channel' as const,
-                providerId: 'operator-test',
-              }),
-            }),
-            sourceAddress: '100.64.0.10',
-          })]),
+          allowedSources: Object.freeze(['100.64.0.10']),
+          providerId: 'operator-test',
         }),
       }),
       keyring: keyring(),
@@ -1107,28 +1102,8 @@ while :; do sleep 1; done`,
       trustedIngress: Object.freeze({
         mode: 'proxy-v2' as const,
         preambleTimeoutMs: 5_000,
-        principals: Object.freeze([
-          Object.freeze({
-            assertion: Object.freeze({
-              principalId: 'principal-production-manager',
-              provenance: Object.freeze({
-                kind: 'operator-protected-channel' as const,
-                providerId: 'operator-test',
-              }),
-            }),
-            sourceAddress: sourceA,
-          }),
-          Object.freeze({
-            assertion: Object.freeze({
-              principalId: 'principal-production-target',
-              provenance: Object.freeze({
-                kind: 'operator-protected-channel' as const,
-                providerId: 'operator-test',
-              }),
-            }),
-            sourceAddress: sourceB,
-          }),
-        ]),
+        allowedSources: Object.freeze([sourceA, sourceB]),
+        providerId: 'operator-test',
       }),
     });
     const custody = keyring();
@@ -1140,9 +1115,10 @@ while :; do sleep 1; done`,
     let running = application();
     try {
       let address = await running.start();
-      await proxiedProjectOperation(
+      const created = await proxiedProjectOperation(
         address.port,
         sourceA,
+        'principal-production-manager',
         projectId,
         'createCloudProject',
         {
@@ -1151,10 +1127,11 @@ while :; do sleep 1; done`,
           projectId,
           projectName: 'Production Lifecycle',
         },
-      );
+      ) as Readonly<{ readonly memberId: string }>;
       const invitation = await proxiedProjectOperation(
         address.port,
         sourceA,
+        'principal-production-manager',
         projectId,
         'createProjectInvitation',
         {
@@ -1169,6 +1146,7 @@ while :; do sleep 1; done`,
       const joined = await proxiedProjectOperation(
         address.port,
         sourceB,
+        'principal-production-target',
         projectId,
         'joinCloudProject',
         {
@@ -1179,9 +1157,22 @@ while :; do sleep 1; done`,
           secret: invitation.secret,
         },
       ) as Readonly<{ readonly memberId: string }>;
+      for (const source of [sourceA, sourceB]) {
+        for (const [principal, memberId, role] of [
+          ['principal-production-manager', created.memberId, 'manager'],
+          ['principal-production-target', joined.memberId, 'member'],
+        ] as const) {
+          const snapshot = await proxiedProjectOperation(
+            address.port, source, principal, projectId, 'getProjectSnapshot', { projectId },
+          ) as { readonly currentMember: { readonly id: string; readonly role: string } };
+          assert.equal(snapshot.currentMember.id, memberId);
+          assert.equal(snapshot.currentMember.role, role);
+        }
+      }
       const begun = await proxiedProjectOperation(
         address.port,
         sourceA,
+        'principal-production-manager',
         projectId,
         'beginCloudToLanTransfer',
         {
@@ -1203,6 +1194,7 @@ while :; do sleep 1; done`,
       const replay = await proxiedProjectOperation(
         address.port,
         sourceA,
+        'principal-production-manager',
         projectId,
         'getProjectAuthorityTransfer',
         { projectId, transferId: begun.transferId },

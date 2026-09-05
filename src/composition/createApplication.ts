@@ -237,7 +237,8 @@ class CloudApplication implements Application {
       ? undefined
       : new ProxyV2Ingress({
           preambleTimeoutMs: configuredIngress.preambleTimeoutMs,
-          principals: configuredIngress.principals,
+          allowedSources: configuredIngress.allowedSources,
+          providerId: configuredIngress.providerId,
         });
     const trustedPrincipal = options.trustedPrincipal ?? (
       productionIngress === undefined

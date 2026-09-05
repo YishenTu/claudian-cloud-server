@@ -185,80 +185,42 @@ describe('decodeServerConfig', () => {
       CLAUDIAN_CLOUD_PRINCIPAL_PROFILE: 'trusted-ingress',
       CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE: 'proxy-v2',
       CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID: 'tailscale-serve',
-      CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCE_MAP: JSON.stringify([
-        {
-          deviceCredentialId: 'mac-a',
-          principalId: 'account-a',
-          sourceAddress: '100.64.0.10',
-        },
-        {
-          principalId: 'account-b',
-          sourceAddress: '2001:db8::1',
-        },
-      ]),
+      CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCES: JSON.stringify(['100.64.0.10', '2001:db8::1']),
     });
 
     assert.equal(config.principalProfile, 'trusted-ingress');
     assert.deepEqual(config.trustedIngress, {
       mode: 'proxy-v2',
       preambleTimeoutMs: 5_000,
-      principals: [
-        {
-          assertion: {
-            deviceCredentialId: 'mac-a',
-            principalId: 'account-a',
-            provenance: {
-              kind: 'operator-protected-channel',
-              providerId: 'tailscale-serve',
-            },
-          },
-          sourceAddress: '100.64.0.10',
-        },
-        {
-          assertion: {
-            principalId: 'account-b',
-            provenance: {
-              kind: 'operator-protected-channel',
-              providerId: 'tailscale-serve',
-            },
-          },
-          sourceAddress: '2001:db8::1',
-        },
-      ],
+      providerId: 'tailscale-serve',
+      allowedSources: ['100.64.0.10', '2001:db8::1'],
     });
-    const firstPrincipal = config.trustedIngress.principals[0];
-    assert.ok(firstPrincipal);
     assert.equal(Object.isFrozen(config.trustedIngress), true);
-    assert.equal(Object.isFrozen(config.trustedIngress.principals), true);
-    assert.equal(Object.isFrozen(firstPrincipal), true);
-    assert.equal(Object.isFrozen(firstPrincipal.assertion), true);
+    assert.equal(Object.isFrozen(config.trustedIngress.allowedSources), true);
   });
 
   it('rejects incomplete, unsupported, or ambiguous trusted-ingress profiles', () => {
-    const validMap = JSON.stringify([{
-      principalId: 'account-a',
-      sourceAddress: '100.64.0.10',
-    }]);
+    const validMap = JSON.stringify(['100.64.0.10']);
     for (const [field, source] of [
       ['CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE', {
         CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE: 'header-assertion',
         CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID: 'tailscale-serve',
-        CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCE_MAP: validMap,
+        CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCES: validMap,
       }],
       ['CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID', {
         CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE: 'proxy-v2',
-        CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCE_MAP: validMap,
+        CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCES: validMap,
       }],
-      ['CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCE_MAP', {
+      ['CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCES', {
         CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE: 'proxy-v2',
         CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID: 'tailscale-serve',
       }],
-      ['CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCE_MAP', {
+      ['CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCES', {
         CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE: 'proxy-v2',
         CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID: 'tailscale-serve',
-        CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCE_MAP: JSON.stringify([
-          { principalId: 'account-a', sourceAddress: '2001:0db8::1' },
-          { principalId: 'account-b', sourceAddress: '2001:db8::1' },
+        CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCES: JSON.stringify([
+          '2001:0db8::1',
+          '2001:db8::1',
         ]),
       }],
     ] as const) {

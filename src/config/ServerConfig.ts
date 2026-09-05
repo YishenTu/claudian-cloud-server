@@ -68,22 +68,11 @@ export interface RepositoryConfig {
   readonly storageNodeId: string;
 }
 
-export interface TrustedIngressPrincipalConfig {
-  readonly assertion: Readonly<{
-    readonly deviceCredentialId?: string;
-    readonly principalId: string;
-    readonly provenance: Readonly<{
-      readonly kind: 'operator-protected-channel';
-      readonly providerId: string;
-    }>;
-  }>;
-  readonly sourceAddress: string;
-}
-
 export interface TrustedIngressConfig {
   readonly mode: 'proxy-v2';
   readonly preambleTimeoutMs: number;
-  readonly principals: readonly TrustedIngressPrincipalConfig[];
+  readonly allowedSources: readonly string[];
+  readonly providerId: string;
 }
 
 export type PrincipalProfile = 'private-development' | 'trusted-ingress';
@@ -108,8 +97,8 @@ const PROXY_V2_PREAMBLE_TIMEOUT_MS = 5_000;
 const TRUSTED_INGRESS_MODE_FIELD = 'CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE';
 const TRUSTED_INGRESS_PROVIDER_FIELD =
   'CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID';
-const TRUSTED_INGRESS_SOURCE_MAP_FIELD =
-  'CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCE_MAP';
+const TRUSTED_INGRESS_SOURCES_FIELD =
+  'CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCES';
 
 const CONFIG_FIELDS = new Set([
   'CLAUDIAN_CLOUD_BIND_HOST',
@@ -149,7 +138,7 @@ const CONFIG_FIELDS = new Set([
   'CLAUDIAN_CLOUD_STORAGE_NODE_ID',
   TRUSTED_INGRESS_MODE_FIELD,
   TRUSTED_INGRESS_PROVIDER_FIELD,
-  TRUSTED_INGRESS_SOURCE_MAP_FIELD,
+  TRUSTED_INGRESS_SOURCES_FIELD,
 ]);
 
 function canonicalIpAddress(value: string): string | undefined {
@@ -166,47 +155,6 @@ function canonicalIpAddress(value: string): string | undefined {
   }
 }
 
-function trustedIngressEntry(
-  value: unknown,
-  providerId: string,
-): TrustedIngressPrincipalConfig {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCE_MAP_FIELD);
-  }
-  const source = value as Readonly<Record<string, unknown>>;
-  const keys = Object.keys(source);
-  const allowed = new Set(['deviceCredentialId', 'principalId', 'sourceAddress']);
-  if (
-    keys.length < 2
-    || keys.some(key => !allowed.has(key))
-    || !Object.hasOwn(source, 'principalId')
-    || !Object.hasOwn(source, 'sourceAddress')
-    || typeof source.principalId !== 'string'
-    || !OPAQUE_ID_PATTERN.test(source.principalId)
-    || typeof source.sourceAddress !== 'string'
-  ) throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCE_MAP_FIELD);
-  const canonicalSource = canonicalIpAddress(source.sourceAddress);
-  if (canonicalSource === undefined || canonicalSource !== source.sourceAddress) {
-    throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCE_MAP_FIELD);
-  }
-  const deviceCredentialId = source.deviceCredentialId;
-  if (
-    deviceCredentialId !== undefined
-    && (typeof deviceCredentialId !== 'string'
-      || !OPAQUE_ID_PATTERN.test(deviceCredentialId))
-  ) throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCE_MAP_FIELD);
-  const provenance = Object.freeze({
-    kind: 'operator-protected-channel' as const,
-    providerId,
-  });
-  const assertion = Object.freeze({
-    ...(deviceCredentialId === undefined ? {} : { deviceCredentialId }),
-    principalId: source.principalId,
-    provenance,
-  });
-  return Object.freeze({ assertion, sourceAddress: canonicalSource });
-}
-
 function decodeTrustedIngress(
   source: ConfigSource,
   profile: PrincipalProfile,
@@ -214,7 +162,7 @@ function decodeTrustedIngress(
   const selected = [
     TRUSTED_INGRESS_MODE_FIELD,
     TRUSTED_INGRESS_PROVIDER_FIELD,
-    TRUSTED_INGRESS_SOURCE_MAP_FIELD,
+    TRUSTED_INGRESS_SOURCES_FIELD,
   ].some(field => source[field] !== undefined);
   if (profile === 'private-development') {
     if (selected) throw new ConfigError('profile-conflict', PRINCIPAL_PROFILE_FIELD);
@@ -229,24 +177,31 @@ function decodeTrustedIngress(
   if (!OPAQUE_ID_PATTERN.test(providerId)) {
     throw new ConfigError('invalid-field', TRUSTED_INGRESS_PROVIDER_FIELD);
   }
-  const encoded = requireConfigValue(source, TRUSTED_INGRESS_SOURCE_MAP_FIELD);
+  const encoded = requireConfigValue(source, TRUSTED_INGRESS_SOURCES_FIELD);
   let parsed: unknown;
   try {
     parsed = JSON.parse(encoded) as unknown;
   } catch {
-    throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCE_MAP_FIELD);
+    throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCES_FIELD);
   }
   if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 256) {
-    throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCE_MAP_FIELD);
+    throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCES_FIELD);
   }
-  const principals = parsed.map(value => trustedIngressEntry(value, providerId));
-  if (new Set(principals.map(entry => entry.sourceAddress)).size !== principals.length) {
-    throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCE_MAP_FIELD);
+  const allowedSources: string[] = [];
+  for (const value of parsed) {
+    if (typeof value !== 'string' || canonicalIpAddress(value) !== value) {
+      throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCES_FIELD);
+    }
+    allowedSources.push(value);
+  }
+  if (new Set(allowedSources).size !== allowedSources.length) {
+    throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCES_FIELD);
   }
   return Object.freeze({
     mode: 'proxy-v2' as const,
     preambleTimeoutMs: PROXY_V2_PREAMBLE_TIMEOUT_MS,
-    principals: Object.freeze(principals),
+    allowedSources: Object.freeze(allowedSources),
+    providerId,
   });
 }
 

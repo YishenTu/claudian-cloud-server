@@ -8,8 +8,8 @@
   defaults.
 - Every runtime accepts only a loopback bind. The private-development profile
   recognizes only its explicit actor assertion. The self-hosted production
-  profile accepts only a complete operator-protected PROXY v2 source-to-principal
-  mapping; reject partial profiles, unmapped sources, duplicate bindings, and
+  profile accepts only a complete operator-protected PROXY v2 source allowlist; reject partial
+  profiles, unlisted sources, duplicate sources, and
   every attempt to mix development and production assertions.
 - Configuration selects mechanics and safe limits, not collaboration semantics.
   Self-hosted and managed profiles must not fork Project behavior.
