@@ -729,7 +729,7 @@ function checkpoint(includeOfflineMember: boolean): ValidatedProjectCheckpoint {
     operationId: TRANSFER_ID,
     profile: 'authority-transfer',
     projectId: PROJECT_ID,
-    protocolVersion: 8,
+    protocolVersion: 9,
     refs: Object.freeze([
       Object.freeze({ name: 'refs/heads/main', oid: MAIN_OID }),
       ...members.map(member => Object.freeze({

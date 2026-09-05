@@ -652,6 +652,10 @@ export class PostgresProjectMembershipPersistence
       || input.actorMemberId === input.targetMemberId
     ) return { status: 'authorization-denied' as const };
     if (
+      Number(fact.manager_set_generation) > input.expectedManagerSetGeneration
+      || Number(fact.target_revision) > input.expectedTargetMembershipRevision
+    ) return { status: 'permanently-stale' as const };
+    if (
       fact.service_state !== 'active'
       || fact.target_status !== 'active'
       || Number(fact.target_revision) !== input.expectedTargetMembershipRevision
@@ -1332,6 +1336,9 @@ export class PostgresProjectMembershipPersistence
         WHERE project.project_id = $1`,
       [this.#projectId, input.issuedByMemberId],
     );
+    if (Number(project[0]?.manager_set_generation) > input.expectedManagerSetGeneration) {
+      return { status: 'permanently-stale' as const };
+    }
     if (Number(project[0]?.manager_set_generation) !== input.expectedManagerSetGeneration) {
       return { status: 'stale-generation' as const };
     }
@@ -1539,6 +1546,9 @@ export class PostgresProjectMembershipPersistence
         WHERE project.project_id = $1`,
       [this.#projectId, input.actorMemberId],
     );
+    if (Number(managers[0]?.manager_set_generation) > input.expectedManagerSetGeneration) {
+      return { status: 'permanently-stale' as const };
+    }
     if (Number(managers[0]?.manager_set_generation) !== input.expectedManagerSetGeneration) {
       return { status: 'stale-generation' as const };
     }
@@ -1555,7 +1565,11 @@ export class PostgresProjectMembershipPersistence
         input.revokedAt,
       ],
     );
-    if (rows.length !== 1) return { status: 'stale-invitation' as const };
+    if (rows.length !== 1) {
+      const current = await this.#findInvitation(input.invitationId);
+      return { status: current !== undefined && current.revision > input.expectedInvitationRevision
+        ? 'permanently-stale' as const : 'stale-invitation' as const };
+    }
     await this.#query(
       `INSERT INTO claudian_cloud.idempotency_results (
          project_id, member_id, operation, idempotency_key,
@@ -1668,6 +1682,10 @@ export class PostgresProjectMembershipPersistence
     if (authorized?.source_is_manager !== true) {
       return { status: 'authorization-denied' as const };
     }
+    if (
+      Number(authorized.manager_set_generation) > input.expectedManagerSetGeneration
+      || Number(authorized.revision) > input.expectedMembershipRevision
+    ) return { status: 'permanently-stale' as const };
     if (
       Number(authorized.manager_set_generation) !== input.expectedManagerSetGeneration
       || Number(authorized.revision) !== input.expectedMembershipRevision
@@ -1808,6 +1826,10 @@ export class PostgresProjectMembershipPersistence
     if (authorized?.source_is_manager !== true) {
       return { status: 'authorization-denied' as const };
     }
+    if (
+      Number(authorized.manager_set_generation) > input.expectedManagerSetGeneration
+      || Number(authorized.revision) > input.expectedMembershipRevision
+    ) return { status: 'permanently-stale' as const };
     if (
       Number(authorized.manager_set_generation) !== input.expectedManagerSetGeneration
       || Number(authorized.revision) !== input.expectedMembershipRevision
@@ -2292,6 +2314,10 @@ export class PostgresProjectMembershipPersistence
       return { status: 'authorization-denied' as const };
     }
     if (
+      Number(fact.manager_set_generation) > input.expectedManagerSetGeneration
+      || Number(fact.revision) > input.expectedTargetMembershipRevision
+    ) return { status: 'permanently-stale' as const };
+    if (
       Number(fact.manager_set_generation) !== input.expectedManagerSetGeneration
       || Number(fact.revision) !== input.expectedTargetMembershipRevision
       || fact.status !== 'active'
@@ -2442,6 +2468,9 @@ export class PostgresProjectMembershipPersistence
         && offer.source_manager_member_id === input.actorMemberId
       : offer.target_member_id === input.actorMemberId;
     if (!canTransition) return { status: 'authorization-denied' as const };
+    if (Number(offer.revision) > input.expectedOfferRevision) {
+      return { status: 'permanently-stale' as const };
+    }
     if (
       Number(offer.revision) !== input.expectedOfferRevision
       || (input.nextState === 'cancelled'
@@ -2536,6 +2565,10 @@ export class PostgresProjectMembershipPersistence
       return { status: 'authorization-denied' as const };
     }
     if (
+      Number(fact.manager_set_generation) > input.expectedManagerSetGeneration
+      || Number(fact.revision) > input.expectedTargetMembershipRevision
+    ) return { status: 'permanently-stale' as const };
+    if (
       Number(fact.manager_set_generation) !== input.expectedManagerSetGeneration
       || Number(fact.revision) !== input.expectedTargetMembershipRevision
       || fact.status !== 'active'
@@ -2547,6 +2580,9 @@ export class PostgresProjectMembershipPersistence
       [this.#projectId, input.managerResponsibilityOfferId],
     );
     const offer = offers[0];
+    if (offer !== undefined && Number(offer.revision) > input.expectedOfferRevision) {
+      return { status: 'permanently-stale' as const };
+    }
     if (
       offer === undefined
       || offer.source_manager_member_id !== input.actorMemberId
@@ -2678,6 +2714,10 @@ export class PostgresProjectMembershipPersistence
     if (fact?.source_is_manager !== true || input.actorMemberId === input.targetMemberId) {
       return { status: 'authorization-denied' as const };
     }
+    if (
+      Number(fact.manager_set_generation) > input.expectedManagerSetGeneration
+      || Number(fact.revision) > input.expectedTargetMembershipRevision
+    ) return { status: 'permanently-stale' as const };
     if (Number(fact.manager_count) <= 1) return { status: 'final-manager' as const };
     if (
       Number(fact.manager_set_generation) !== input.expectedManagerSetGeneration

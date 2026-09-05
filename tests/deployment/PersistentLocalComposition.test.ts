@@ -220,6 +220,10 @@ async function createFixture(): Promise<CompositionFixture> {
     ].join('\n'), { mode: 0o600 }),
     writeFile(runtimeEnvironmentFile, [
       'CLAUDIAN_CLOUD_BIND_HOST=127.0.0.1',
+      'CLAUDIAN_CLOUD_PRINCIPAL_PROFILE=trusted-ingress',
+      'CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE=proxy-v2',
+      'CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID=persistent-test-ingress',
+      'CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCE_MAP=[{"principalId":"persistent-test-installation","sourceAddress":"100.64.0.10"}]',
       'CLAUDIAN_CLOUD_GIT_EXECUTABLE=/usr/bin/git',
       `CLAUDIAN_CLOUD_PORT=${String(runtimePort)}`,
       `CLAUDIAN_CLOUD_POSTGRES_URL=${runtimeUrl}`,
@@ -364,6 +368,10 @@ describe('persistent local Compose model', () => {
       ].join('\n')),
       writeFile(runtimeEnvironmentFile, [
         'CLAUDIAN_CLOUD_BIND_HOST=127.0.0.1',
+        'CLAUDIAN_CLOUD_PRINCIPAL_PROFILE=trusted-ingress',
+        'CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE=proxy-v2',
+        'CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID=persistent-test-ingress',
+        'CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCE_MAP=[{"principalId":"persistent-test-installation","sourceAddress":"100.64.0.10"}]',
         'CLAUDIAN_CLOUD_PORT=49152',
         'CLAUDIAN_CLOUD_POSTGRES_URL=postgresql://claudian_cloud_runtime:runtime-secret-value@127.0.0.1:55432/claudian_cloud',
         'CLAUDIAN_CLOUD_REPOSITORY_ROOT=/var/lib/claudian-cloud/repositories',
@@ -440,6 +448,16 @@ describe('persistent local Compose model', () => {
         'cloud-authority',
       );
       const projectRecovery = service(model, 'cloud-project-recovery');
+      for (const configuredService of [runtime, projectRecovery]) {
+        assert.equal(
+          configuredService.environment?.CLAUDIAN_CLOUD_PRINCIPAL_PROFILE,
+          'trusted-ingress',
+        );
+        assert.equal(
+          configuredService.environment.CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE,
+          'proxy-v2',
+        );
+      }
       assert.deepEqual(projectRecovery.depends_on, {
         'cloud-restore-recovery': {
           condition: 'service_completed_successfully',

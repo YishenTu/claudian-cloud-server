@@ -1562,7 +1562,11 @@ describe('PostgresEnvironmentRestorePersistence', () => {
         storageNodeId: 'restore-node',
         validationMarkerSha256: 'f'.repeat(64),
       });
-      const records = minimumBackupRecords();
+      const records = minimumBackupRecords().map(record => (
+        record.kind === 'project'
+          ? { ...record, value: { ...record.value, managerSetGeneration: 4 } }
+          : record
+      ));
       encodeCollabProjectBackupCheckpointCoordinationNdjson(records);
 
       await persistence.createDatabase({
@@ -1745,7 +1749,34 @@ describe('PostgresEnvironmentRestorePersistence', () => {
               AND idempotency_key = 'revoke-restored-key'`,
           [PROJECT_ID],
         );
+        const rejectionFacts = await client.query(
+          `SELECT p.manager_set_generation, m.revision AS membership_revision,
+                  i.invitation_id, i.state, i.revision AS invitation_revision,
+                  i.secret_sha256
+             FROM claudian_cloud.projects p
+             JOIN claudian_cloud.project_memberships m USING (project_id)
+             JOIN claudian_cloud.project_invitations i USING (project_id)
+            WHERE p.project_id = $1 AND m.member_id = 'member-manager'
+              AND i.invitation_id IN ('invitation-restored', 'invitation-tombstone')
+            ORDER BY i.invitation_id`,
+          [PROJECT_ID],
+        );
         await client.query('COMMIT');
+        assert.deepEqual(rejectionFacts.rows, [{
+          manager_set_generation: '4',
+          membership_revision: '3',
+          invitation_id: 'invitation-restored',
+          state: 'revoked',
+          invitation_revision: '2',
+          secret_sha256: 'b'.repeat(64),
+        }, {
+          manager_set_generation: '4',
+          membership_revision: '3',
+          invitation_id: 'invitation-tombstone',
+          state: 'expired',
+          invitation_revision: '2',
+          secret_sha256: 'd'.repeat(64),
+        }]);
         assert.deepEqual(activeCatalog.rows, [{
           generation: String(repository.placementGeneration),
           repository_storage_key: repository.repositoryStorageKey,

@@ -16,6 +16,7 @@ import type {
   AcquireProjectLeaseOptions,
   PinnedProjectLease,
 } from '../../coordination/ProjectCoordination.js';
+import { ProjectMutationRejection } from '../ProjectMutationRejection.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
 import {
   OperationDrain,
@@ -90,6 +91,12 @@ function requestFingerprint(request: RemoveMemberRequest): string {
 }
 
 function mapStatus(status: string): never {
+  if (status === 'permanently-stale') {
+    throw new ProjectMutationRejection({
+      code: 'authority-not-synchronized',
+      safeContext: { reason: 'member-removal-expected-state' },
+    });
+  }
   if (status === 'authorization-denied') {
     throw domainError('authorization-denied', 'member-removal-denied');
   }
@@ -187,6 +194,13 @@ implements ProjectRecoveryPort, ProjectLifecycleRecoveryOwner {
           if (actor?.status !== 'active' || actor.role !== 'manager') {
             return mapStatus('authorization-denied');
           }
+          if (
+            binding.memberId !== request.targetMemberId
+            && target !== undefined
+            && project !== undefined
+            && (project.managerSetGeneration > request.expectedManagerSetGeneration
+              || target.revision > BigInt(request.expectedTargetMembershipRevision))
+          ) return mapStatus('permanently-stale');
           if (
             target?.status !== 'active'
             || placement?.active !== true

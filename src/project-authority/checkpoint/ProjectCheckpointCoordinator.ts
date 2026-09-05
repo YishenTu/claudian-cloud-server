@@ -52,6 +52,7 @@ import {
   type RepositoryCheckpointStagingPort,
   type ValidatedRepositoryCheckpoint,
 } from '../../repositories/GitBundleImporter.js';
+import { importRepositoryCheckpoint } from '../../repositories/importRepositoryCheckpoint.js';
 import type {
   CapturedRepositoryCheckpoint,
   ExactRepositoryOperationReservation,
@@ -1369,12 +1370,19 @@ export class ProjectCheckpointCoordinator {
       let importedRepository: ValidatedRepositoryCheckpoint;
       if (expectedRepository === undefined) {
         try {
-          importedRepository = await this.#importRepository(
-            input.attempt,
-            repositoryFact,
-            manifest,
+          importedRepository = await importRepositoryCheckpoint(this.#repository, {
+            expectedByteCount: repositoryFact.byteCount,
+            expectedSha256: repositoryFact.sha256,
+            objectFormat: manifest.gitObjectFormat,
+            operationId: input.attempt.operationId,
+            projectId: input.attempt.projectId,
+            refs: manifest.refs,
             signal,
-          );
+          }, delivery => this.#staging.readArtifact({
+            artifact: repositoryFact,
+            attempt: input.attempt,
+            ...delivery,
+          }));
         } catch (error: unknown) {
           if (invalidRepositoryStaging(error)) {
             await this.#repository.discardCheckpoint({
@@ -2002,100 +2010,6 @@ export class ProjectCheckpointCoordinator {
       return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     } catch {
       return fail('invalid-checkpoint');
-    }
-  }
-
-  async #importRepository(
-    attempt: PreparedProductionCheckpointAttempt,
-    artifact: StagedProductionCheckpointArtifact,
-    manifest: CollabProjectCheckpointManifest,
-    signal: AbortSignal,
-  ): Promise<ValidatedRepositoryCheckpoint> {
-    const body = new PassThrough({ highWaterMark: STREAM_BUFFER_BYTES });
-    body.on('error', () => undefined);
-    const pumpController = new AbortController();
-    const pumpSignal = AbortSignal.any([signal, pumpController.signal]);
-    const pumpState: {
-      failure: Error | undefined;
-      settled: boolean;
-    } = { failure: undefined, settled: false };
-    const pump = this.#staging.readArtifact({
-      artifact,
-      attempt,
-      onChunk: async chunk => {
-        if (!body.write(chunk)) {
-          await once(body, 'drain', { signal: pumpSignal });
-        }
-      },
-      signal: pumpSignal,
-    }).then(
-      () => {
-        pumpState.settled = true;
-        body.end();
-      },
-      (error: unknown) => {
-        pumpState.failure = safePumpFailure(error);
-        pumpState.settled = true;
-        body.destroy(pumpState.failure);
-      },
-    );
-    try {
-      let imported: ValidatedRepositoryCheckpoint | undefined;
-      let importFailure: Error | undefined;
-      try {
-        imported = await this.#repository.importCheckpoint({
-          body,
-          expectedByteCount: artifact.byteCount,
-          expectedSha256: artifact.sha256,
-          objectFormat: manifest.gitObjectFormat,
-          operationId: attempt.operationId,
-          projectId: attempt.projectId,
-          refs: manifest.refs,
-          signal,
-        });
-      } catch (error: unknown) {
-        importFailure = error instanceof Error
-          ? error
-          : new ProjectCheckpointCoordinatorError('storage-unavailable');
-      }
-      const verifiedReplay = imported?.bundleInputDisposition === 'replayed';
-      const importerReturnedEarly = imported?.bundleInputDisposition === 'consumed'
-        && !pumpState.settled;
-      const pumpFailedBeforeImport = pumpState.failure !== undefined;
-      if (!pumpState.settled) {
-        if (importerReturnedEarly) {
-          body.resume();
-        } else {
-          pumpController.abort('cancelled');
-          body.destroy(new ProjectCheckpointCoordinatorError('cancelled'));
-        }
-      }
-      await pump;
-      if (signal.aborted) {
-        fail(signal.reason === 'closed' ? 'closed' : 'cancelled');
-      }
-      if (
-        pumpState.failure !== undefined
-        && pumpFailedBeforeImport
-        && !verifiedReplay
-      ) {
-        throw pumpState.failure;
-      }
-      if (importFailure !== undefined) throw importFailure;
-      if (pumpState.failure !== undefined && !verifiedReplay) {
-        throw pumpState.failure;
-      }
-      if (importerReturnedEarly) fail('invalid-checkpoint');
-      if (imported === undefined) fail('storage-unavailable');
-      return imported;
-    } finally {
-      if (!pumpState.settled) {
-        pumpController.abort('cancelled');
-        body.destroy(new ProjectCheckpointCoordinatorError('cancelled'));
-      } else {
-        body.destroy();
-      }
-      await pump.catch(() => undefined);
     }
   }
 }

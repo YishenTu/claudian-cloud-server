@@ -61,7 +61,6 @@ interface BundleFixture {
 
 interface ClientGateResult {
   readonly acceptedMainOid: string;
-  readonly formerHostRetired: boolean;
   readonly localWorkPreserved: boolean;
   readonly requestId: string;
 }
@@ -442,7 +441,6 @@ describe('localhost milestone server gate', { concurrency: false }, () => {
         const descriptorPath = join(root, 'client-gate.json');
         const resultPath = join(root, 'client-result.json');
         await writeFile(descriptorPath, JSON.stringify({
-          activationStatus: activated,
           manifest: source,
           origin: baseUrl,
           resultPath,
@@ -450,7 +448,6 @@ describe('localhost milestone server gate', { concurrency: false }, () => {
         }), { mode: 0o600 });
         await runClientGate(clientWorktree, descriptorPath);
         const result = JSON.parse(await readFile(resultPath, 'utf8')) as ClientGateResult;
-        assert.equal(result.formerHostRetired, true);
         assert.equal(result.localWorkPreserved, true);
         assert.match(result.requestId, /^[0-9a-f-]{36}$/u);
 

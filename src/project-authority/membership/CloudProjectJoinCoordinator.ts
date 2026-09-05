@@ -21,6 +21,7 @@ import type {
   PinnedProjectLease,
 } from '../../coordination/ProjectCoordination.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import { ProjectMutationRejection } from '../ProjectMutationRejection.js';
 import { OperationDrain } from '../OperationDrain.js';
 import {
   GitRepositoryError,
@@ -203,6 +204,18 @@ export class CloudProjectJoinCoordinator {
           project: await scope.getProject(),
         }));
         const { invitation, placement, project } = facts;
+        if (
+          project !== undefined
+          && invitation?.projectId === request.projectId
+          && (invitation.state === 'revoked'
+            || invitation.state === 'expired'
+            || !secretMatches(invitation.secretSha256, request.secret))
+        ) {
+          throw new ProjectMutationRejection({
+            code: 'authorization-denied',
+            safeContext: { reason: 'join-not-authorized' },
+          });
+        }
         if (
           invitation === undefined
           || invitation.state !== 'active'

@@ -93,7 +93,7 @@ export class ProjectPersonalRefAuthority {
       return this.#withReservation(
         projectId,
         signal,
-        reservation => this.#admission.run(
+        reservation => this.#admission.runAfterPreflight(
           principal,
           projectId,
           write => this.#repository.advertiseReceivePack(
@@ -126,7 +126,7 @@ export class ProjectPersonalRefAuthority {
       return this.#withReservation(
         projectId,
         signal,
-        reservation => this.#admission.run(
+        reservation => this.#admission.runAfterPreflight(
           principal,
           projectId,
           write => this.#repository.runReceivePack(

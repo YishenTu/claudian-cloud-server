@@ -36,13 +36,15 @@ class MemoryMembershipPersistence implements ProjectInvitationPersistence {
   invitation: ProjectInvitationRecord | undefined;
   managerSetGeneration = 1;
   capacity = 1;
+  rejection: 'permanently-stale' | undefined;
 
   createInvitation(
     input: CreateProjectInvitationPersistenceInput,
   ): Promise<Readonly<{
     readonly record?: ProjectInvitationRecord;
-    readonly status: 'conflict' | 'created' | 'quota' | 'replayed' | 'replay-expired' | 'stale-generation';
+    readonly status: 'permanently-stale' | 'conflict' | 'created' | 'quota' | 'replayed' | 'replay-expired' | 'stale-generation';
   }>> {
+    if (this.rejection !== undefined) return Promise.resolve({ status: this.rejection });
     if (this.managerSetGeneration !== input.expectedManagerSetGeneration) {
       return Promise.resolve({ status: 'stale-generation' });
     }
@@ -75,8 +77,9 @@ class MemoryMembershipPersistence implements ProjectInvitationPersistence {
     input: RevokeProjectInvitationPersistenceInput,
   ): Promise<Readonly<{
     readonly record?: ProjectInvitationRecord;
-    readonly status: 'conflict' | 'replayed' | 'revoked' | 'stale-generation' | 'stale-invitation';
+    readonly status: 'permanently-stale' | 'conflict' | 'replayed' | 'revoked' | 'stale-generation' | 'stale-invitation';
   }>> {
+    if (this.rejection !== undefined) return Promise.resolve({ status: this.rejection });
     if (input.expectedManagerSetGeneration !== this.managerSetGeneration) {
       return Promise.resolve({ status: 'stale-generation' });
     }
@@ -174,6 +177,17 @@ describe('ProjectInvitationAuthority', () => {
       revokedAt: NOW,
       state: 'revoked',
     });
+  });
+
+  it('preserves negative-settlement evidence from invitation persistence', async () => {
+    const { authority, persistence } = fixture();
+    persistence.rejection = 'permanently-stale';
+    const expected = { code: 'authority-not-synchronized', name: 'ProjectMutationRejection' };
+    await assert.rejects(authority.create(PRINCIPAL, REQUEST), expected);
+    await assert.rejects(authority.revoke(PRINCIPAL, {
+      projectId: REQUEST.projectId, invitationId: 'invitation-one', expectedInvitationRevision: 1,
+      expectedManagerSetGeneration: 1, idempotencyKey: 'revoke-negative',
+    }), expected);
   });
 
   it('rejects non-Managers, stale generations, and exhausted reservations', async () => {

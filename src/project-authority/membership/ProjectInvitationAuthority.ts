@@ -16,6 +16,7 @@ import type {
   ProjectInvitationRecord,
   ProtectedInvitationEnvelope,
 } from '../../coordination/ProjectMembershipPersistence.js';
+import { ProjectMutationRejection } from '../ProjectMutationRejection.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
 import type { ProjectWriteAdmission } from '../admission/ProjectWriteAdmission.js';
 import { ProtectedSecretCustodyError } from '../lifecycle/ProtectedSecretCustody.js';
@@ -93,6 +94,12 @@ function summary(record: ProjectInvitationRecord) {
 }
 
 function mapStatus(status: string): never {
+  if (status === 'permanently-stale') {
+    throw new ProjectMutationRejection({
+      code: 'authority-not-synchronized',
+      safeContext: { reason: 'membership-expected-state' },
+    });
+  }
   if (status === 'quota') throw domainError('quota-exceeded', 'membership-capacity');
   if (status === 'stale-generation' || status === 'stale-invitation') {
     throw domainError('authority-not-synchronized', 'membership-expected-state');

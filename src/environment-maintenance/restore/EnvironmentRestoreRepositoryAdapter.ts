@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
-import { once } from 'node:events';
-import { PassThrough } from 'node:stream';
 
+import { importRepositoryCheckpoint } from '../../repositories/importRepositoryCheckpoint.js';
 import type {
   RepositoryRestoreStagingPort,
   ValidatedRepositoryCheckpoint,
@@ -148,44 +147,15 @@ implements EnvironmentRestoreRepositoryPort {
         const repository = backup.manifest.artifacts.find(
           artifact => artifact.name === 'repository.bundle',
         ) ?? fail();
-        const body = new PassThrough({ highWaterMark: 64 * 1024 });
-        const deliveryController = new AbortController();
-        const deliverySignal = AbortSignal.any([
-          input.signal,
-          deliveryController.signal,
-        ]);
-        const delivery = backup.readRepository({
-          onChunk: async chunk => {
-            if (body.write(chunk)) return;
-            await once(body, 'drain', { signal: deliverySignal });
-          },
-          signal: deliverySignal,
-        });
-        void delivery.then(
-          () => body.end(),
-          (error: unknown) => body.destroy(
-            error instanceof Error ? error : undefined,
-          ),
-        );
-        let checkpoint: ValidatedRepositoryCheckpoint;
-        try {
-          checkpoint = await this.#staging.importCheckpoint({
-            body,
-            expectedByteCount: repository.byteCount,
-            expectedSha256: repository.sha256,
-            objectFormat: backup.manifest.gitObjectFormat,
-            operationId: input.operationId,
-            projectId: project.projectId,
-            refs: backup.manifest.refs,
-            signal: input.signal,
-          });
-          await delivery;
-        } catch (error: unknown) {
-          deliveryController.abort('repository-import-settled');
-          body.destroy();
-          await delivery.catch(() => undefined);
-          throw error;
-        }
+        const checkpoint = await importRepositoryCheckpoint(this.#staging, {
+          expectedByteCount: repository.byteCount,
+          expectedSha256: repository.sha256,
+          objectFormat: backup.manifest.gitObjectFormat,
+          operationId: input.operationId,
+          projectId: project.projectId,
+          refs: backup.manifest.refs,
+          signal: input.signal,
+        }, delivery => backup.readRepository(delivery));
         publications.push(environmentPublication(this.#publication.planInactive({
           checkpoint,
           placementGeneration: project.placementGeneration + 1,

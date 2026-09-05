@@ -10,6 +10,7 @@ import {
   isCollabOpaqueId,
 } from '@claudian-collab/protocol';
 
+import { ProjectMutationRejection } from '../../project-authority/ProjectMutationRejection.js';
 import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
 import {
   RequestPrincipalBinding,
@@ -284,7 +285,11 @@ export class ProjectJsonTransport {
       this.#sendJson(
         response,
         failure.status,
-        collabCloudErrorEnvelope(requestId, failure.error),
+        collabCloudErrorEnvelope(
+          requestId,
+          failure.error,
+          failure.error instanceof ProjectMutationRejection ? 'rejected' : undefined,
+        ),
       );
     } finally {
       clearTimeout(timeout);

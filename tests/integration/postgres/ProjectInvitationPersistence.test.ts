@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 
 import { Client } from 'pg';
 
-import type { CreateProjectInvitationPersistenceInput } from '../../../src/coordination/ProjectMembershipPersistence.js';
+import type { CreateProjectInvitationPersistenceInput, ProjectMembershipPersistence } from '../../../src/coordination/ProjectMembershipPersistence.js';
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
 import { PostgresMigrator } from '../../../src/coordination/postgres/PostgresMigrator.js';
 import {
@@ -693,6 +693,168 @@ describe('Postgres Project invitation persistence', () => {
       } finally {
         await store.close();
       }
+    });
+  });
+
+  it('distinguishes permanently stale demotion from replay and future expected state', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await seed(database);
+      const store = coordination(database);
+      try {
+        const lease = await store.acquireProjectLease(PROJECT_ID);
+        try {
+          const request = {
+            actorMemberId: MEMBER_ID,
+            demotedAt: CREATED,
+            expectedManagerSetGeneration: 1,
+            expectedTargetMembershipRevision: 2,
+            idempotencyKey: 'demote_committed',
+            projectId: PROJECT_ID,
+            requestFingerprint: 'a'.repeat(64),
+            targetMemberId: 'member_admin_second_manager',
+          };
+          const apply = (input: typeof request) => lease.withProjectScope(scope => (
+            scope.membership.demoteManager(input)
+          ));
+          const committed = await apply(request);
+          assert.equal(committed.status, 'created');
+          assert.deepEqual(await apply(request), {
+            response: committed.response,
+            status: 'replayed',
+          });
+          const delayed = { ...request, idempotencyKey: 'demote_rejected' };
+          assert.deepEqual(await apply(delayed), { status: 'permanently-stale' });
+          assert.deepEqual(await apply(delayed), { status: 'permanently-stale' });
+          assert.deepEqual(await apply({
+            ...request,
+            expectedManagerSetGeneration: 3,
+            expectedTargetMembershipRevision: 3,
+            idempotencyKey: 'demote_future',
+          }), { status: 'final-manager' });
+        } finally { await lease.close(); }
+      } finally { await store.close(); }
+    });
+  });
+
+  it('settles delayed management requests only for strictly advanced durable generations', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await seed(database);
+      const store = coordination(database);
+      const lease = await store.acquireProjectLease(PROJECT_ID);
+      try {
+        await lease.withProjectScope(scope => scope.membership.createInvitation(INPUT));
+        await lease.withProjectScope(scope => scope.membership.demoteManager({
+          actorMemberId: MEMBER_ID, demotedAt: CREATED,
+          expectedManagerSetGeneration: 1, expectedTargetMembershipRevision: 2,
+          idempotencyKey: 'advance_generation', projectId: PROJECT_ID,
+          requestFingerprint: 'a'.repeat(64), targetMemberId: 'member_admin_second_manager',
+        }));
+        const attempts: readonly [string, (membership: ProjectMembershipPersistence,
+          expectedManagerSetGeneration: number) => Promise<{ readonly status: string }>][] = [
+          ['create invitation', (membership, expectedManagerSetGeneration) => membership.createInvitation({
+            ...invitationInput('new_invitation', 'new_invitation_key', 'd'), expectedManagerSetGeneration,
+          })],
+          ['revoke invitation', (membership, expectedManagerSetGeneration) => membership.revokeInvitation({
+            actorMemberId: MEMBER_ID, expectedInvitationRevision: 1, expectedManagerSetGeneration,
+            idempotencyKey: 'stale_revoke', invitationId: INPUT.invitationId, projectId: PROJECT_ID,
+            requestFingerprint: 'e'.repeat(64), revokedAt: CREATED,
+          })],
+          ['create offer', (membership, expectedManagerSetGeneration) => membership.createManagerResponsibilityOffer({
+            actorMemberId: MEMBER_ID, expectedManagerSetGeneration, expectedTargetMembershipRevision: 2,
+            expiresAt: INPUT.expiresAt, idempotencyKey: 'stale_offer', offeredAt: CREATED,
+            offerId: 'stale_offer', projectId: PROJECT_ID, purpose: 'manager-promotion',
+            requestFingerprint: 'f'.repeat(64), targetMemberId: 'member_admin_target',
+          })],
+          ['promote', (membership, expectedManagerSetGeneration) => membership.promoteManager({
+            actorMemberId: MEMBER_ID, expectedManagerSetGeneration, expectedOfferRevision: 1,
+            expectedTargetMembershipRevision: 2, idempotencyKey: 'stale_promote',
+            managerResponsibilityOfferId: 'missing_offer', projectId: PROJECT_ID, promotedAt: CREATED,
+            requestFingerprint: '1'.repeat(64), targetMemberId: 'member_admin_target',
+          })],
+          ['remove', (membership, expectedManagerSetGeneration) => membership.prepareRemoval({
+            actorMemberId: MEMBER_ID, expectedManagerSetGeneration, expectedPersonalRefOid: 'a'.repeat(40),
+            expectedTargetMembershipRevision: 2, idempotencyKey: 'stale_remove', operationId: 'stale_remove',
+            personalRef: 'refs/heads/members/member_admin_target', placementGeneration: 1,
+            preparedAt: CREATED, projectId: PROJECT_ID, repositoryStorageKey: 'repo_invitation_sql',
+            requestFingerprint: '2'.repeat(64), storageNodeId: 'node-a', targetMemberId: 'member_admin_target',
+          })],
+          ['revoke claim', (membership, expectedManagerSetGeneration) => membership.revokeTransferredMembershipClaim({
+            actorMemberId: MEMBER_ID, expectedClaimGeneration: 0, expectedManagerSetGeneration,
+            expectedMembershipRevision: 2, idempotencyKey: 'stale_claim_revoke',
+            memberId: 'member_admin_target', projectId: PROJECT_ID,
+            requestFingerprint: '3'.repeat(64), revokedAt: CREATED,
+          })],
+          ['reissue claim', (membership, expectedManagerSetGeneration) => membership.reissueTransferredMembershipClaim({
+            actorMemberId: MEMBER_ID, claimGeneration: 1, claimSha256: '4'.repeat(64),
+            createdAt: CREATED, envelope: { ...INPUT.envelope, claimGeneration: 1,
+              memberId: 'member_admin_target', transferId: 'transfer_old' },
+            expectedClaimGeneration: 0, expectedManagerSetGeneration, expectedMembershipRevision: 2,
+            expiresAt: INPUT.expiresAt, idempotencyKey: 'stale_claim_reissue', memberId: 'member_admin_target',
+            projectId: PROJECT_ID, requestFingerprint: '5'.repeat(64),
+            secretReplayExpiresAt: INPUT.secretReplayExpiresAt, transferId: 'transfer_old',
+          })],
+        ];
+        for (const [name, attempt] of attempts) {
+          assert.equal((await lease.withProjectScope(scope => attempt(scope.membership, 1))).status,
+            'permanently-stale', name);
+          assert.equal((await lease.withProjectScope(scope => attempt(scope.membership, 1))).status,
+            'permanently-stale', `${name} delayed replay`);
+          assert.notEqual((await lease.withProjectScope(scope => attempt(scope.membership, 3))).status,
+            'permanently-stale', `${name} future generation`);
+        }
+        assert.equal((await lease.withProjectScope(scope => scope.membership.createInvitation(INPUT))).status,
+          'replayed');
+      } finally { await lease.close(); await store.close(); }
+    });
+  });
+
+  it('settles advanced invitation and offer revisions after exact replay lookup', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresMigrator({ connectionString: database.migrationUrl }).apply();
+      await seed(database);
+      const store = coordination(database);
+      const lease = await store.acquireProjectLease(PROJECT_ID);
+      try {
+        await lease.withProjectScope(async scope => {
+          await scope.membership.createInvitation(INPUT);
+          const revoke = { actorMemberId: MEMBER_ID, expectedInvitationRevision: 1,
+            expectedManagerSetGeneration: 1, idempotencyKey: 'revision_revoke',
+            invitationId: INPUT.invitationId, projectId: PROJECT_ID,
+            requestFingerprint: 'a'.repeat(64), revokedAt: CREATED };
+          assert.equal((await scope.membership.revokeInvitation(revoke)).status, 'revoked');
+          assert.equal((await scope.membership.revokeInvitation(revoke)).status, 'replayed');
+          assert.equal((await scope.membership.revokeInvitation({ ...revoke,
+            idempotencyKey: 'revision_delayed_revoke' })).status, 'permanently-stale');
+          assert.equal((await scope.membership.revokeInvitation({ ...revoke,
+            idempotencyKey: 'revision_future_revoke', expectedInvitationRevision: 3 })).status, 'stale-invitation');
+          await scope.membership.createManagerResponsibilityOffer({
+            actorMemberId: MEMBER_ID, expectedManagerSetGeneration: 1, expectedTargetMembershipRevision: 2,
+            expiresAt: INPUT.expiresAt, idempotencyKey: 'revision_offer', offeredAt: CREATED,
+            offerId: 'revision_offer', projectId: PROJECT_ID, purpose: 'manager-promotion',
+            requestFingerprint: 'b'.repeat(64), targetMemberId: 'member_admin_target',
+          });
+          const transition = { actorMemberId: 'member_admin_target', actorRole: 'member' as const,
+            expectedOfferRevision: 1, idempotencyKey: 'revision_ack', nextState: 'acknowledged' as const,
+            offerId: 'revision_offer', operation: 'acknowledgeManagerResponsibility' as const,
+            requestFingerprint: 'c'.repeat(64), transitionedAt: CREATED };
+          assert.equal((await scope.membership.transitionManagerResponsibilityOffer(transition)).status, 'created');
+          assert.equal((await scope.membership.transitionManagerResponsibilityOffer(transition)).status, 'replayed');
+          for (const expectedOfferRevision of [1, 3]) {
+            assert.equal((await scope.membership.transitionManagerResponsibilityOffer({ ...transition,
+              actorMemberId: MEMBER_ID, actorRole: 'manager', expectedOfferRevision,
+              idempotencyKey: 'revision_cancel', nextState: 'cancelled', operation: 'cancelManagerResponsibilityOffer',
+            })).status, expectedOfferRevision === 1 ? 'permanently-stale' : 'stale');
+            assert.equal((await scope.membership.promoteManager({
+              actorMemberId: MEMBER_ID, expectedManagerSetGeneration: 1, expectedOfferRevision,
+              expectedTargetMembershipRevision: 2, idempotencyKey: 'revision_promote',
+              managerResponsibilityOfferId: 'revision_offer', projectId: PROJECT_ID, promotedAt: CREATED,
+              requestFingerprint: 'd'.repeat(64), targetMemberId: 'member_admin_target',
+            })).status, expectedOfferRevision === 1 ? 'permanently-stale' : 'stale');
+          }
+        });
+      } finally { await lease.close(); await store.close(); }
     });
   });
 

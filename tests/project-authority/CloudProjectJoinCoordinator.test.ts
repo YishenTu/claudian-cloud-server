@@ -36,6 +36,7 @@ const PRINCIPAL = createTrustedIngressPrincipal({
 
 class MemoryJoinPersistence implements ProjectJoinPersistence {
   failAfter: string | undefined;
+  invitationUnavailable = false;
   journal: ProjectJoinJournal | undefined;
   invitation: ProjectInvitationRecord = Object.freeze({
     createdAt: '2026-08-30T03:00:00.000Z',
@@ -64,7 +65,7 @@ class MemoryJoinPersistence implements ProjectJoinPersistence {
   }
 
   findInvitationForJoin(): Promise<ProjectInvitationRecord | undefined> {
-    return Promise.resolve(this.invitation);
+    return Promise.resolve(this.invitationUnavailable ? undefined : this.invitation);
   }
 
   findJoinByPrincipal(): Promise<ProjectJoinJournal | undefined> {
@@ -274,6 +275,43 @@ describe('CloudProjectJoinCoordinator', () => {
       provenance: { kind: 'private-development' },
     }, REQUEST), (error: unknown) => error instanceof CollabError
       && error.code === 'authorization-denied');
+  });
+
+  it('proves invalid invitation rejection only before an exact Join journal exists', async () => {
+    for (const state of ['revoked', 'expired'] as const) {
+      const { coordinator, persistence } = fixture();
+      persistence.invitation = { ...persistence.invitation, state };
+      await assert.rejects(coordinator.join(PRINCIPAL, REQUEST), {
+        code: 'authorization-denied', name: 'ProjectMutationRejection',
+      });
+      assert.equal(persistence.journal, undefined);
+    }
+    const invalid = fixture();
+    await assert.rejects(invalid.coordinator.join(PRINCIPAL, {
+      ...REQUEST, secret: Buffer.alloc(32, 5).toString('base64url'),
+    }), { code: 'authorization-denied', name: 'ProjectMutationRejection' });
+
+    const missing = fixture();
+    missing.persistence.invitationUnavailable = true;
+    await assert.rejects(missing.coordinator.join(PRINCIPAL, REQUEST), {
+      code: 'authorization-denied', name: 'CollabError',
+    });
+    const untrusted = fixture();
+    untrusted.persistence.invitation = { ...untrusted.persistence.invitation, state: 'revoked' };
+    await assert.rejects(untrusted.coordinator.join({
+      principalId: 'untrusted', provenance: { kind: 'private-development' },
+    }, REQUEST), { code: 'authorization-denied', name: 'CollabError' });
+
+    const replay = fixture();
+    const completed = await replay.coordinator.join(PRINCIPAL, REQUEST);
+    replay.persistence.invitation = { ...replay.persistence.invitation, state: 'expired' };
+    assert.deepEqual(await replay.coordinator.join(PRINCIPAL, REQUEST), completed);
+
+    const pending = fixture();
+    pending.persistence.failAfter = 'prepared';
+    await assert.rejects(pending.coordinator.join(PRINCIPAL, REQUEST));
+    pending.persistence.invitation = { ...pending.persistence.invitation, state: 'expired' };
+    assert.deepEqual(await pending.coordinator.join(PRINCIPAL, REQUEST), completed);
   });
 
   it('does not prepare Join while another Project mutation requires recovery', async () => {

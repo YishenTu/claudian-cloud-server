@@ -63,7 +63,7 @@ function uploadManifest(): Buffer {
     operationId: status.transferId,
     profile: 'authority-transfer',
     projectId: status.projectId,
-    protocolVersion: 8,
+    protocolVersion: 9,
     refs: Object.freeze([
       Object.freeze({ name: 'refs/heads/main', oid: 'a'.repeat(40) }),
     ]),

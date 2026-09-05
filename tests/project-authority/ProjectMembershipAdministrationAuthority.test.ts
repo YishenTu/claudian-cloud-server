@@ -33,7 +33,7 @@ function offer(state: 'acknowledged' | 'offered' = 'offered') {
 
 class MemoryAdministration implements ProjectMembershipAdministrationPersistence {
   readonly calls: string[] = [];
-  status: 'created' | 'final-manager' | 'replayed' | 'stale' = 'created';
+  status: 'created' | 'final-manager' | 'permanently-stale' | 'replayed' | 'stale' = 'created';
 
   listProjectMembers(input: Parameters<ProjectMembershipAdministrationPersistence['listProjectMembers']>[0]) {
     this.calls.push(`members:${input.actorRole}`);
@@ -168,6 +168,21 @@ describe('ProjectMembershipAdministrationAuthority', () => {
       promotedMemberId: 'member-target',
     });
     assert.deepEqual(persistence.calls, ['create-offer', 'acknowledgeManagerResponsibility', 'promote']);
+  });
+
+  it('preserves proven negative settlement without promoting ambiguous errors', async () => {
+    const request = {
+      expectedManagerSetGeneration: 1, expectedTargetMembershipRevision: 2,
+      idempotencyKey: 'demote-negative', projectId: PROJECT_ID, targetMemberId: 'member-target',
+    };
+    for (const status of ['permanently-stale', 'stale', 'final-manager'] as const) {
+      const { authority, persistence } = fixture();
+      persistence.status = status;
+      await assert.rejects(authority.demote(PRINCIPAL, request), {
+        code: 'authority-not-synchronized',
+        name: status === 'permanently-stale' ? 'ProjectMutationRejection' : 'CollabError',
+      });
+    }
   });
 
   it('maps stale state and final-Manager demotion to fixed canonical errors', async () => {
