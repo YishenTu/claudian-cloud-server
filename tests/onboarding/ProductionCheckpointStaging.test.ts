@@ -60,9 +60,9 @@ function createOwners(
   const staging = new ProductionCheckpointStaging({
     admission,
     clock: options.clock ?? (() => new Date(CLOCK)),
-    idleTimeoutMs: options.idleTimeoutMs ?? 100,
+    idleTimeoutMs: options.idleTimeoutMs ?? 5_000,
     stagingRoot,
-    totalTimeoutMs: options.totalTimeoutMs ?? 1_000,
+    totalTimeoutMs: options.totalTimeoutMs ?? 30_000,
   });
   return { admission, staging };
 }
