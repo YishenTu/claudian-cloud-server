@@ -3,7 +3,8 @@ ARG GIT_PACKAGE_VERSION=1:2.39.5-0+deb12u3
 ARG OPENSSL_PACKAGE_VERSION=3.0.20-1~deb12u2
 ARG CLAUDIAN_SERVER_BUILD
 
-FROM ${NODE_IMAGE} AS build
+# Compile portable JavaScript natively; runtime dependencies use the target platform.
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS build
 
 ARG CLAUDIAN_SERVER_BUILD
 ARG OPENSSL_PACKAGE_VERSION
