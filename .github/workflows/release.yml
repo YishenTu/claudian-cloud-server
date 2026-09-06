@@ -84,11 +84,17 @@ jobs:
             "$RUNNER_TEMP/release/claudian-cloud-server.tar.gz.sha256" \
             --clobber
       - name: Verify anonymous image access
+        if: ${{ !github.event.repository.private }}
         env:
           IMAGE: ${{ steps.release.outputs.image }}@${{ steps.image.outputs.digest }}
         run: |
           anonymous_config=$(mktemp -d)
           docker --config "$anonymous_config" pull "$IMAGE"
+      - name: Verify authenticated image access
+        if: ${{ github.event.repository.private }}
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}@${{ steps.image.outputs.digest }}
+        run: docker pull "$IMAGE"
       - name: Publish the complete release
         env:
           GH_TOKEN: ${{ github.token }}
