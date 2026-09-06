@@ -50,7 +50,7 @@ describe('maintenance operation commands', () => {
     });
   });
 
-  it('uses O1 export policy and the deletion authorization owner unchanged', async () => {
+  it('uses the owning export policy and the deletion authorization owner unchanged', async () => {
     const exports: unknown[] = [];
     const exportDeliveries: unknown[] = [];
     const deletions: unknown[] = [];

@@ -19,7 +19,7 @@ import type {
   ProjectSnapshotMembershipRecord,
 } from '../../coordination/ProjectCoordination.js';
 import type { CollaborationSnapshot } from '../../coordination/CollaborationPersistence.js';
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import {
   sameRepositoryPlacement,
   type RepositoryPlacementLease,
@@ -222,7 +222,7 @@ export class ProjectReadAuthority {
   }
 
   getProjectEvents(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     afterSequence: number,
     options: AcquireProjectLeaseOptions = {},
@@ -233,7 +233,7 @@ export class ProjectReadAuthority {
   }
 
   getProjectSnapshot(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     options: AcquireProjectLeaseOptions = {},
   ): Promise<CollabCloudProjectSnapshot> {
@@ -243,7 +243,7 @@ export class ProjectReadAuthority {
   }
 
   advertiseUploadPack(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     options: ProjectUploadPackAdvertisementOptions = {},
   ): Promise<Buffer> {
@@ -269,7 +269,7 @@ export class ProjectReadAuthority {
   }
 
   runUploadPack(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     options: ProjectUploadPackOptions,
   ): Promise<void> {
@@ -298,7 +298,7 @@ export class ProjectReadAuthority {
 
   async #admit(
     scope: ProjectReadScope,
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
   ): Promise<AdmissionFacts> {
     const memberId = await resolvePrincipalMember(scope, principal);
@@ -346,7 +346,7 @@ export class ProjectReadAuthority {
   }
 
   async #readAdmission(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     signal: AbortSignal | undefined,
   ): Promise<AdmissionFacts> {
@@ -360,7 +360,7 @@ export class ProjectReadAuthority {
   }
 
   async #readSnapshotFacts(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     signal: AbortSignal | undefined,
   ): Promise<SnapshotFacts> {
@@ -406,7 +406,7 @@ export class ProjectReadAuthority {
   }
 
   async #getProjectSnapshot(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     signal: AbortSignal | undefined,
   ): Promise<CollabCloudProjectSnapshot> {
@@ -449,7 +449,7 @@ export class ProjectReadAuthority {
   }
 
   async #getProjectEvents(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     afterSequence: number,
     signal: AbortSignal | undefined,
@@ -510,7 +510,7 @@ export class ProjectReadAuthority {
   }
 
   async #runUploadPackOperation<T>(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     signal: AbortSignal | undefined,
     operation: (facts: AdmissionFacts) => Promise<T>,
@@ -524,7 +524,7 @@ export class ProjectReadAuthority {
   }
 
   async #revalidateAdmission(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     expected: AdmissionFacts,
     signal: AbortSignal | undefined,

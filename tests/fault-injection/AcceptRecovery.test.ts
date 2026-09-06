@@ -44,7 +44,7 @@ import {
   ProjectWriteAdmission,
 } from '../../src/project-authority/admission/ProjectWriteAdmission.js';
 import { ProjectPersonalRefAuthority } from '../../src/project-authority/writes/ProjectPersonalRefAuthority.js';
-import { createDevelopmentIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
+import { createDevelopmentPrincipal } from '../../src/request-context/RequestPrincipal.js';
 import { GitRepositoryAuthority } from '../../src/repositories/GitRepositoryAuthority.js';
 import { GitReceiveAdmission } from '../../src/resource-admission/GitReceiveAdmission.js';
 import { ResourceAdmission } from '../../src/resource-admission/ResourceAdmission.js';
@@ -540,7 +540,7 @@ describe('Accept cross-store recovery', () => {
             repository: new FaultRepository(repository, controller),
           });
           const failure = await failed.accept(
-            createDevelopmentIngressPrincipal(MANAGER_ID),
+            createDevelopmentPrincipal(MANAGER_ID),
             request,
           ).then(() => undefined, (error: unknown) => error);
           assert.ok(failure instanceof CollabError, checkpoint);
@@ -574,7 +574,7 @@ describe('Accept cross-store recovery', () => {
           try {
             await recovered.recoverProject(projectId);
             const response = await recovered.accept(
-              createDevelopmentIngressPrincipal(MANAGER_ID),
+              createDevelopmentPrincipal(MANAGER_ID),
               request,
             );
             assert.equal(
@@ -650,7 +650,7 @@ describe('Accept cross-store recovery', () => {
           repository: new FaultRepository(repository, divergentFault),
         });
         await assert.rejects(interrupted.accept(
-          createDevelopmentIngressPrincipal(MANAGER_ID),
+          createDevelopmentPrincipal(MANAGER_ID),
           divergentRequest,
         ));
         await interrupted.close();
@@ -688,7 +688,7 @@ describe('Accept cross-store recovery', () => {
           });
           await assert.rejects(
             classifier.accept(
-              createDevelopmentIngressPrincipal(MANAGER_ID),
+              createDevelopmentPrincipal(MANAGER_ID),
               divergentRequest,
             ),
             error => (
@@ -717,7 +717,7 @@ describe('Accept cross-store recovery', () => {
             isolatedFixture.headOid,
           );
           const isolated = await classifier.accept(
-            createDevelopmentIngressPrincipal(MANAGER_ID),
+            createDevelopmentPrincipal(MANAGER_ID),
             acceptRequest(
               isolatedProject,
               isolatedFixture.mainOid,
@@ -800,7 +800,7 @@ describe('Accept cross-store recovery', () => {
         });
         try {
           const accept = contendedAccept.accept(
-            createDevelopmentIngressPrincipal(MANAGER_ID),
+            createDevelopmentPrincipal(MANAGER_ID),
             acceptRequest(
               contendedProject,
               contendedFixture.mainOid,
@@ -811,7 +811,7 @@ describe('Accept cross-store recovery', () => {
           await blockingRepository.entered;
           let ordinaryEntered = false;
           const ordinary = ordinaryAdmission.run(
-            createDevelopmentIngressPrincipal(MANAGER_ID),
+            createDevelopmentPrincipal(MANAGER_ID),
             contendedProject,
             () => {
               ordinaryEntered = true;
@@ -820,7 +820,7 @@ describe('Accept cross-store recovery', () => {
           ).then(() => undefined, (error: unknown) => error);
           let receiveSettled = false;
           const receive = receiveAuthority.advertiseReceivePack(
-            createDevelopmentIngressPrincipal(MEMBER_ID),
+            createDevelopmentPrincipal(MEMBER_ID),
             contendedProject,
           ).then(
             (): unknown => {
@@ -833,7 +833,7 @@ describe('Accept cross-store recovery', () => {
             },
           );
           const otherProjectResult = await ordinaryAdmission.run(
-            createDevelopmentIngressPrincipal(MANAGER_ID),
+            createDevelopmentPrincipal(MANAGER_ID),
             progressingProject,
             () => Promise.resolve('progressed'),
           ).catch((error: unknown) => {

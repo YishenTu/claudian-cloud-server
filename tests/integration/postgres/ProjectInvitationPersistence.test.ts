@@ -490,13 +490,9 @@ describe('Postgres Project invitation persistence', () => {
           [PROJECT_ID],
         );
         const result = await client.query<{
-          readonly legacy_relation: string | null;
           readonly operation: string;
         }>(
-          `SELECT to_regclass(
-                    'claudian_cloud.project_membership_idempotency_results'
-                  )::text AS legacy_relation,
-                  operation
+          `SELECT operation
              FROM claudian_cloud.idempotency_results
             WHERE project_id = $1
               AND member_id = $2
@@ -504,7 +500,6 @@ describe('Postgres Project invitation persistence', () => {
           [PROJECT_ID, MEMBER_ID],
         );
         assert.deepEqual(result.rows, [{
-          legacy_relation: null,
           operation: 'revokeProjectInvitation',
         }]);
         await client.query('ROLLBACK');

@@ -43,7 +43,7 @@ function acceptedObservation(): CapacityObservation {
       restoreDurationMs: 90 * 60 * 1_000,
       restoreObjectiveMs: 8 * 60 * 60 * 1_000,
     },
-    profile: 'a-test',
+    profile: 'single-host',
     requests: {
       admissionRejected: 20,
       overloadProbeRetryable: true,
@@ -90,7 +90,7 @@ function acceptedObservation(): CapacityObservation {
 }
 
 describe('safe capacity report', () => {
-  it('accepts the complete A-test envelope and emits canonical aggregate evidence', () => {
+  it('accepts the complete single-host envelope and emits canonical aggregate evidence', () => {
     const report = buildCapacityReport(acceptedObservation());
 
     assert.equal(report.schemaVersion, 1);
@@ -337,7 +337,7 @@ describe('safe capacity report', () => {
     ]);
   });
 
-  it('requires every provisional A-test admission ceiling and child resource evidence', () => {
+  it('requires every provisional single-host admission ceiling and child resource evidence', () => {
     const observation = acceptedObservation();
     const report = buildCapacityReport({
       ...observation,

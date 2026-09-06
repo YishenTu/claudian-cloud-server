@@ -17,7 +17,7 @@ import type {
   ProtectedInvitationEnvelope,
 } from '../../coordination/ProjectMembershipPersistence.js';
 import { ProjectMutationRejection } from '../ProjectMutationRejection.js';
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import type { ProjectWriteAdmission } from '../admission/ProjectWriteAdmission.js';
 import { ProtectedSecretCustodyError } from '../lifecycle/ProtectedSecretCustody.js';
 import type { ProtectedSecretCustody } from '../lifecycle/ProtectedSecretCustody.js';
@@ -130,7 +130,7 @@ export class ProjectInvitationAuthority {
   }
 
   create(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: CreateProjectInvitationRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<CreateProjectInvitationResponse> {
@@ -217,7 +217,7 @@ export class ProjectInvitationAuthority {
   }
 
   list(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: CollabProjectRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<ListProjectInvitationsResponse> {
@@ -237,7 +237,7 @@ export class ProjectInvitationAuthority {
   }
 
   revoke(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: RevokeProjectInvitationRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<RevokeProjectInvitationResponse> {

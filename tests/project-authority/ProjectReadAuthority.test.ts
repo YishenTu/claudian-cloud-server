@@ -14,7 +14,7 @@ import {
   type ProjectReadAuthorityCoordination,
   type ProjectReadRepository,
 } from '../../src/project-authority/reads/ProjectReadAuthority.js';
-import { createDevelopmentIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
+import { createDevelopmentPrincipal } from '../../src/request-context/RequestPrincipal.js';
 import { createRepositoryPlacementLease } from '../../src/repositories/RepositoryPlacement.js';
 
 const CREATED = '2026-08-21T00:00:00.000Z';
@@ -220,10 +220,10 @@ async function expectReadError(
 }
 
 describe('ProjectReadAuthority', () => {
-  it('constructs the exact bounded step-6 snapshot and revalidates it', async () => {
+  it('constructs the exact bounded Project snapshot and revalidates it', async () => {
     const { read, repository } = authority();
     const snapshot = await read.getProjectSnapshot(
-      createDevelopmentIngressPrincipal('member-001'),
+      createDevelopmentPrincipal('member-001'),
       'project-a',
     );
 
@@ -293,7 +293,7 @@ describe('ProjectReadAuthority', () => {
     unrelated.coordination.state.activeAttempt = true;
     await expectReadError(
       unrelated.read.getProjectSnapshot(
-        createDevelopmentIngressPrincipal('outsider'),
+        createDevelopmentPrincipal('outsider'),
         'project-a',
       ),
       'project-not-found',
@@ -303,7 +303,7 @@ describe('ProjectReadAuthority', () => {
     unknown.coordination.state.projectAvailable = false;
     await expectReadError(
       unknown.read.getProjectSnapshot(
-        createDevelopmentIngressPrincipal('outsider'),
+        createDevelopmentPrincipal('outsider'),
         'project-unknown',
       ),
       'project-not-found',
@@ -314,7 +314,7 @@ describe('ProjectReadAuthority', () => {
     inactive.coordination.state.membershipStatus = 'left';
     await expectReadError(
       inactive.read.getProjectSnapshot(
-        createDevelopmentIngressPrincipal('member-001'),
+        createDevelopmentPrincipal('member-001'),
         'project-a',
       ),
       'project-not-found',
@@ -326,7 +326,7 @@ describe('ProjectReadAuthority', () => {
       const { read } = authority();
       await expectReadError(
         read.getProjectSnapshot(
-          createDevelopmentIngressPrincipal('outsider'),
+          createDevelopmentPrincipal('outsider'),
           'project-a',
         ),
         'project-not-found',
@@ -337,7 +337,7 @@ describe('ProjectReadAuthority', () => {
       coordination.state.serviceState = 'recovery-required';
       await expectReadError(
         read.getProjectSnapshot(
-          createDevelopmentIngressPrincipal('member-001'),
+          createDevelopmentPrincipal('member-001'),
           'project-a',
         ),
         'recovery-required',
@@ -348,7 +348,7 @@ describe('ProjectReadAuthority', () => {
       coordination.state.activeAttempt = true;
       await expectReadError(
         read.getProjectSnapshot(
-          createDevelopmentIngressPrincipal('member-001'),
+          createDevelopmentPrincipal('member-001'),
           'project-a',
         ),
         'recovery-required',
@@ -359,7 +359,7 @@ describe('ProjectReadAuthority', () => {
       coordination.state.activeJoin = true;
       await expectReadError(
         read.getProjectSnapshot(
-          createDevelopmentIngressPrincipal('member-001'),
+          createDevelopmentPrincipal('member-001'),
           'project-a',
         ),
         'recovery-required',
@@ -370,7 +370,7 @@ describe('ProjectReadAuthority', () => {
       coordination.state.activeLifecycle = true;
       await expectReadError(
         read.getProjectSnapshot(
-          createDevelopmentIngressPrincipal('member-001'),
+          createDevelopmentPrincipal('member-001'),
           'project-a',
         ),
         'recovery-required',
@@ -381,7 +381,7 @@ describe('ProjectReadAuthority', () => {
       coordination.state.placementAvailable = false;
       await expectReadError(
         read.getProjectSnapshot(
-          createDevelopmentIngressPrincipal('member-001'),
+          createDevelopmentPrincipal('member-001'),
           'project-a',
         ),
         'state-conflict',
@@ -392,7 +392,7 @@ describe('ProjectReadAuthority', () => {
       coordination.memberCount = 101;
       await expectReadError(
         read.getProjectSnapshot(
-          createDevelopmentIngressPrincipal('member-001'),
+          createDevelopmentPrincipal('member-001'),
           'project-a',
         ),
         'project-too-large',
@@ -409,7 +409,7 @@ describe('ProjectReadAuthority', () => {
       };
       await expectReadError(
         read.getProjectSnapshot(
-          createDevelopmentIngressPrincipal('member-001'),
+          createDevelopmentPrincipal('member-001'),
           'project-a',
         ),
         'project-not-found',
@@ -419,7 +419,7 @@ describe('ProjectReadAuthority', () => {
 
   it('returns only contiguous bounded replay or snapshot-required', async () => {
     const { coordination, read, repository } = authority();
-    const principal = createDevelopmentIngressPrincipal('member-001');
+    const principal = createDevelopmentPrincipal('member-001');
     assert.deepEqual(await read.getProjectEvents(principal, 'project-a', 0), {
       events: [
         {
@@ -466,7 +466,7 @@ describe('ProjectReadAuthority', () => {
     };
     await expectReadError(
       read.getProjectEvents(
-        createDevelopmentIngressPrincipal('member-001'),
+        createDevelopmentPrincipal('member-001'),
         'project-a',
         0,
       ),
@@ -477,7 +477,7 @@ describe('ProjectReadAuthority', () => {
 
   it('revalidates explicit upload-pack authority immediately before Git proceeds', async () => {
     const { coordination, read, repository } = authority();
-    const principal = createDevelopmentIngressPrincipal('member-001');
+    const principal = createDevelopmentPrincipal('member-001');
     let checks = 0;
     repository.onVerify = () => {
       checks += 1;
@@ -528,7 +528,7 @@ describe('ProjectReadAuthority', () => {
       });
     });
     const pending = read.getProjectSnapshot(
-      createDevelopmentIngressPrincipal('member-001'),
+      createDevelopmentPrincipal('member-001'),
       'project-a',
     );
     await new Promise(resolve => setImmediate(resolve));
@@ -538,7 +538,7 @@ describe('ProjectReadAuthority', () => {
     assert.equal(observedSignal?.aborted, true);
     await expectReadError(
       read.getProjectSnapshot(
-        createDevelopmentIngressPrincipal('member-001'),
+        createDevelopmentPrincipal('member-001'),
         'project-a',
       ),
       'closed',

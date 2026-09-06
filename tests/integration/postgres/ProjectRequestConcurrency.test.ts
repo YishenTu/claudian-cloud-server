@@ -15,7 +15,7 @@ import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/Po
 import { ProjectRequestAuthority } from '../../../src/project-authority/requests/ProjectRequestAuthority.js';
 import { ProjectPersonalRefAuthority } from '../../../src/project-authority/writes/ProjectPersonalRefAuthority.js';
 import { GitRepositoryAuthority } from '../../../src/repositories/GitRepositoryAuthority.js';
-import { createDevelopmentIngressPrincipal } from '../../../src/request-context/IngressPrincipal.js';
+import { createDevelopmentPrincipal } from '../../../src/request-context/RequestPrincipal.js';
 import { GitReceiveAdmission } from '../../../src/resource-admission/GitReceiveAdmission.js';
 import { ResourceAdmission } from '../../../src/resource-admission/ResourceAdmission.js';
 import { withPostgresTestDatabase } from '../../helpers/PostgresTestDatabase.js';
@@ -209,7 +209,7 @@ describe('Project Request concurrency', () => {
         recovery, repository,
       });
       try {
-        const actor = createDevelopmentIngressPrincipal(ACTORS[0]);
+        const actor = createDevelopmentPrincipal(ACTORS[0]);
         const receive = personal.advertiseReceivePack(actor, PROJECT_ID);
         await receivePreflight.promise;
         const request = {

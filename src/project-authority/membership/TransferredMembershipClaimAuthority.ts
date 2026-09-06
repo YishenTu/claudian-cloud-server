@@ -12,7 +12,7 @@ import {
 
 import type { ProtectedClaimOverrideEnvelope } from '../../coordination/ProjectMembershipPersistence.js';
 import { ProjectMutationRejection } from '../ProjectMutationRejection.js';
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import type { ProjectWriteAdmission } from '../admission/ProjectWriteAdmission.js';
 import {
   ProtectedSecretCustodyError,
@@ -105,7 +105,7 @@ export class TransferredMembershipClaimAuthority {
   }
 
   reissue(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: ReissueTransferredMembershipClaimRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<ReissueTransferredMembershipClaimResponse> {
@@ -225,7 +225,7 @@ export class TransferredMembershipClaimAuthority {
   }
 
   revoke(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: RevokeTransferredMembershipClaimRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<RevokeTransferredMembershipClaimResponse> {

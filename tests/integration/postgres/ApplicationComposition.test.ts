@@ -11,7 +11,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { createConnection, createServer } from 'node:net';
+import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
@@ -22,14 +22,17 @@ import {
 } from 'node:test';
 
 import { Client } from 'pg';
+import { WebSocket } from 'ws';
 import {
+  collabCloudAuthorityTransferArtifactRoute,
   collabCloudGitRoute,
+  collabCloudProjectEventsRoute,
   collabCloudProjectOperationRoute,
   collabMemberRef,
   decodeCollabCloudCapabilityDocument,
+  decodeCollabCloudErrorEnvelope,
   decodeCollabCloudSuccessEnvelope,
   type CollabCloudJsonOperation,
-  type CollabControlOperation,
   type ListProjectMembersResponse,
 } from '@claudian-collab/protocol';
 
@@ -41,7 +44,6 @@ import type { ServerConfig } from '../../../src/config/ServerConfig.js';
 import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
 import { SafeLogger } from '../../../src/observability/SafeLogger.js';
-import { TrustedPrincipalProvider } from '../../../src/request-context/TrustedPrincipalProvider.js';
 import {
   acquirePostgresTestDatabase,
   type PostgresTestDatabase,
@@ -58,6 +60,7 @@ interface LoggedEvent {
 function config(options: {
   readonly gitExecutable?: string;
   readonly httpPort?: number;
+  readonly principalProfile?: ServerConfig['principalProfile'];
   readonly postgresUrl: string;
   readonly repositoryRoot: string;
 }): ServerConfig {
@@ -103,7 +106,7 @@ function config(options: {
       reservedPoolMax: 1,
       url: options.postgresUrl,
     }),
-    principalProfile: 'private-development',
+    principalProfile: options.principalProfile ?? 'private-development',
     repository: Object.freeze({
       gitExecutable: options.gitExecutable ?? GIT_EXECUTABLE,
       operationTimeoutMs: 2_000,
@@ -166,9 +169,9 @@ async function cloudConnectionCount(adminUrl: string): Promise<number> {
 
 async function projectOperation(
   baseUrl: string,
-  principalId: string,
+  credential: string,
   projectId: string,
-  operation: CollabControlOperation,
+  operation: CollabCloudJsonOperation,
   data: unknown,
 ): Promise<unknown> {
   const route = collabCloudProjectOperationRoute(projectId, operation);
@@ -176,11 +179,11 @@ async function projectOperation(
     body: JSON.stringify({
       data,
       protocolVersion: 9,
-      requestId: `request-${operation}-${principalId}`,
+      requestId: `request-${operation}`,
     }),
     headers: {
       'content-type': 'application/json',
-      'x-test-established-principal': principalId,
+      authorization: `Bearer ${credential}`,
     },
     method: route.method,
   });
@@ -191,9 +194,9 @@ async function projectOperation(
 
 async function rejectedProjectOperation(
   baseUrl: string,
-  principalId: string,
+  credential: string,
   projectId: string,
-  operation: CollabControlOperation,
+  operation: CollabCloudJsonOperation,
   data: unknown,
 ): Promise<void> {
   const route = collabCloudProjectOperationRoute(projectId, operation);
@@ -201,97 +204,16 @@ async function rejectedProjectOperation(
     body: JSON.stringify({
       data,
       protocolVersion: 9,
-      requestId: `request-rejected-${operation}-${principalId}`,
+      requestId: `request-rejected-${operation}`,
     }),
     headers: {
       'content-type': 'application/json',
-      'x-test-established-principal': principalId,
+      authorization: `Bearer ${credential}`,
     },
     method: route.method,
   });
   assert.notEqual(response.status, 200);
   await response.body?.cancel();
-}
-
-function proxyV2Frame(sourceAddress: string): Buffer {
-  const address = Buffer.concat([
-    Buffer.from(sourceAddress.split('.').map(Number)),
-    Buffer.from([127, 0, 0, 1]),
-    Buffer.from([0xc3, 0x50, 0x22, 0x53]),
-  ]);
-  const frame = Buffer.alloc(16);
-  Buffer.from([
-    0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d,
-    0x0a, 0x51, 0x55, 0x49, 0x54, 0x0a,
-  ]).copy(frame);
-  frame[12] = 0x21;
-  frame[13] = 0x11;
-  frame.writeUInt16BE(address.byteLength, 14);
-  return Buffer.concat([frame, address]);
-}
-
-async function proxiedProjectOperation(
-  port: number,
-  sourceAddress: string,
-  principalId: string,
-  projectId: string,
-  operation: CollabCloudJsonOperation,
-  data: unknown,
-): Promise<unknown> {
-  const route = collabCloudProjectOperationRoute(projectId, operation);
-  const body = JSON.stringify({
-    data,
-    protocolVersion: 9,
-    requestId: `request-proxy-${operation}`,
-  });
-  const request = Buffer.from(
-    `${route.method} ${route.target} HTTP/1.1\r\n`
-      + 'Host: cloud\r\n'
-      + `x-claudian-ingress-principal: ${principalId}\r\n`
-      + 'Connection: close\r\n'
-      + 'Content-Type: application/json\r\n'
-      + `Content-Length: ${String(Buffer.byteLength(body))}\r\n\r\n${body}`,
-    'utf8',
-  );
-  const socket = createConnection({ host: '127.0.0.1', port });
-  const received: Buffer[] = [];
-  socket.on('data', chunk => received.push(Buffer.from(chunk)));
-  await once(socket, 'connect');
-  socket.write(proxyV2Frame(sourceAddress));
-  await new Promise<void>(resolve => setImmediate(resolve));
-  socket.write(request);
-  await once(socket, 'close');
-  const response = Buffer.concat(received).toString('utf8');
-  const separator = response.indexOf('\r\n\r\n');
-  assert.match(response.slice(0, separator), /^HTTP\/1\.1 200 OK/mu);
-  return decodeCollabCloudSuccessEnvelope(
-    JSON.parse(response.slice(separator + 4)) as unknown,
-  ).data;
-}
-
-async function proxiedCapabilities(
-  port: number,
-  sourceAddress: string,
-): Promise<ReturnType<typeof decodeCollabCloudCapabilityDocument>> {
-  const socket = createConnection({ host: '127.0.0.1', port });
-  const received: Buffer[] = [];
-  socket.on('data', chunk => received.push(Buffer.from(chunk)));
-  await once(socket, 'connect');
-  socket.write(proxyV2Frame(sourceAddress));
-  await new Promise<void>(resolve => setImmediate(resolve));
-  socket.write(Buffer.from(
-    'GET /collab/capabilities HTTP/1.1\r\n'
-      + 'Host: cloud\r\n'
-      + 'Connection: close\r\n\r\n',
-    'utf8',
-  ));
-  await once(socket, 'close');
-  const response = Buffer.concat(received).toString('utf8');
-  const separator = response.indexOf('\r\n\r\n');
-  assert.match(response.slice(0, separator), /^HTTP\/1\.1 200 OK/mu);
-  return decodeCollabCloudCapabilityDocument(
-    JSON.parse(response.slice(separator + 4)) as unknown,
-  );
 }
 
 async function waitForNoCloudConnections(adminUrl: string): Promise<void> {
@@ -1038,23 +960,16 @@ while :; do sleep 1; done`,
     const application = createApplication({
       config: Object.freeze({
         ...baseConfig,
-        principalProfile: 'trusted-ingress',
-        trustedIngress: Object.freeze({
-          mode: 'proxy-v2' as const,
-          preambleTimeoutMs: 5_000,
-          allowedSources: Object.freeze(['100.64.0.10']),
-          providerId: 'operator-test',
-        }),
+        principalProfile: 'vault-credential',
       }),
       keyring: keyring(),
       logger: logger([]),
     });
     try {
       const address = await application.start();
-      const capabilities = (await proxiedCapabilities(
-        address.port,
-        '100.64.0.10',
-      )).capabilities;
+      const response = await fetch(`http://${address.host}:${String(address.port)}/collab/capabilities`);
+      assert.equal(response.status, 200);
+      const capabilities = decodeCollabCloudCapabilityDocument(await response.json()).capabilities;
       assert.equal(capabilities.includes('development-bootstrap'), false);
       for (const capability of [
         'authority-transfer',
@@ -1072,10 +987,10 @@ while :; do sleep 1; done`,
     }
   });
 
-  it('serves one production lifecycle owner to two PROXY-bound principals across restart', async () => {
+  it('serves one production lifecycle owner to two credential-authenticated Vaults across restart', async () => {
     const projectId = 'project-production-lifecycle';
-    const sourceA = '100.64.0.10';
-    const sourceB = '100.64.0.11';
+    const managerCredential = 'a'.repeat(64);
+    const targetCredential = 'b'.repeat(64);
     const productionDatabase = await acquirePostgresTestDatabase();
     await new PostgresSchemaInitializer({
       connectionString: productionDatabase.migrationUrl,
@@ -1098,27 +1013,21 @@ while :; do sleep 1; done`,
     });
     const productionConfig: ServerConfig = Object.freeze({
       ...baseConfig,
-      principalProfile: 'trusted-ingress',
-      trustedIngress: Object.freeze({
-        mode: 'proxy-v2' as const,
-        preambleTimeoutMs: 5_000,
-        allowedSources: Object.freeze([sourceA, sourceB]),
-        providerId: 'operator-test',
-      }),
+      principalProfile: 'vault-credential',
     });
     const custody = keyring();
+    const logs: string[] = [];
     const application = () => createApplication({
       config: productionConfig,
       keyring: custody,
-      logger: logger([]),
+      logger: logger(logs),
     });
     let running = application();
     try {
       let address = await running.start();
-      const created = await proxiedProjectOperation(
-        address.port,
-        sourceA,
-        'principal-production-manager',
+      const created = await projectOperation(
+        `http://${address.host}:${String(address.port)}`,
+        managerCredential,
         projectId,
         'createCloudProject',
         {
@@ -1128,10 +1037,47 @@ while :; do sleep 1; done`,
           projectName: 'Production Lifecycle',
         },
       ) as Readonly<{ readonly memberId: string }>;
-      const invitation = await proxiedProjectOperation(
-        address.port,
-        sourceA,
-        'principal-production-manager',
+      const origin = `http://${address.host}:${String(address.port)}`;
+      const claimedPrincipal = 'vault-ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb';
+      const snapshotRoute = collabCloudProjectOperationRoute(projectId, 'getProjectSnapshot');
+      const gitRoute = collabCloudGitRoute(projectId, 'info-refs', 'git-upload-pack');
+      const eventsRoute = collabCloudProjectEventsRoute(projectId, 0);
+      const artifactRoute = collabCloudAuthorityTransferArtifactRoute(projectId, 'transfer-unknown', 'download', 'checkpoint.json');
+      for (const [headers, status, errorCode] of [
+        [{ 'x-claudian-ingress-principal': claimedPrincipal }, 403, 'authentication-failed'],
+        [{ authorization: `Bearer ${'d'.repeat(64)}`, 'x-claudian-ingress-principal': claimedPrincipal }, 404, 'project-not-found'],
+      ] as const) {
+        const snapshot = await fetch(`${origin}${snapshotRoute.target}`, {
+          body: JSON.stringify({ data: { projectId }, protocolVersion: 9, requestId: 'credential-isolation' }),
+          headers: { ...headers, 'content-type': 'application/json' },
+          method: snapshotRoute.method,
+        });
+        assert.equal(snapshot.status, status);
+        assert.equal(decodeCollabCloudErrorEnvelope(await snapshot.json()).error.code, errorCode);
+        const git = await fetch(`${origin}${gitRoute.target}`, { headers, method: gitRoute.method });
+        assert.equal(git.status, status);
+        await git.body?.cancel();
+        const socket = new WebSocket(`ws://${address.host}:${String(address.port)}${eventsRoute.target}`, {
+          headers, handshakeTimeout: 2_000,
+        });
+        const [failure] = await once(socket, 'error') as [Error];
+        assert.match(failure.message, new RegExp(`Unexpected server response: ${String(status)}`, 'u'));
+      }
+      const artifact = await fetch(`${origin}${artifactRoute.target}`, {
+        headers: { 'x-claudian-ingress-principal': claimedPrincipal }, method: artifactRoute.method,
+      });
+      assert.equal(artifact.status, 403);
+      assert.equal(decodeCollabCloudErrorEnvelope(await artifact.json()).error.code, 'authentication-failed');
+      const events = new WebSocket(`ws://${address.host}:${String(address.port)}${eventsRoute.target}`, {
+        headers: { authorization: `Bearer ${managerCredential}` }, handshakeTimeout: 2_000,
+      });
+      await once(events, 'open');
+      const eventsClosed = once(events, 'close');
+      events.close();
+      await eventsClosed;
+      const invitation = await projectOperation(
+        `http://${address.host}:${String(address.port)}`,
+        managerCredential,
         projectId,
         'createProjectInvitation',
         {
@@ -1143,10 +1089,9 @@ while :; do sleep 1; done`,
         readonly invitationId: string;
         readonly secret: string;
       }>;
-      const joined = await proxiedProjectOperation(
-        address.port,
-        sourceB,
-        'principal-production-target',
+      const joined = await projectOperation(
+        `http://${address.host}:${String(address.port)}`,
+        targetCredential,
         projectId,
         'joinCloudProject',
         {
@@ -1157,22 +1102,19 @@ while :; do sleep 1; done`,
           secret: invitation.secret,
         },
       ) as Readonly<{ readonly memberId: string }>;
-      for (const source of [sourceA, sourceB]) {
-        for (const [principal, memberId, role] of [
-          ['principal-production-manager', created.memberId, 'manager'],
-          ['principal-production-target', joined.memberId, 'member'],
-        ] as const) {
-          const snapshot = await proxiedProjectOperation(
-            address.port, source, principal, projectId, 'getProjectSnapshot', { projectId },
-          ) as { readonly currentMember: { readonly id: string; readonly role: string } };
-          assert.equal(snapshot.currentMember.id, memberId);
-          assert.equal(snapshot.currentMember.role, role);
-        }
+      for (const [credential, memberId, role] of [
+        [managerCredential, created.memberId, 'manager'],
+        [targetCredential, joined.memberId, 'member'],
+      ] as const) {
+        const snapshot = await projectOperation(
+          `http://${address.host}:${String(address.port)}`, credential, projectId, 'getProjectSnapshot', { projectId },
+        ) as { readonly currentMember: { readonly id: string; readonly role: string } };
+        assert.equal(snapshot.currentMember.id, memberId);
+        assert.equal(snapshot.currentMember.role, role);
       }
-      const begun = await proxiedProjectOperation(
-        address.port,
-        sourceA,
-        'principal-production-manager',
+      const begun = await projectOperation(
+        `http://${address.host}:${String(address.port)}`,
+        managerCredential,
         projectId,
         'beginCloudToLanTransfer',
         {
@@ -1191,15 +1133,18 @@ while :; do sleep 1; done`,
       await running.close();
       running = application();
       address = await running.start();
-      const replay = await proxiedProjectOperation(
-        address.port,
-        sourceA,
-        'principal-production-manager',
+      const replay = await projectOperation(
+        `http://${address.host}:${String(address.port)}`,
+        managerCredential,
         projectId,
         'getProjectAuthorityTransfer',
         { projectId, transferId: begun.transferId },
       ) as Readonly<{ readonly phase: string; readonly transferId: string }>;
       assert.deepEqual(replay, begun);
+      const serialized = JSON.stringify(logs);
+      for (const secret of [managerCredential, targetCredential, 'd'.repeat(64)]) {
+        assert.equal(serialized.includes(secret), false);
+      }
     } finally {
       await running.close();
       await rm(productionAuthorityRoot, { force: true, recursive: true });
@@ -1218,28 +1163,18 @@ while :; do sleep 1; done`,
     const projectId = 'project-reissue-descriptor';
     const transferId = 'transfer-reissue-descriptor';
     const importedMemberId = 'member-reissue-descriptor';
-    const managerPrincipal = 'principal-reissue-manager';
+    const managerCredential = 'a'.repeat(64);
     const custody = keyring();
     const running = createApplication({
-      config: config({ postgresUrl: database.runtimeUrl, repositoryRoot }),
+      config: config({ postgresUrl: database.runtimeUrl, repositoryRoot, principalProfile: 'vault-credential' }),
       keyring: custody,
       logger: logger([]),
-      trustedPrincipal: {
-        establishedAssertion: request => ({
-          principalId: request.headers['x-test-established-principal'],
-          provenance: {
-            kind: 'operator-protected-channel',
-            providerId: 'operator-process-test',
-          },
-        }),
-        provider: new TrustedPrincipalProvider(),
-      },
     });
     try {
       const address = await running.start();
       const baseUrl = `http://${address.host}:${String(address.port)}`;
       const created = await projectOperation(
-        baseUrl, managerPrincipal, projectId, 'createCloudProject', {
+        baseUrl, managerCredential, projectId, 'createCloudProject', {
           idempotencyKey: 'create-reissue-project',
           managerDisplayName: 'Reissue Manager',
           projectId,
@@ -1247,15 +1182,15 @@ while :; do sleep 1; done`,
         },
       ) as Readonly<{ readonly mainOid: string; readonly memberId: string }>;
       const invitation = await projectOperation(
-        baseUrl, managerPrincipal, projectId, 'createProjectInvitation', {
+        baseUrl, managerCredential, projectId, 'createProjectInvitation', {
           expectedManagerSetGeneration: 1,
           idempotencyKey: 'reissue-member-invitation',
           projectId,
         },
       ) as Readonly<{ readonly invitationId: string; readonly secret: string }>;
-      const ordinaryPrincipal = 'principal-reissue-member';
+      const ordinaryCredential = 'b'.repeat(64);
       const ordinaryMember = await projectOperation(
-        baseUrl, ordinaryPrincipal, projectId, 'joinCloudProject', {
+        baseUrl, ordinaryCredential, projectId, 'joinCloudProject', {
           displayName: 'Ordinary Member',
           idempotencyKey: 'reissue-member-join',
           invitationId: invitation.invitationId,
@@ -1347,27 +1282,27 @@ while :; do sleep 1; done`,
         projectId,
       };
       const originalMembers = await projectOperation(
-        baseUrl, managerPrincipal, projectId, 'listProjectMembers', { projectId },
+        baseUrl, managerCredential, projectId, 'listProjectMembers', { projectId },
       ) as ListProjectMembersResponse;
       const original = originalMembers.members.find(member => member.memberId === importedMemberId);
       assert.equal(original?.importedClaimState, 'expired');
       assert.equal(original.importedClaimGeneration, 0);
       const ordinaryMembers = await projectOperation(
-        baseUrl, ordinaryPrincipal, projectId, 'listProjectMembers', { projectId },
+        baseUrl, ordinaryCredential, projectId, 'listProjectMembers', { projectId },
       ) as ListProjectMembersResponse;
       assert.ok(ordinaryMembers.members.every(member => (
         member.importedClaimState === 'hidden' && member.importedClaimGeneration === null
       )));
       await rejectedProjectOperation(
-        baseUrl, ordinaryPrincipal, projectId, 'reissueTransferredMembershipClaim', request,
+        baseUrl, ordinaryCredential, projectId, 'reissueTransferredMembershipClaim', request,
       );
       await rejectedProjectOperation(
-        baseUrl, managerPrincipal, projectId, 'reissueTransferredMembershipClaim', {
+        baseUrl, managerCredential, projectId, 'reissueTransferredMembershipClaim', {
           ...request, memberId: ordinaryMember.memberId,
         },
       );
       const response = await projectOperation(
-        baseUrl, managerPrincipal, projectId, 'reissueTransferredMembershipClaim', request,
+        baseUrl, managerCredential, projectId, 'reissueTransferredMembershipClaim', request,
       ) as Readonly<{
         readonly claimGeneration: number;
         readonly createdAt: string;
@@ -1384,14 +1319,14 @@ while :; do sleep 1; done`,
       assert.equal(response.claimGeneration, 1);
       assert.equal(Date.parse(response.expiresAt) - Date.parse(response.createdAt), 2_592_000_000);
       assert.deepEqual(await projectOperation(
-        baseUrl, managerPrincipal, projectId, 'reissueTransferredMembershipClaim', request,
+        baseUrl, managerCredential, projectId, 'reissueTransferredMembershipClaim', request,
       ), response);
       await rejectedProjectOperation(
-        baseUrl, 'principal-reissue-outsider', projectId,
+        baseUrl, 'd'.repeat(64), projectId,
         'reissueTransferredMembershipClaim', request,
       );
       await rejectedProjectOperation(
-        baseUrl, managerPrincipal, projectId, 'reissueTransferredMembershipClaim', {
+        baseUrl, managerCredential, projectId, 'reissueTransferredMembershipClaim', {
           ...request, idempotencyKey: 'reissue-stale-key',
         },
       );
@@ -1420,30 +1355,18 @@ while :; do sleep 1; done`,
   it('joins every Cloud membership group through the real process and restart path', async () => {
     const projectId = 'project-membership-process';
     const otherProjectId = 'project-membership-cross-scope';
-    const managerPrincipal = 'principal-process-manager';
-    const memberAPrincipal = 'principal-process-member-a';
-    const memberBPrincipal = 'principal-process-member-b';
+    const managerCredential = 'a'.repeat(64);
+    const memberACredential = 'b'.repeat(64);
+    const memberBCredential = 'c'.repeat(64);
     const custody = keyring();
-    const trustedPrincipal = {
-      establishedAssertion: (request: Readonly<{
-        readonly headers: Readonly<Record<string, string | string[] | undefined>>;
-      }>) => ({
-        principalId: request.headers['x-test-established-principal'],
-        provenance: {
-          kind: 'operator-protected-channel',
-          providerId: 'operator-process-test',
-        },
-      }),
-      provider: new TrustedPrincipalProvider(),
-    };
     const application = () => createApplication({
       config: config({
         postgresUrl: database.runtimeUrl,
         repositoryRoot,
+        principalProfile: 'vault-credential',
       }),
       keyring: custody,
       logger: logger([]),
-      trustedPrincipal,
     });
     let running = application();
     try {
@@ -1451,7 +1374,7 @@ while :; do sleep 1; done`,
       let baseUrl = `http://${address.host}:${String(address.port)}`;
       const created = await projectOperation(
         baseUrl,
-        managerPrincipal,
+        managerCredential,
         projectId,
         'createCloudProject',
         {
@@ -1473,7 +1396,7 @@ while :; do sleep 1; done`,
         }),
         headers: {
           'content-type': 'application/json',
-          'x-test-established-principal': managerPrincipal,
+          authorization: `Bearer ${managerCredential}`,
         },
         method: snapshotRoute.method,
       });
@@ -1491,14 +1414,14 @@ while :; do sleep 1; done`,
         'git-upload-pack',
       );
       const gitResponse = await fetch(`${baseUrl}${gitRoute.target}`, {
-        headers: { 'x-test-established-principal': managerPrincipal },
+        headers: { authorization: `Bearer ${managerCredential}` },
         method: gitRoute.method,
       });
       assert.equal(gitResponse.status, 200);
       await gitResponse.body?.cancel();
       await projectOperation(
         baseUrl,
-        'principal-cross-scope-manager',
+        'd'.repeat(64),
         otherProjectId,
         'createCloudProject',
         {
@@ -1516,7 +1439,7 @@ while :; do sleep 1; done`,
       };
       const invitationA = await projectOperation(
         baseUrl,
-        managerPrincipal,
+        managerCredential,
         projectId,
         'createProjectInvitation',
         inviteARequest,
@@ -1526,7 +1449,7 @@ while :; do sleep 1; done`,
       }>;
       const memberA = await projectOperation(
         baseUrl,
-        memberAPrincipal,
+        memberACredential,
         projectId,
         'joinCloudProject',
         {
@@ -1539,7 +1462,7 @@ while :; do sleep 1; done`,
       ) as Readonly<{ readonly memberId: string }>;
       await rejectedProjectOperation(
         baseUrl,
-        memberAPrincipal,
+        memberACredential,
         otherProjectId,
         'listProjectMembers',
         { projectId: otherProjectId },
@@ -1547,7 +1470,7 @@ while :; do sleep 1; done`,
 
       const invitationB = await projectOperation(
         baseUrl,
-        managerPrincipal,
+        managerCredential,
         projectId,
         'createProjectInvitation',
         {
@@ -1562,7 +1485,7 @@ while :; do sleep 1; done`,
       assert.deepEqual(
         await projectOperation(
           baseUrl,
-          managerPrincipal,
+          managerCredential,
           projectId,
           'createProjectInvitation',
           {
@@ -1575,7 +1498,7 @@ while :; do sleep 1; done`,
       );
       const memberB = await projectOperation(
         baseUrl,
-        memberBPrincipal,
+        memberBCredential,
         projectId,
         'joinCloudProject',
         {
@@ -1588,7 +1511,7 @@ while :; do sleep 1; done`,
       ) as Readonly<{ readonly memberId: string }>;
       const members = await projectOperation(
         baseUrl,
-        managerPrincipal,
+        managerCredential,
         projectId,
         'listProjectMembers',
         { projectId },
@@ -1597,7 +1520,7 @@ while :; do sleep 1; done`,
 
       await rejectedProjectOperation(
         baseUrl,
-        managerPrincipal,
+        managerCredential,
         projectId,
         'reissueTransferredMembershipClaim',
         {
@@ -1611,7 +1534,7 @@ while :; do sleep 1; done`,
       );
       const offer = await projectOperation(
         baseUrl,
-        managerPrincipal,
+        managerCredential,
         projectId,
         'createManagerResponsibilityOffer',
         {
@@ -1625,7 +1548,7 @@ while :; do sleep 1; done`,
       ) as Readonly<{ readonly offer: Readonly<{ readonly offerId: string }> }>;
       const acknowledged = await projectOperation(
         baseUrl,
-        memberAPrincipal,
+        memberACredential,
         projectId,
         'acknowledgeManagerResponsibility',
         {
@@ -1637,7 +1560,7 @@ while :; do sleep 1; done`,
       ) as Readonly<{ readonly offer: Readonly<{ readonly revision: number }> }>;
       await projectOperation(
         baseUrl,
-        managerPrincipal,
+        managerCredential,
         projectId,
         'promoteManager',
         {
@@ -1652,7 +1575,7 @@ while :; do sleep 1; done`,
       );
       await projectOperation(
         baseUrl,
-        managerPrincipal,
+        managerCredential,
         projectId,
         'demoteManager',
         {
@@ -1665,7 +1588,7 @@ while :; do sleep 1; done`,
       );
       await projectOperation(
         baseUrl,
-        managerPrincipal,
+        managerCredential,
         projectId,
         'removeMember',
         {
@@ -1678,7 +1601,7 @@ while :; do sleep 1; done`,
       );
       await projectOperation(
         baseUrl,
-        memberAPrincipal,
+        memberACredential,
         projectId,
         'leaveProject',
         {
@@ -1699,7 +1622,7 @@ while :; do sleep 1; done`,
       assert.deepEqual(
         await projectOperation(
           baseUrl,
-          managerPrincipal,
+          managerCredential,
           projectId,
           'createProjectInvitation',
           inviteARequest,

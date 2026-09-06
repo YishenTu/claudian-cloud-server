@@ -29,7 +29,7 @@ import {
 
 import { CoordinationError } from '../../coordination/CoordinationError.js';
 import type { ProjectScope } from '../../coordination/ProjectCoordination.js';
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import {
   ProjectCollaborationReadAdmission,
   ProjectCollaborationReadAdmissionError,
@@ -245,7 +245,7 @@ export class ProjectTicketAuthority {
   }
 
   async listTickets(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: ListTicketsRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<CollabTicketPage> {
@@ -296,7 +296,7 @@ export class ProjectTicketAuthority {
   }
 
   async getTicket(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: GetTicketRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<CollabTicketDetail> {
@@ -346,7 +346,7 @@ export class ProjectTicketAuthority {
   }
 
   async listTicketComments(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: ListTicketCommentsRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<CollabTicketCommentPage> {
@@ -389,7 +389,7 @@ export class ProjectTicketAuthority {
   }
 
   async listTicketAcceptedRelations(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: ListTicketAcceptedRelationsRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<CollabTicketAcceptedRelationPage> {
@@ -432,7 +432,7 @@ export class ProjectTicketAuthority {
   }
 
   async createTicket(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: CreateTicketRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<CreateTicketResponse> {
@@ -480,7 +480,7 @@ export class ProjectTicketAuthority {
   }
 
   async updateTicketContent(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: UpdateTicketContentRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<TicketMutationResponse> {
@@ -551,7 +551,7 @@ export class ProjectTicketAuthority {
   }
 
   async createTicketComment(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: CreateTicketCommentRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<CreateTicketCommentResponse> {
@@ -605,7 +605,7 @@ export class ProjectTicketAuthority {
   }
 
   closeTicket(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: ChangeTicketStatusRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<TicketMutationResponse> {
@@ -613,7 +613,7 @@ export class ProjectTicketAuthority {
   }
 
   reopenTicket(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: ChangeTicketStatusRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<TicketMutationResponse> {
@@ -621,7 +621,7 @@ export class ProjectTicketAuthority {
   }
 
   async #changeStatus(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: ChangeTicketStatusRequest,
     status: CollabTicketStatus,
     operation: 'closeTicket' | 'reopenTicket',
@@ -683,7 +683,7 @@ export class ProjectTicketAuthority {
   }
 
   async #mutateIdempotently<Response extends object>(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: string,
     operation: CollabRequestTicketOperation,
     idempotencyKey: string,

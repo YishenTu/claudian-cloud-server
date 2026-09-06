@@ -56,7 +56,7 @@ import {
 import { EmptyProjectRepositoryAuthority } from '../repositories/EmptyProjectRepositoryAuthority.js';
 import { RepositoryCheckpointAuthority } from '../repositories/RepositoryCheckpointAuthority.js';
 import { DevelopmentPrincipalAdapter } from '../request-context/DevelopmentPrincipalAdapter.js';
-import { TrustedPrincipalProvider } from '../request-context/TrustedPrincipalProvider.js';
+import type { RequestPrincipalBindingOptions } from '../request-context/RequestPrincipalBinding.js';
 import { BootstrapUploadAdmission } from '../resource-admission/BootstrapUploadAdmission.js';
 import { ProjectEventAdmission } from '../resource-admission/ProjectEventAdmission.js';
 import { GitReceiveAdmission } from '../resource-admission/GitReceiveAdmission.js';
@@ -67,7 +67,6 @@ import { ProjectSnapshotRoutes } from '../server/control/ProjectSnapshotRoutes.j
 import { ProjectCollaborationRoutes } from '../server/control/ProjectCollaborationRoutes.js';
 import { ProjectLifecycleRoutes } from '../server/control/ProjectLifecycleRoutes.js';
 import { CloudProjectMembershipRoutes } from '../server/control/CloudProjectMembershipRoutes.js';
-import type { TrustedProjectPrincipalBinding } from '../server/control/ProjectJsonTransport.js';
 import { ProjectEventRoutes } from '../server/events/ProjectEventRoutes.js';
 import { GitUploadPackRoutes } from '../server/git/GitUploadPackRoutes.js';
 import { GitReceivePackRoutes } from '../server/git/GitReceivePackRoutes.js';
@@ -76,7 +75,6 @@ import {
   HttpServer,
   type HttpServerAddress,
 } from '../server/HttpServer.js';
-import { ProxyV2Ingress } from '../server/ProxyV2Ingress.js';
 import {
   AuthorityVolumePairError,
   AuthorityVolumePairVerifier,
@@ -109,7 +107,6 @@ export interface CreateApplicationOptions {
   readonly keyring?: ClaimCustodyKeyringConfig;
   readonly lifecycle?: CloudLifecycleRuntime;
   readonly logger: SafeLogger;
-  readonly trustedPrincipal?: TrustedProjectPrincipalBinding;
 }
 
 type ApplicationState =
@@ -224,32 +221,7 @@ class CloudApplication implements Application {
   #state: ApplicationState = 'created';
 
   constructor(options: CreateApplicationOptions) {
-    const configuredIngress = options.config.trustedIngress;
-    if (
-      configuredIngress !== undefined
-      && options.trustedPrincipal !== undefined
-    ) throw new TypeError('application.principal-binding-conflict');
-    if (
-      (options.config.principalProfile === 'trusted-ingress')
-      !== (configuredIngress !== undefined)
-    ) throw new TypeError('application.principal-profile-invalid');
-    const productionIngress = configuredIngress === undefined
-      ? undefined
-      : new ProxyV2Ingress({
-          preambleTimeoutMs: configuredIngress.preambleTimeoutMs,
-          allowedSources: configuredIngress.allowedSources,
-          providerId: configuredIngress.providerId,
-        });
-    const trustedPrincipal = options.trustedPrincipal ?? (
-      productionIngress === undefined
-        ? undefined
-        : {
-            establishedAssertion: productionIngress.establishedAssertion.bind(
-              productionIngress,
-            ),
-            provider: new TrustedPrincipalProvider(),
-          }
-    );
+    const production = options.config.principalProfile === 'vault-credential';
     this.#config = options.config;
     this.#logger = options.logger;
     this.#resourceAdmission = new ResourceAdmission(options.config.gitAdmission);
@@ -390,12 +362,12 @@ class CloudApplication implements Application {
       repository: this.#membershipRepositoryMaintenance,
     });
     if (
-      productionIngress !== undefined
+      production
       && options.lifecycle === undefined
       && options.keyring === undefined
     ) throw new TypeError('application.production-lifecycle-keyring-required');
     this.#lifecycle = options.lifecycle ?? (
-      productionIngress === undefined || options.keyring === undefined
+      !production || options.keyring === undefined
         ? undefined
         : createProductionCloudLifecycleRuntime({
             config: options.config,
@@ -515,17 +487,14 @@ class CloudApplication implements Application {
         'requests',
         'tickets',
       ] as const);
-    if (
-      trustedPrincipal === undefined
-      && options.config.principalProfile === 'private-development'
-    ) {
+    if (!production) {
       enabledCapabilities.add('development-bootstrap');
     }
     if (this.#lifecycle !== undefined) {
       enabledCapabilities.add('authority-transfer');
       enabledCapabilities.add('project-retirement');
     }
-    if (trustedPrincipal !== undefined) {
+    if (production) {
       enabledCapabilities.add('cloud-project-create');
       enabledCapabilities.add('cloud-project-join');
       enabledCapabilities.add('cloud-project-leave');
@@ -561,16 +530,14 @@ class CloudApplication implements Application {
         maxRepositoryBytes: options.config.developmentBootstrap.maxRepositoryBytes,
       },
     });
-    const principalBinding = trustedPrincipal === undefined
+    const principalBinding: RequestPrincipalBindingOptions = !production
       ? {
         principalAdapter: new DevelopmentPrincipalAdapter({
           profile: 'loopback-development',
         }),
       }
-      : { trustedPrincipal };
-    const principalAdapter = 'principalAdapter' in principalBinding
-      ? principalBinding.principalAdapter
-      : undefined;
+      : {};
+    const principalAdapter = principalBinding.principalAdapter;
     const bootstrapRoutes = principalAdapter === undefined
       ? undefined
       : new DevelopmentBootstrapRoutes({
@@ -596,7 +563,7 @@ class CloudApplication implements Application {
       requestAuthority: this.#projectRequestAuthority,
       ticketAuthority: this.#projectTicketAuthority,
     });
-    const cloudProjectMembershipRoutes = trustedPrincipal === undefined
+    const cloudProjectMembershipRoutes = !production
       ? undefined
       : new CloudProjectMembershipRoutes({
         administration: this.#membershipAdministrationAuthority,
@@ -658,9 +625,6 @@ class CloudApplication implements Application {
     });
     this.#httpServer = new HttpServer({
       config: options.config.http,
-      ...(productionIngress === undefined
-        ? {}
-        : { connectionIngress: productionIngress }),
       isReady: () => this.#state === 'ready',
       routes: [
         capabilitiesRoute,

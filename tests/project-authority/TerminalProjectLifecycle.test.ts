@@ -19,7 +19,7 @@ import type {
 } from '../../src/coordination/ProjectCoordination.js';
 import type { RepositoryPlacementLease } from '../../src/repositories/RepositoryPlacement.js';
 import { RepositoryCheckpointError } from '../../src/repositories/RepositoryCheckpointAuthority.js';
-import { createTrustedIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
+import { createVaultCredentialPrincipal } from '../../src/request-context/RequestPrincipal.js';
 import {
   DeletionCoordinator,
   DeletionCoordinatorError,
@@ -54,7 +54,7 @@ function repositoryReservation() {
 }
 
 function trustedPrincipal(principalId: string) {
-  return createTrustedIngressPrincipal({ principalId, providerId: 'test' });
+  return createVaultCredentialPrincipal({ principalId });
 }
 
 function leaveRequest(input: Readonly<{

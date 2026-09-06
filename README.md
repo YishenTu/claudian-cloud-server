@@ -1,63 +1,82 @@
 # Claudian Cloud Server
 
-Claudian Cloud Server is the public, auditable collaboration data plane for Claudian Collab. It provides canonical Project repositories and coordination services while Claudian coding agents and private work remain on participant devices.
+Persistent Git repositories and collaboration services for Claudian Collab, distributed as Docker images for Linux amd64 and arm64.
 
-User authentication is outside this repository. Deployments must provide their own trusted ingress and authentication system. Claudian Cloud Server accepts the resulting trusted caller identity and handles Project membership and authorization for admitted requests.
+**Access authentication and port forwarding are not included.** The server listens only on `127.0.0.1`, with a configurable port (default `8787`). Configure your own authenticated entry point using TLS or an encrypted tunnel. It must forward traffic to the configured port and preserve the client's `Authorization` header, WebSocket upgrades, and streamed bodies. The server verifies Claudian Vault credentials and Project permissions.
 
-## Deployment
+## Install
 
-The current Linux deployment builds from source and keeps PostgreSQL and Cloud authority data in named volumes. After configuring Git access on the deployment host, clone the repository and create four separate operator-owned environment files:
+Requires a Linux amd64 or arm64 host, Docker Engine, the Docker Compose plugin **2.24.0 or newer**, Bash, `curl`, `tar`, `sha256sum`, and a user with `sudo` access. Docker must be running and accessible through `sudo docker`. The loopback ports must be available (defaults: PostgreSQL `5432`, server `8787`).
+
+For a fresh installation, start in an empty directory and run these commands in order. Continue only when each command succeeds:
 
 ```bash
-git clone https://github.com/YishenTu/claudian-cloud-server.git
+curl -fL https://github.com/YishenTu/claudian-cloud-server/releases/latest/download/claudian-cloud-server.tar.gz -o claudian-cloud-server.tar.gz
+curl -fL https://github.com/YishenTu/claudian-cloud-server/releases/latest/download/claudian-cloud-server.tar.gz.sha256 -o claudian-cloud-server.tar.gz.sha256
+sha256sum --check claudian-cloud-server.tar.gz.sha256
+tar -xzf claudian-cloud-server.tar.gz
 cd claudian-cloud-server
-sudo install -d -m 0750 -o "$(id -u)" -g "$(id -g)" /etc/claudian-cloud-server
-sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .env.postgres.example /etc/claudian-cloud-server/postgres.env
-sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .env.bootstrap.example /etc/claudian-cloud-server/bootstrap.env
-sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .env.migration.example /etc/claudian-cloud-server/migration.env
-sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .env.example /etc/claudian-cloud-server/server.env
-sudoedit /etc/claudian-cloud-server/postgres.env
-sudoedit /etc/claudian-cloud-server/bootstrap.env
-sudoedit /etc/claudian-cloud-server/migration.env
+sudo bash deploy/configure.sh
+```
+
+The initializer downloads the release image and generates separate database credentials and a storage keyring under `/etc/claudian-cloud-server`. It refuses to overwrite existing configuration. No Node.js installation, source checkout, or local image build is required.
+
+To change ports or limits, edit the [configuration](#configuration) before starting services below; replace `8787` in the readiness check if you change the server port. Run from the extracted `claudian-cloud-server` directory:
+
+```bash
+compose() { sudo docker compose --env-file release.env -f deploy/compose.yaml "$@"; }
+compose up --detach --wait postgres
+compose --profile bootstrap run --rm cloud-bootstrap
+compose --profile migration run --rm --no-deps cloud-migration
+compose up --detach --wait --no-build cloud-server
+curl --fail http://127.0.0.1:8787/readyz
+```
+
+Once the readiness check succeeds, connect Claudian to your authenticated entry-point URL. Keep the extracted release directory for Compose commands and retain the generated configuration and keyring for recovery. PostgreSQL and repository data persist in Docker volumes.
+
+## Configuration
+
+Edit the generated server configuration:
+
+```bash
 sudoedit /etc/claudian-cloud-server/server.env
 ```
 
-Set the matching PostgreSQL port in the bootstrap environment and the two PostgreSQL URLs if port `5432` is unavailable. Then run the fresh-volume sequence explicitly:
+For example, change the existing port setting to:
 
-```bash
-export CLAUDIAN_CLOUD_POSTGRES_ENV_FILE=/etc/claudian-cloud-server/postgres.env
-export CLAUDIAN_CLOUD_BOOTSTRAP_ENV_FILE=/etc/claudian-cloud-server/bootstrap.env
-export CLAUDIAN_CLOUD_MIGRATION_ENV_FILE=/etc/claudian-cloud-server/migration.env
-export CLAUDIAN_CLOUD_ENV_FILE=/etc/claudian-cloud-server/server.env
-export CLAUDIAN_CLOUD_POSTGRES_PORT=5432
-docker compose -f deploy/compose.yaml up --detach --wait postgres
-docker compose -f deploy/compose.yaml --profile bootstrap run --rm cloud-bootstrap
-docker compose -f deploy/compose.yaml build cloud-server
-docker compose -f deploy/compose.yaml --profile migration run --rm --no-deps cloud-migration
-docker compose -f deploy/compose.yaml up --detach --no-deps --wait cloud-server
+```dotenv
+CLAUDIAN_CLOUD_PORT=9000
 ```
 
-The runtime never receives bootstrap or migration credentials and never applies schema. PostgreSQL and the Cloud application remain reachable only on their configured loopback ports.
-
-For later current-schema code updates, run the deployment script from the clean checkout. By default, it deploys the latest `origin/main`, stops the running server, verifies the candidate against the unchanged authority, durably fences recovery to that exact revision and image, completes restore and Project recovery, and then opens the candidate. A verification failure before the fence reopens the unchanged previous image. After the fence, a failed or interrupted run resumes only the recorded candidate; the script never attempts a schema upgrade or rollback.
+Forward your authenticated entry point to `127.0.0.1:9000` and use `http://127.0.0.1:9000/readyz` for the readiness check. If the server is already running, apply the change from the extracted release directory:
 
 ```bash
-export CLAUDIAN_DEPLOY_ENV_FILE=/etc/claudian-cloud-server/server.env
-export CLAUDIAN_DEPLOY_POSTGRES_ENV_FILE=/etc/claudian-cloud-server/postgres.env
-deploy/deploy.sh
+sudo docker compose --env-file release.env -f deploy/compose.yaml up --detach --wait --no-build --no-deps --force-recreate cloud-server
+curl --fail http://127.0.0.1:9000/readyz
 ```
 
-## Development
+Other server settings are listed in [.env.example](.env.example), which supplies the generated defaults. All names below have the `CLAUDIAN_CLOUD_` prefix.
 
-Development requires Node.js 24, npm, Docker, and Docker Compose. The exact Node.js version is recorded in `.node-version`.
+| Settings | Purpose and defaults |
+| --- | --- |
+| `POSTGRES_URL`, `POSTGRES_*_POOL_MAX`, `PROJECT_LOCK_TIMEOUT_MS` | Runtime database connection; ordinary/pinned/reserved pools of 8/2/2 connections; Project lock timeout of 2 seconds. |
+| `GIT_MAX_*`, `GIT_QUEUE_*` | Git concurrency and queues: 2 active processes globally, 1 per Project; 6 queued globally, 4 per Project; queue timeout of 10 seconds. Separate read/write limits also apply. |
+| `GIT_OPERATION_TIMEOUT_MS`, `GIT_OUTPUT_MAX_BYTES` | Git operation timeout of 5 minutes and captured output limit of 1 MiB. |
+| `EVENT_MAX_*` | 64 event connections globally, 16 per Project, and 16 pending authorizations. |
+| `BOOTSTRAP_*` | Initial repository upload limits: 1 GiB each for the bundle and repository, 2 GiB staging reservation, 1 GiB free-space floor, queue size 4, queue timeout 10 seconds, upload deadline 15 minutes, and idle timeout 30 seconds. Size and upload timeout limits cannot exceed protocol maxima; the attempt lifetime is fixed at 24 hours. |
+| `STORAGE_NODE_ID`, `REPOSITORY_ROOT`, `STAGING_ROOT`, `GIT_EXECUTABLE` | Storage identity, repository/staging paths, and Git executable. Keep the generated values for the supplied Docker layout; path changes require matching persistent mounts, and repository/staging directories must be distinct siblings. |
 
-```bash
-# Install the exact dependencies recorded in package-lock.json.
-npm ci
-# Run lint, type checks, tests, and the production build.
-npm run verify
-```
+Keep `CLAUDIAN_CLOUD_BIND_HOST=127.0.0.1` and `CLAUDIAN_CLOUD_PRINCIPAL_PROFILE=vault-credential` for deployment. Configuration changes require container recreation; a restart alone does not load an edited environment file. The recreation command applies configuration to the same installed image.
 
-## License
+Container settings belong in `release.env` alongside its existing image entry:
 
-Licensed under the [MIT License](LICENSE).
+| Setting | Default |
+| --- | --- |
+| `CLAUDIAN_DEPLOY_CPUS` | `1.5` CPUs |
+| `CLAUDIAN_DEPLOY_MEMORY` | `1g` memory |
+| `CLAUDIAN_DEPLOY_PIDS` | `256` processes |
+| `CLAUDIAN_CLOUD_POSTGRES_PORT` | `5432` |
+
+Apply server container limits with the same recreation command above. To choose another PostgreSQL port for a fresh installation, set `CLAUDIAN_CLOUD_POSTGRES_PORT` in `release.env` and update the port in both generated URLs (`server.env` and `migration.env`) and `PGPORT` in `bootstrap.env` before starting services. Access authentication, TLS, and forwarding are configured separately in your chosen entry point.
+
+[MIT License](LICENSE).

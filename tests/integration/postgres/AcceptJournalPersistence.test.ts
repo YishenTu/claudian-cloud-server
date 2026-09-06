@@ -15,7 +15,7 @@ import {
   ProjectWriteAdmission,
   ProjectWriteAdmissionError,
 } from '../../../src/project-authority/admission/ProjectWriteAdmission.js';
-import { createDevelopmentIngressPrincipal } from '../../../src/request-context/IngressPrincipal.js';
+import { createDevelopmentPrincipal } from '../../../src/request-context/RequestPrincipal.js';
 import {
   type PostgresTestDatabase,
   withPostgresTestDatabase,
@@ -492,7 +492,7 @@ describe('Accept journal persistence', () => {
         try {
           await assert.rejects(
             admission.run(
-              createDevelopmentIngressPrincipal('member-manager'),
+              createDevelopmentPrincipal('member-manager'),
               'project-recovery',
               () => Promise.resolve('unexpected'),
             ),

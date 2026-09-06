@@ -1,9 +1,9 @@
 import { isCollabMemberId } from '@claudian-collab/protocol';
 
 import {
-  createDevelopmentIngressPrincipal,
-  type IngressPrincipal,
-} from './IngressPrincipal.js';
+  createDevelopmentPrincipal,
+  type RequestPrincipal,
+} from './RequestPrincipal.js';
 
 export type DevelopmentPrincipalErrorCode =
   | 'invalid-assertion'
@@ -51,7 +51,7 @@ export class DevelopmentPrincipalAdapter {
     this.#profile = options.profile;
   }
 
-  bind(assertion: DevelopmentPrincipalAssertion): IngressPrincipal {
+  bind(assertion: DevelopmentPrincipalAssertion): RequestPrincipal {
     if (this.#profile !== 'loopback-development') {
       throw new DevelopmentPrincipalError('unsupported-profile');
     }
@@ -72,6 +72,6 @@ export class DevelopmentPrincipalAdapter {
     ) {
       throw new DevelopmentPrincipalError('invalid-assertion');
     }
-    return createDevelopmentIngressPrincipal(actorId);
+    return createDevelopmentPrincipal(actorId);
   }
 }

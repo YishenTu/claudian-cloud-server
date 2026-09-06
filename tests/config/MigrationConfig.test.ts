@@ -24,10 +24,10 @@ describe('decodeMigrationConfig', () => {
     assert.equal(Object.isFrozen(config), true);
   });
 
-  it('rejects runtime and trusted-ingress fields', () => {
+  it('rejects runtime and unknown fields', () => {
     for (const [field, value, code] of [
       ['CLAUDIAN_CLOUD_BIND_HOST', '127.0.0.1', 'unknown-field'],
-      ['CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE', 'header', 'profile-conflict'],
+      ['CLAUDIAN_CLOUD_UNSUPPORTED_OPTION', 'value', 'unknown-field'],
     ] as const) {
       assert.throws(
         () => decodeMigrationConfig({

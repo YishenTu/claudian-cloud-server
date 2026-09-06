@@ -15,7 +15,7 @@ import {
 
 import { DevelopmentPrincipalAdapter } from '../../../src/request-context/DevelopmentPrincipalAdapter.js';
 import { ProjectWriteAdmissionError } from '../../../src/project-authority/admission/ProjectWriteAdmission.js';
-import type { IngressPrincipal } from '../../../src/request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../../src/request-context/RequestPrincipal.js';
 import {
   GitRepositoryAuthority,
   GitRepositoryError,
@@ -309,7 +309,7 @@ describe('GitReceivePackRoutes', () => {
     const personalRef = collabMemberRef('member-a');
     const authority: GitReceivePackWriteAuthority = {
       advertiseReceivePack: async (
-        principal: IngressPrincipal,
+        principal: RequestPrincipal,
         _projectId: string,
         options?: Readonly<{
           readonly gitProtocol?: 'version=1' | 'version=2';
@@ -334,7 +334,7 @@ describe('GitReceivePackRoutes', () => {
         }
       },
       runReceivePack: async (
-        principal: IngressPrincipal,
+        principal: RequestPrincipal,
         _projectId: string,
         options: Parameters<GitReceivePackWriteAuthority['runReceivePack']>[2],
       ): Promise<void> => {

@@ -18,7 +18,7 @@ import {
   ProjectInvitationAuthority,
 } from '../../src/project-authority/membership/ProjectInvitationAuthority.js';
 import { ProtectedSecretCustody } from '../../src/project-authority/lifecycle/ProtectedSecretCustody.js';
-import { createTrustedIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
+import { createVaultCredentialPrincipal } from '../../src/request-context/RequestPrincipal.js';
 
 const NOW = '2026-08-30T02:00:00.000Z';
 const SECRET = Buffer.alloc(32, 6).toString('base64url');
@@ -27,9 +27,8 @@ const REQUEST: CreateProjectInvitationRequest = {
   idempotencyKey: 'invite-key-one',
   projectId: 'project-invitations',
 };
-const PRINCIPAL = createTrustedIngressPrincipal({
+const PRINCIPAL = createVaultCredentialPrincipal({
   principalId: 'principal-manager',
-  providerId: 'test-provider',
 });
 
 class MemoryMembershipPersistence implements ProjectInvitationPersistence {

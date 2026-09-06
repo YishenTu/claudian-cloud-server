@@ -5,7 +5,7 @@ import {
   type CollabProjectId,
 } from '@claudian-collab/protocol';
 
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import type { RepositoryPlacementLease } from '../../repositories/RepositoryPlacement.js';
 import {
   ProjectWriteAdmission,
@@ -84,7 +84,7 @@ export class ProjectPersonalRefAuthority {
   }
 
   advertiseReceivePack(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     options: ProjectPersonalRefAdvertisementOptions = {},
   ): Promise<Buffer> {
@@ -117,7 +117,7 @@ export class ProjectPersonalRefAuthority {
   }
 
   runReceivePack(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     options: ProjectPersonalRefReceiveOptions,
   ): Promise<void> {

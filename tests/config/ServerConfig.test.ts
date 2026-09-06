@@ -89,18 +89,18 @@ describe('decodeServerConfig', () => {
     assert.equal(Object.isFrozen(config.repository), true);
   });
 
-  it('rejects the removed deployment profile selector', () => {
+  it('rejects unknown configuration fields', () => {
     assert.throws(
       () => decodeServerConfig({
         ...validSource,
-        CLAUDIAN_CLOUD_DEPLOYMENT_PROFILE: 'private-development',
+        CLAUDIAN_CLOUD_UNSUPPORTED_OPTION: 'private-development',
       }),
       (error: unknown) => {
         assert.equal(error instanceof ConfigError, true);
         assert.equal((error as ConfigError).code, 'unknown-field');
         assert.equal(
           (error as ConfigError).field,
-          'CLAUDIAN_CLOUD_DEPLOYMENT_PROFILE',
+          'CLAUDIAN_CLOUD_UNSUPPORTED_OPTION',
         );
         return true;
       },
@@ -179,63 +179,20 @@ describe('decodeServerConfig', () => {
     );
   });
 
-  it('decodes the complete operator-protected PROXY v2 production profile', () => {
+  it('selects Vault credential verification without ingress configuration', () => {
     const config = decodeServerConfig({
       ...validSource,
-      CLAUDIAN_CLOUD_PRINCIPAL_PROFILE: 'trusted-ingress',
-      CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE: 'proxy-v2',
-      CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID: 'tailscale-serve',
-      CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCES: JSON.stringify(['100.64.0.10', '2001:db8::1']),
+      CLAUDIAN_CLOUD_PRINCIPAL_PROFILE: 'vault-credential',
     });
-
-    assert.equal(config.principalProfile, 'trusted-ingress');
-    assert.deepEqual(config.trustedIngress, {
-      mode: 'proxy-v2',
-      preambleTimeoutMs: 5_000,
-      providerId: 'tailscale-serve',
-      allowedSources: ['100.64.0.10', '2001:db8::1'],
-    });
-    assert.equal(Object.isFrozen(config.trustedIngress), true);
-    assert.equal(Object.isFrozen(config.trustedIngress.allowedSources), true);
+    assert.equal(config.principalProfile, 'vault-credential');
   });
 
-  it('rejects incomplete, unsupported, or ambiguous trusted-ingress profiles', () => {
-    const validMap = JSON.stringify(['100.64.0.10']);
-    for (const [field, source] of [
-      ['CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE', {
-        CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE: 'header-assertion',
-        CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID: 'tailscale-serve',
-        CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCES: validMap,
-      }],
-      ['CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID', {
-        CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE: 'proxy-v2',
-        CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCES: validMap,
-      }],
-      ['CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCES', {
-        CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE: 'proxy-v2',
-        CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID: 'tailscale-serve',
-      }],
-      ['CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCES', {
-        CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE: 'proxy-v2',
-        CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID: 'tailscale-serve',
-        CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCES: JSON.stringify([
-          '2001:0db8::1',
-          '2001:db8::1',
-        ]),
-      }],
-    ] as const) {
-      assert.throws(
-        () => decodeServerConfig({
-          ...validSource,
-          CLAUDIAN_CLOUD_PRINCIPAL_PROFILE: 'trusted-ingress',
-          ...source,
-        }),
-        (error: unknown) => {
-          assert.equal(error instanceof ConfigError, true);
-          assert.equal((error as ConfigError).field, field);
-          return true;
-        },
-      );
+  it('rejects unsupported principal profiles', () => {
+    for (const principalProfile of ['unsupported', '', 'VAULT-CREDENTIAL']) {
+      assert.throws(() => decodeServerConfig({
+        ...validSource,
+        CLAUDIAN_CLOUD_PRINCIPAL_PROFILE: principalProfile,
+      }), ConfigError);
     }
   });
 

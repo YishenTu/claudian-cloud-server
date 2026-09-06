@@ -22,7 +22,7 @@ import { CoordinationError } from '../../coordination/CoordinationError.js';
 import type {
   PinnedProjectLease,
 } from '../../coordination/ProjectCoordination.js';
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import {
   OperationDrain,
   OperationDrainClosedError,
@@ -322,7 +322,7 @@ export class ProjectAcceptCoordinator implements ProjectRecoveryPort {
   }
 
   accept(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: AcceptRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<AcceptResponse> {
@@ -337,7 +337,7 @@ export class ProjectAcceptCoordinator implements ProjectRecoveryPort {
   }
 
   async #accept(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: AcceptRequest,
     signal: AbortSignal,
   ): Promise<AcceptResponse> {

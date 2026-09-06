@@ -13,7 +13,7 @@ import {
   ProjectReadAuthorityError,
 } from '../../../src/project-authority/reads/ProjectReadAuthority.js';
 import { DevelopmentPrincipalAdapter } from '../../../src/request-context/DevelopmentPrincipalAdapter.js';
-import type { IngressPrincipal } from '../../../src/request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../../src/request-context/RequestPrincipal.js';
 import { ResourceAdmission } from '../../../src/resource-admission/ResourceAdmission.js';
 import {
   GitRepositoryAuthority,
@@ -178,7 +178,7 @@ describe('GitUploadPackRoutes', () => {
     });
     let expectedRefs: readonly { readonly name: string; readonly oid?: string }[] = [];
     let revalidations = 0;
-    const authorize = (principal: IngressPrincipal): void => {
+    const authorize = (principal: RequestPrincipal): void => {
       if (principal.principalId !== 'member-a') {
         throw new ProjectReadAuthorityError('authorization-denied');
       }
@@ -186,7 +186,7 @@ describe('GitUploadPackRoutes', () => {
     };
     const authority = {
       advertiseUploadPack: (
-        principal: IngressPrincipal,
+        principal: RequestPrincipal,
         _projectId: string,
         options?: Readonly<{
           readonly gitProtocol?: 'version=1' | 'version=2';
@@ -210,7 +210,7 @@ describe('GitUploadPackRoutes', () => {
         );
       },
       runUploadPack: (
-        principal: IngressPrincipal,
+        principal: RequestPrincipal,
         _projectId: string,
         options: Parameters<GitRepositoryAuthority['runUploadPack']>[1],
       ): Promise<void> => {

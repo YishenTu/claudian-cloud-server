@@ -28,7 +28,6 @@ export class ConfigError extends Error {
 export type ConfigSource = Readonly<Record<string, string | undefined>>;
 
 const CONFIG_PREFIX = 'CLAUDIAN_CLOUD_';
-const TRUSTED_INGRESS_PREFIX = 'CLAUDIAN_CLOUD_TRUSTED_INGRESS_';
 
 export function requireConfigValue(source: ConfigSource, field: string): string {
   const value = source[field];
@@ -46,9 +45,7 @@ export function rejectUnknownConfigFields(
     if (value === undefined || !field.startsWith(CONFIG_PREFIX)) continue;
     if (!fields.has(field)) {
       throw new ConfigError(
-        field.startsWith(TRUSTED_INGRESS_PREFIX)
-          ? 'profile-conflict'
-          : 'unknown-field',
+        'unknown-field',
         field,
       );
     }

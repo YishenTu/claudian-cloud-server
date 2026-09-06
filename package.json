@@ -29,7 +29,7 @@
     "test:capacity": "node --import tsx --test \"tests/capacity/**/*.test.ts\"",
     "test:deployment": "node --import tsx --test \"tests/deployment/**/*.test.ts\"",
     "test:git": "node --import tsx --test --test-concurrency=1 \"tests/integration/git/**/*.test.ts\"",
-    "test:postgres": "node --import tsx --test --test-concurrency=1 \"tests/fault-injection/**/*.test.ts\" \"tests/integration/http/AcceptRecoveryGate.test.ts\" \"tests/integration/http/CollaborationOperationGate.test.ts\" \"tests/integration/http/DevelopmentBootstrapGate.test.ts\" \"tests/integration/http/LocalMilestoneServerGate.test.ts\" \"tests/integration/postgres/**/*.test.ts\"",
+    "test:postgres": "node --import tsx --test --test-concurrency=1 \"tests/fault-injection/**/*.test.ts\" \"tests/integration/http/AcceptRecoveryGate.test.ts\" \"tests/integration/http/CollaborationOperationGate.test.ts\" \"tests/integration/http/DevelopmentBootstrapGate.test.ts\" \"tests/integration/http/DevelopmentBootstrapPersistence.test.ts\" \"tests/integration/postgres/**/*.test.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify": "npm run verify:fast && npm run verify:postgres && npm run verify:git",
     "verify:application": "npm run lint && npm run typecheck && npm run test:application && npm run build",

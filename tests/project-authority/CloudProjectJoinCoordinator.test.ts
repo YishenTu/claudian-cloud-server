@@ -17,7 +17,7 @@ import {
   CloudProjectJoinCoordinator,
 } from '../../src/project-authority/membership/CloudProjectJoinCoordinator.js';
 import type { ProjectMembershipRepository } from '../../src/project-authority/membership/ProjectMembershipRepository.js';
-import { createTrustedIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
+import { createVaultCredentialPrincipal } from '../../src/request-context/RequestPrincipal.js';
 
 const NOW = '2026-08-30T04:00:00.000Z';
 const MAIN = 'a'.repeat(40);
@@ -29,9 +29,8 @@ const REQUEST: JoinCloudProjectRequest = {
   projectId: 'project-join',
   secret: SECRET,
 };
-const PRINCIPAL = createTrustedIngressPrincipal({
+const PRINCIPAL = createVaultCredentialPrincipal({
   principalId: 'principal-joining',
-  providerId: 'test-provider',
 });
 
 class MemoryJoinPersistence implements ProjectJoinPersistence {

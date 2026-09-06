@@ -6,7 +6,7 @@ import {
   ProjectCollaborationReadAdmission,
   ProjectCollaborationReadAdmissionError,
 } from '../../src/project-authority/admission/ProjectCollaborationReadAdmission.js';
-import { createDevelopmentIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
+import { createDevelopmentPrincipal } from '../../src/request-context/RequestPrincipal.js';
 import { createRepositoryPlacementLease } from '../../src/repositories/RepositoryPlacement.js';
 
 function fixture() {
@@ -74,7 +74,7 @@ describe('ProjectCollaborationReadAdmission', () => {
     const existing = fixture();
     existing.setActiveJoin(true);
     await expectRecoveryRequired(existing.admission.run(
-      createDevelopmentIngressPrincipal('member-a'),
+      createDevelopmentPrincipal('member-a'),
       'project-a',
       () => Promise.reject(new Error('unexpected-read')),
     ));
@@ -82,7 +82,7 @@ describe('ProjectCollaborationReadAdmission', () => {
 
     const revalidation = fixture();
     await expectRecoveryRequired(revalidation.admission.run(
-      createDevelopmentIngressPrincipal('member-a'),
+      createDevelopmentPrincipal('member-a'),
       'project-a',
       read => {
         revalidation.setActiveJoin(true);
@@ -94,7 +94,7 @@ describe('ProjectCollaborationReadAdmission', () => {
     const lifecycle = fixture();
     lifecycle.setActiveLifecycle(true);
     await expectRecoveryRequired(lifecycle.admission.run(
-      createDevelopmentIngressPrincipal('member-a'),
+      createDevelopmentPrincipal('member-a'),
       'project-a',
       () => Promise.reject(new Error('unexpected-read')),
     ));

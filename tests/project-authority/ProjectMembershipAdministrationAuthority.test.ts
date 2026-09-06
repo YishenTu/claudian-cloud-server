@@ -5,13 +5,12 @@ import { CollabError } from '@claudian-collab/protocol';
 
 import type { ProjectMembershipAdministrationPersistence } from '../../src/coordination/ProjectMembershipPersistence.js';
 import { ProjectMembershipAdministrationAuthority } from '../../src/project-authority/membership/ProjectMembershipAdministrationAuthority.js';
-import { createTrustedIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
+import { createVaultCredentialPrincipal } from '../../src/request-context/RequestPrincipal.js';
 
 const NOW = '2026-08-30T05:00:00.000Z';
 const PROJECT_ID = 'project-membership-admin';
-const PRINCIPAL = createTrustedIngressPrincipal({
+const PRINCIPAL = createVaultCredentialPrincipal({
   principalId: 'principal-admin',
-  providerId: 'test-provider',
 });
 
 function offer(state: 'acknowledged' | 'offered' = 'offered') {

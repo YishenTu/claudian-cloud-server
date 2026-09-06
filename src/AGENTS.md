@@ -1,18 +1,5 @@
 # Application source
 
-## Architecture contract
-
-- Keep one modular-monolith composition root. Modules communicate through explicit domain contracts and do not reach through another module to its storage or transport implementation.
-- Dependency direction is transport and infrastructure toward `project-authority`; domain policy never imports HTTP, PostgreSQL, or process implementations.
-- The exact registry dependency `@claudian-collab/protocol` is the only wire-contract owner. Do not vendor its source or create a second operation inventory, compatibility policy, or validator map.
-- Keep Project, membership, coordination, repository placement, and recovery semantics independent from deployment profile and provider products.
-
-## Lifecycle
-
-- The composition root owns start, readiness, admission close, drain, forced cancellation, and disposal order for every process-owned resource.
-- A client disconnect or process shutdown is not proof that a mutation failed. Preserve durable recovery and idempotency identity after ambiguous progress.
-- Do not create modules, protocol operations, or durable phase names for a deferred lifecycle feature until its decision-complete contract enters the implementation sequence.
-
-## Verification
-
-- Test through owning module interfaces. Use real PostgreSQL and real Git for isolation, locking, ref, process, and recovery behavior that substitutes cannot prove.
+- Keep the application a modular monolith. Cross-module calls use explicit owning contracts; do not reach through an owner to its storage or transport implementation.
+- Domain policy must not depend on concrete HTTP, PostgreSQL, process, or provider implementations. Persistence and transport contracts may carry domain facts without taking over their policy.
+- A disconnect or process shutdown does not prove that a mutation failed. Preserve the operation's durable identity and recovery path after ambiguous progress.

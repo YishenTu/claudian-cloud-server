@@ -20,7 +20,7 @@ import type {
   AcquireProjectLeaseOptions,
   PinnedProjectLease,
 } from '../../coordination/ProjectCoordination.js';
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import { ProjectMutationRejection } from '../ProjectMutationRejection.js';
 import { OperationDrain } from '../OperationDrain.js';
 import {
@@ -89,7 +89,7 @@ function fingerprint(request: JoinCloudProjectRequest): string {
 
 function exactReplay(
   journal: ProjectJoinJournal,
-  principal: IngressPrincipal,
+  principal: RequestPrincipal,
   request: JoinCloudProjectRequest,
 ): boolean {
   return journal.principalId === principal.principalId
@@ -150,7 +150,7 @@ export class CloudProjectJoinCoordinator {
   }
 
   join(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: JoinCloudProjectRequest,
     options: AcquireProjectLeaseOptions = {},
   ): Promise<JoinCloudProjectResponse> {
@@ -162,11 +162,11 @@ export class CloudProjectJoinCoordinator {
   }
 
   async #join(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: JoinCloudProjectRequest,
     options: Readonly<{ readonly signal: AbortSignal }>,
   ): Promise<JoinCloudProjectResponse> {
-    if (principal.provenance.kind !== 'operator-protected-channel') {
+    if (principal.provenance.kind !== 'vault-credential') {
       throw domainError('authorization-denied', 'join-principal-untrusted');
     }
     let lease: PinnedProjectLease | undefined;

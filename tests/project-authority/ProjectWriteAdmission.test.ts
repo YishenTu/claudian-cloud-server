@@ -18,8 +18,8 @@ import {
   ProjectWriteAdmissionError,
 } from '../../src/project-authority/admission/ProjectWriteAdmission.js';
 import {
-  createDevelopmentIngressPrincipal,
-} from '../../src/request-context/IngressPrincipal.js';
+  createDevelopmentPrincipal,
+} from '../../src/request-context/RequestPrincipal.js';
 import {
   createRepositoryPlacementLease,
 } from '../../src/repositories/RepositoryPlacement.js';
@@ -134,7 +134,7 @@ describe('ProjectWriteAdmission', () => {
         recoverProject: () => Promise.reject(new Error('recovery-cannot-run-with-reserved-capacity')),
       },
     });
-    const principal = createDevelopmentIngressPrincipal('member-manager');
+    const principal = createDevelopmentPrincipal('member-manager');
     try {
       await admission.preflight(principal, 'project-a');
       coordination.lifecycle = activeLifecycle();
@@ -163,7 +163,7 @@ describe('ProjectWriteAdmission', () => {
     });
 
     assert.equal(await admission.run(
-      createDevelopmentIngressPrincipal('member-manager'),
+      createDevelopmentPrincipal('member-manager'),
       'project-a',
       write => Promise.resolve(write.projectId),
     ), 'project-a');
@@ -189,7 +189,7 @@ describe('ProjectWriteAdmission', () => {
     });
 
     assert.equal(await admission.run(
-      createDevelopmentIngressPrincipal('member-manager'),
+      createDevelopmentPrincipal('member-manager'),
       'project-a',
       write => Promise.resolve(write.projectId),
     ), 'project-a');
@@ -220,7 +220,7 @@ describe('ProjectWriteAdmission', () => {
     });
 
     await assert.rejects(admission.run(
-      createDevelopmentIngressPrincipal('former-member'),
+      createDevelopmentPrincipal('former-member'),
       'project-a',
       () => Promise.reject(new Error('unexpected-operation')),
     ), error => {

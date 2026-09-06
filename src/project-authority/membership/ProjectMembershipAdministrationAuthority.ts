@@ -19,7 +19,7 @@ import {
 
 import type { MembershipAdministrationStatus } from '../../coordination/ProjectMembershipPersistence.js';
 import { ProjectMutationRejection } from '../ProjectMutationRejection.js';
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import type { ProjectWriteAdmission } from '../admission/ProjectWriteAdmission.js';
 
 export interface ProjectMembershipAdministrationAuthorityOptions {
@@ -87,7 +87,7 @@ export class ProjectMembershipAdministrationAuthority {
   }
 
   listMembers(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: CollabProjectRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<ListProjectMembersResponse> {
@@ -103,7 +103,7 @@ export class ProjectMembershipAdministrationAuthority {
   }
 
   createOffer(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: CreateManagerResponsibilityOfferRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<CollabManagerResponsibilityOfferResponse> {
@@ -140,7 +140,7 @@ export class ProjectMembershipAdministrationAuthority {
   }
 
   listOffers(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: CollabProjectRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<ListCurrentManagerResponsibilityOffersResponse> {
@@ -158,7 +158,7 @@ export class ProjectMembershipAdministrationAuthority {
   }
 
   getOffer(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: GetManagerResponsibilityOfferRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<CollabManagerResponsibilityOfferResponse> {
@@ -180,7 +180,7 @@ export class ProjectMembershipAdministrationAuthority {
   }
 
   acknowledgeOffer(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: TransitionManagerResponsibilityOfferRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<CollabManagerResponsibilityOfferResponse> {
@@ -194,7 +194,7 @@ export class ProjectMembershipAdministrationAuthority {
   }
 
   declineOffer(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: TransitionManagerResponsibilityOfferRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<CollabManagerResponsibilityOfferResponse> {
@@ -208,7 +208,7 @@ export class ProjectMembershipAdministrationAuthority {
   }
 
   cancelOffer(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: TransitionManagerResponsibilityOfferRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<CollabManagerResponsibilityOfferResponse> {
@@ -222,7 +222,7 @@ export class ProjectMembershipAdministrationAuthority {
   }
 
   promote(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: PromoteManagerRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<PromoteManagerResponse> {
@@ -263,7 +263,7 @@ export class ProjectMembershipAdministrationAuthority {
   }
 
   demote(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: DemoteManagerRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<DemoteManagerResponse> {
@@ -304,7 +304,7 @@ export class ProjectMembershipAdministrationAuthority {
   #transition(
     operation: TransitionOperation,
     nextState: 'acknowledged' | 'cancelled' | 'declined',
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: TransitionManagerResponsibilityOfferRequest,
     options: Readonly<{ readonly signal?: AbortSignal }>,
   ): Promise<CollabManagerResponsibilityOfferResponse> {

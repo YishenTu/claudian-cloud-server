@@ -10,7 +10,7 @@ import type {
   AcquireProjectLeaseOptions,
   ProjectReadScope,
 } from '../../coordination/ProjectCoordination.js';
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import {
   sameRepositoryPlacement,
   type RepositoryPlacementLease,
@@ -96,7 +96,7 @@ export class ProjectCollaborationReadAdmission {
   }
 
   run<T>(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     operation: (read: AuthorizedProjectCollaborationRead) => Promise<T>,
     options: AcquireProjectLeaseOptions = {},
@@ -159,7 +159,7 @@ export class ProjectCollaborationReadAdmission {
 
   async #authorize(
     scope: ProjectReadScope,
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
   ): Promise<AuthorizedFacts> {
     const memberId = await resolvePrincipalMember(scope, principal);

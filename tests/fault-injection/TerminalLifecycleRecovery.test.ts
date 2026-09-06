@@ -15,7 +15,7 @@ import { DeletionCoordinator } from '../../src/project-authority/lifecycle/delet
 import {
   LeaveCoordinator,
 } from '../../src/project-authority/lifecycle/leave/LeaveCoordinator.js';
-import { createTrustedIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
+import { createVaultCredentialPrincipal } from '../../src/request-context/RequestPrincipal.js';
 import { RetireCoordinator } from '../../src/project-authority/lifecycle/retire/RetireCoordinator.js';
 import {
   RepositoryCheckpointAuthority,
@@ -226,9 +226,8 @@ describe('terminal lifecycle cross-store recovery', () => {
           },
         });
         await assert.rejects(leave.leave(
-          createTrustedIngressPrincipal({
+          createVaultCredentialPrincipal({
             principalId: CLOUD_TO_LAN_TARGET_PRINCIPAL,
-            providerId: 'test',
           }),
           request,
         ), (error: unknown) => error instanceof CollabError
@@ -249,9 +248,8 @@ describe('terminal lifecycle cross-store recovery', () => {
           repository,
         });
         await assert.rejects(leave.leave(
-          createTrustedIngressPrincipal({
+          createVaultCredentialPrincipal({
             principalId: CLOUD_TO_LAN_MANAGER_PRINCIPAL,
-            providerId: 'test',
           }),
           request,
         ), (error: unknown) => error instanceof CollabError
@@ -269,9 +267,8 @@ describe('terminal lifecycle cross-store recovery', () => {
           },
         });
         await verification.close();
-        const targetPrincipal = createTrustedIngressPrincipal({
+        const targetPrincipal = createVaultCredentialPrincipal({
           principalId: CLOUD_TO_LAN_TARGET_PRINCIPAL,
-          providerId: 'test',
         });
         const result = await leave.leave(targetPrincipal, request);
         assert.deepEqual(await leave.leave(targetPrincipal, request), result);

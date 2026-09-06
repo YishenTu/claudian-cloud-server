@@ -11,19 +11,16 @@ import {
 } from '@claudian-collab/protocol';
 
 import { ProjectMutationRejection } from '../../project-authority/ProjectMutationRejection.js';
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import {
   RequestPrincipalBinding,
   RequestPrincipalBindingError,
   type RequestPrincipalBindingOptions,
-  type TrustedProjectPrincipalBinding,
 } from '../../request-context/RequestPrincipalBinding.js';
 import {
   parseOptionalContentLength,
   requestHeaderValues,
 } from '../httpRequestHeaders.js';
-
-export type { TrustedProjectPrincipalBinding };
 
 export interface ProjectJsonTransportOptions
   extends RequestPrincipalBindingOptions {
@@ -34,7 +31,7 @@ export interface ProjectJsonTransportOptions
 
 export interface ProjectJsonRequestContext {
   readonly data: unknown;
-  readonly principal: IngressPrincipal;
+  readonly principal: RequestPrincipal;
   readonly signal: AbortSignal;
 }
 
@@ -242,7 +239,7 @@ export class ProjectJsonTransport {
     timeout.unref();
     let requestId = this.#newRequestId();
     try {
-      let principal: IngressPrincipal;
+      let principal: RequestPrincipal;
       try {
         principal = this.#principalBinding.bind(request);
       } catch (error: unknown) {

@@ -40,7 +40,7 @@ function translate(error: unknown): never {
   return fail();
 }
 
-/** Keeps record enumeration and multi-Project replay out of O5 composition. */
+/** Keeps record enumeration and multi-Project replay behind the restore coordination boundary. */
 export class EnvironmentRestoreCoordinationAdapter
 implements EnvironmentRestoreCoordinationPort {
   readonly #source: EnvironmentProjectBackupSource

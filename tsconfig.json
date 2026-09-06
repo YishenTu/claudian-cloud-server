@@ -16,5 +16,5 @@
     "useUnknownInCatchVariables": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["eslint.config.js", "scripts/**/*.ts", "src/**/*.ts", "tests/**/*.ts"]
+  "include": ["eslint.config.js", "deploy/**/*.ts", "scripts/**/*.ts", "src/**/*.ts", "tests/**/*.ts"]
 }

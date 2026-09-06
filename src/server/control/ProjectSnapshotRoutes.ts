@@ -12,7 +12,7 @@ import {
 import {
   ProjectReadAuthorityError,
 } from '../../project-authority/reads/ProjectReadAuthority.js';
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import {
   ProjectJsonRouteFailure,
   ProjectJsonTransport,
@@ -22,7 +22,7 @@ import {
 
 export interface ProjectSnapshotHandler {
   getProjectSnapshot(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     options?: Readonly<{ readonly signal?: AbortSignal }>,
   ): Promise<CollabCloudProjectSnapshot>;

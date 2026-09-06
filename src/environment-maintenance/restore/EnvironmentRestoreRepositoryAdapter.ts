@@ -104,7 +104,7 @@ function samePublication(
     && sameRefs(left.refs, right.refs);
 }
 
-/** Adapts canonical O1 backup artifacts to repository-owned staging/publish. */
+/** Adapts canonical backup artifacts to repository-owned staging/publish. */
 export class EnvironmentRestoreRepositoryAdapter
 implements EnvironmentRestoreRepositoryPort {
   readonly #inspection: EnvironmentRestoreRepositoryInspectionPort;

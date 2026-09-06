@@ -22,7 +22,7 @@ import type {
   ProjectMembershipRecord,
   ProjectScope,
 } from '../../../coordination/ProjectCoordination.js';
-import type { IngressPrincipal } from '../../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../../request-context/RequestPrincipal.js';
 import {
   OperationDrain,
   OperationDrainClosedError,
@@ -250,7 +250,7 @@ implements ProjectLifecycleRecoveryOwner, ProjectRecoveryPort {
   }
 
   leave(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     input: LeaveProjectRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<LeaveProjectResponse> {
@@ -262,7 +262,7 @@ implements ProjectLifecycleRecoveryOwner, ProjectRecoveryPort {
   }
 
   async #leave(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     input: LeaveProjectRequest,
     options: Readonly<{ readonly signal: AbortSignal }>,
   ): Promise<LeaveProjectResponse> {

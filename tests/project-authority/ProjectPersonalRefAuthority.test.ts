@@ -17,7 +17,7 @@ import {
   ProjectPersonalRefAuthority,
   type ProjectPersonalRefRepository,
 } from '../../src/project-authority/writes/ProjectPersonalRefAuthority.js';
-import { createDevelopmentIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
+import { createDevelopmentPrincipal } from '../../src/request-context/RequestPrincipal.js';
 import { createRepositoryPlacementLease } from '../../src/repositories/RepositoryPlacement.js';
 
 const MAIN_OID = '1111111111111111111111111111111111111111';
@@ -239,7 +239,7 @@ describe('ProjectPersonalRefAuthority', () => {
     try {
       await assert.rejects(
         authority.advertiseReceivePack(
-          createDevelopmentIngressPrincipal('unrelated-member'),
+          createDevelopmentPrincipal('unrelated-member'),
           'project-a',
         ),
         error => (
@@ -351,7 +351,7 @@ describe('ProjectPersonalRefAuthority', () => {
       try {
         await assert.rejects(
           authority.advertiseReceivePack(
-            createDevelopmentIngressPrincipal('member-a'),
+            createDevelopmentPrincipal('member-a'),
             'project-a',
           ),
           error => (
@@ -438,7 +438,7 @@ describe('ProjectPersonalRefAuthority', () => {
       });
       const controller = new AbortController();
       const operation = authority.advertiseReceivePack(
-        createDevelopmentIngressPrincipal('member-a'),
+        createDevelopmentPrincipal('member-a'),
         'project-a',
         { signal: controller.signal },
       );
@@ -481,19 +481,19 @@ describe('ProjectPersonalRefAuthority', () => {
     };
     try {
       const first = authority.runReceivePack(
-        createDevelopmentIngressPrincipal('member-a'),
+        createDevelopmentPrincipal('member-a'),
         'project-a',
         options,
       );
       while (!repository.entered.includes('project-a')) await Promise.resolve();
 
       const sameProject = authority.runReceivePack(
-        createDevelopmentIngressPrincipal('member-a'),
+        createDevelopmentPrincipal('member-a'),
         'project-a',
         options,
       );
       const otherProject = authority.runReceivePack(
-        createDevelopmentIngressPrincipal('member-b'),
+        createDevelopmentPrincipal('member-b'),
         'project-b',
         options,
       );

@@ -24,8 +24,8 @@ import {
   ProjectRecoveryCoordinator,
 } from '../../src/project-authority/recovery/ProjectRecoveryCoordinator.js';
 import {
-  createDevelopmentIngressPrincipal,
-} from '../../src/request-context/IngressPrincipal.js';
+  createDevelopmentPrincipal,
+} from '../../src/request-context/RequestPrincipal.js';
 import {
   type PostgresTestDatabase,
   withPostgresTestDatabase,
@@ -304,7 +304,7 @@ describe('Project lifecycle cross-store recovery', () => {
           });
           try {
             await assert.rejects(admission.run(
-              createDevelopmentIngressPrincipal('former-member'),
+              createDevelopmentPrincipal('former-member'),
               projectId,
               () => Promise.reject(new Error('unexpected-write-admission')),
             ), error => {

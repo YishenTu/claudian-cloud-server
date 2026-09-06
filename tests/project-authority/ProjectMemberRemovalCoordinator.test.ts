@@ -13,7 +13,7 @@ import type {
 import {
   ProjectMemberRemovalCoordinator,
 } from '../../src/project-authority/membership/ProjectMemberRemovalCoordinator.js';
-import { createTrustedIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
+import { createVaultCredentialPrincipal } from '../../src/request-context/RequestPrincipal.js';
 
 const PROJECT_ID = 'project-removal';
 const MANAGER_ID = 'member-manager';
@@ -153,9 +153,8 @@ describe('ProjectMemberRemovalCoordinator', () => {
       },
     });
 
-    const principal = createTrustedIngressPrincipal({
+    const principal = createVaultCredentialPrincipal({
       principalId: 'principal:manager',
-      providerId: 'test',
     });
     const request = {
       expectedManagerSetGeneration: 3,

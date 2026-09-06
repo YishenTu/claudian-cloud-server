@@ -25,7 +25,7 @@ import {
   type ProjectRequestRepository,
   type ProjectRequestHeadValidationInput,
 } from '../../src/project-authority/requests/ProjectRequestAuthority.js';
-import { createDevelopmentIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
+import { createDevelopmentPrincipal } from '../../src/request-context/RequestPrincipal.js';
 import { createRepositoryPlacementLease } from '../../src/repositories/RepositoryPlacement.js';
 
 const CREATED = '2026-08-23T00:00:00.000Z';
@@ -326,7 +326,7 @@ describe('Project Request authority', () => {
     });
     try {
       const detail = await authority.getRequest(
-        createDevelopmentIngressPrincipal('actor-a'),
+        createDevelopmentPrincipal('actor-a'),
         { projectId: 'project-a', requestId: 'request-a' },
       );
 
@@ -375,7 +375,7 @@ describe('Project Request authority', () => {
     try {
       await assert.rejects(
         authority.getRequest(
-          createDevelopmentIngressPrincipal('actor-a'),
+          createDevelopmentPrincipal('actor-a'),
           { projectId: 'project-a', requestId: 'request-a' },
         ),
         error => error instanceof CollabError && error.code === 'stale-request-head',
@@ -412,7 +412,7 @@ describe('Project Request authority', () => {
     try {
       await assert.rejects(
         authority.getRequest(
-          createDevelopmentIngressPrincipal('actor-a'),
+          createDevelopmentPrincipal('actor-a'),
           { projectId: 'project-a', requestId: 'request-a' },
         ),
         error => (
@@ -463,13 +463,13 @@ describe('Project Request authority', () => {
     });
     try {
       const first = await authority.listRequestComments(
-        createDevelopmentIngressPrincipal('actor-a'),
+        createDevelopmentPrincipal('actor-a'),
         { limit: 1, projectId: 'project-a', requestId: 'request-a' },
       );
       assert.equal(first.comments[0]?.id, 'comment-a');
       assert.ok(first.nextCursor);
       const second = await authority.listRequestComments(
-        createDevelopmentIngressPrincipal('actor-a'),
+        createDevelopmentPrincipal('actor-a'),
         {
           cursor: first.nextCursor,
           limit: 1,
@@ -514,11 +514,11 @@ describe('Project Request authority', () => {
     };
     try {
       const created = await authority.createComment(
-        createDevelopmentIngressPrincipal('actor-a'),
+        createDevelopmentPrincipal('actor-a'),
         input,
       );
       const replayed = await authority.createComment(
-        createDevelopmentIngressPrincipal('actor-a'),
+        createDevelopmentPrincipal('actor-a'),
         input,
       );
 
@@ -558,7 +558,7 @@ describe('Project Request authority', () => {
     });
     try {
       const response = await authority.updateMyRequestMetadata(
-        createDevelopmentIngressPrincipal('actor-a'),
+        createDevelopmentPrincipal('actor-a'),
         {
           description: '\nNew description\n',
           expectedHeadOid: HEAD,
@@ -593,7 +593,7 @@ describe('Project Request authority', () => {
     });
     try {
       const response = await authority.ensureMyRequest(
-        createDevelopmentIngressPrincipal('actor-a'),
+        createDevelopmentPrincipal('actor-a'),
         {
           description: '\r\nDescribe the change\r\n\r\n',
           expectedMainOid: MAIN,
@@ -643,7 +643,7 @@ describe('Project Request authority', () => {
       recovery: { recoverProject: () => Promise.resolve() },
       repository,
     });
-    const principal = createDevelopmentIngressPrincipal('actor-a');
+    const principal = createDevelopmentPrincipal('actor-a');
     const first = {
       description: 'First description',
       expectedMainOid: MAIN,

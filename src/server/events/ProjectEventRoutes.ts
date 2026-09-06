@@ -14,7 +14,7 @@ import type {
 } from '../../project-authority/reads/ProjectReadAuthority.js';
 import { ProjectReadAuthorityError } from '../../project-authority/reads/ProjectReadAuthority.js';
 import type { ProjectEventWakeup } from '../../project-authority/reads/ProjectEventWakeup.js';
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import {
   RequestPrincipalBinding,
   RequestPrincipalBindingError,
@@ -28,7 +28,7 @@ import type {
 
 export interface ProjectEventHandler {
   getProjectEvents(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     afterSequence: number,
     options?: Readonly<{ readonly signal?: AbortSignal }>,
@@ -145,7 +145,7 @@ export class ProjectEventRoutes {
       rejectUpgrade(socket, 503);
       return true;
     }
-    let principal: IngressPrincipal;
+    let principal: RequestPrincipal;
     try {
       principal = this.#principalBinding.bind(request);
     } catch (error: unknown) {
@@ -180,7 +180,7 @@ export class ProjectEventRoutes {
     socket: Duplex,
     head: Buffer,
     pendingPermit: PendingProjectEventPermit,
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     afterSequence: number,
   ): void {
@@ -216,7 +216,7 @@ export class ProjectEventRoutes {
     socket: Duplex,
     head: Buffer,
     pendingPermit: PendingProjectEventPermit,
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     afterSequence: number,
     signal: AbortSignal,
@@ -266,7 +266,7 @@ export class ProjectEventRoutes {
   #startSession(
     socket: WebSocket,
     permit: ProjectEventPermit,
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     afterSequence: number,
   ): void {
@@ -287,7 +287,7 @@ export class ProjectEventRoutes {
 
   async #runSession(
     socket: WebSocket,
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     initialSequence: number,
   ): Promise<void> {

@@ -10,15 +10,14 @@ import type {
 import type { PortabilityLifecyclePersistenceReader } from '../../src/coordination/PortabilityLifecyclePersistence.js';
 import { ProtectedSecretCustody } from '../../src/project-authority/lifecycle/ProtectedSecretCustody.js';
 import { TransferredMembershipClaimAuthority } from '../../src/project-authority/membership/TransferredMembershipClaimAuthority.js';
-import { createTrustedIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
+import { createVaultCredentialPrincipal } from '../../src/request-context/RequestPrincipal.js';
 
 const NOW = '2026-08-30T06:00:00.000Z';
 const PROJECT_ID = 'project-claim-admin';
 const MEMBER_ID = 'member-imported';
 const CLAIM = Buffer.alloc(32, 5).toString('base64url');
-const PRINCIPAL = createTrustedIngressPrincipal({
+const PRINCIPAL = createVaultCredentialPrincipal({
   principalId: 'principal-claim-manager',
-  providerId: 'test-provider',
 });
 
 class MemoryClaimAdministration

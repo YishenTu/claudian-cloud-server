@@ -149,7 +149,7 @@ function exactAttemptProject(
 }
 
 /**
- * Reopens O1's immutable backup publication and runs the common checkpoint
+ * Reopens an immutable backup publication and runs the common checkpoint
  * verifier before exposing canonical records or repository bytes to restore.
  */
 export class PublishedEnvironmentBackupSource

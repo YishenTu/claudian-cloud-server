@@ -13,7 +13,7 @@ import type {
   ProjectScope,
 } from '../../coordination/ProjectCoordination.js';
 import { CoordinationError } from '../../coordination/CoordinationError.js';
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import {
   sameRepositoryPlacement,
   type RepositoryPlacementLease,
@@ -131,7 +131,7 @@ export class ProjectWriteAdmission {
   }
 
   run<T>(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     operation: (write: AuthorizedProjectWrite) => Promise<T>,
     options: AcquireProjectLeaseOptions = {},
@@ -145,7 +145,7 @@ export class ProjectWriteAdmission {
   }
 
   runAfterPreflight<T>(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     operation: (write: AuthorizedProjectWrite) => Promise<T>,
     options: AcquireProjectLeaseOptions = {},
@@ -156,7 +156,7 @@ export class ProjectWriteAdmission {
   }
 
   preflight(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     options: AcquireProjectLeaseOptions = {},
   ): Promise<void> {
@@ -192,7 +192,7 @@ export class ProjectWriteAdmission {
   }
 
   async #run<T>(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     operation: (write: AuthorizedProjectWrite) => Promise<T>,
     signal: AbortSignal,
@@ -317,7 +317,7 @@ export class ProjectWriteAdmission {
 
   async #authorize(
     scope: ProjectScope,
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
   ): Promise<AuthorizedFacts> {
     const member = await this.#authorizeMember(scope, principal);
@@ -342,7 +342,7 @@ export class ProjectWriteAdmission {
       ProjectReadScope,
       'findDevelopmentActorMember' | 'findMembership' | 'findPrincipalMember'
     >,
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
   ): Promise<AuthorizedMemberFacts> {
     const memberId = await resolvePrincipalMember(scope, principal);
     if (memberId === undefined) return fail('authorization-denied');
@@ -357,7 +357,7 @@ export class ProjectWriteAdmission {
 
   async #revalidate(
     scope: ProjectScope,
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     expected: AuthorizedFacts,
     acceptOperationId?: CollabOperationId,

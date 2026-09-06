@@ -2,22 +2,22 @@ import { createHash } from 'node:crypto';
 
 export type CapacityScenario = 'eight-hour-soak' | 'one-hour-mixed';
 
-export const A_TEST_CAPACITY_PROFILE = Object.freeze({
+export const SINGLE_HOST_CAPACITY_PROFILE = Object.freeze({
   accounts: 80,
   accepts: 1,
   memberships: 240,
-  profile: 'a-test' as const,
+  profile: 'single-host' as const,
   projects: 100,
   publishes: 2,
   runningGitChildren: 2,
   subscriptions: 50,
 });
 
-export const A_TEST_CAPACITY_LIMITS = Object.freeze({
+export const SINGLE_HOST_CAPACITY_LIMITS = Object.freeze({
   admittedGitRequests: 6,
   cloneRequests: 1,
-  concurrentAccepts: A_TEST_CAPACITY_PROFILE.accepts,
-  concurrentPublishes: A_TEST_CAPACITY_PROFILE.publishes,
+  concurrentAccepts: SINGLE_HOST_CAPACITY_PROFILE.accepts,
+  concurrentPublishes: SINGLE_HOST_CAPACITY_PROFILE.publishes,
   controlRequestsInFlight: 32,
   fetchRequests: 3,
   ordinaryPostgresTransactions: 8,
@@ -26,7 +26,7 @@ export const A_TEST_CAPACITY_LIMITS = Object.freeze({
   pinnedProjectLeaseConnections: 2,
   pushRequests: 2,
   reservedRecoveryConnections: 2,
-  runningGitChildren: A_TEST_CAPACITY_PROFILE.runningGitChildren,
+  runningGitChildren: SINGLE_HOST_CAPACITY_PROFILE.runningGitChildren,
 });
 
 export interface CapacityAccountSeed {
@@ -144,13 +144,13 @@ export interface CapacityWorkload {
   readonly accounts: readonly CapacityAccountSeed[];
   readonly durationMs: number;
   readonly events: readonly CapacityWorkloadEvent[];
-  readonly limits: typeof A_TEST_CAPACITY_LIMITS;
+  readonly limits: typeof SINGLE_HOST_CAPACITY_LIMITS;
   readonly measurement: {
     readonly projectGitProcessingWindowEndAtMs: readonly number[];
     readonly projectStorageSnapshotAtMs: readonly number[];
     readonly resourceSampleIntervalMs: number;
   };
-  readonly profile: 'a-test';
+  readonly profile: 'single-host';
   readonly projects: readonly CapacityProjectSeed[];
   readonly scenario: CapacityScenario;
   readonly seedSha256: string;
@@ -236,12 +236,12 @@ function createProjects(
     ...Array.from({ length: 2 }, () => 640 * MEBIBYTE),
   ], random);
   const accountOrdinals = shuffled(
-    Array.from({ length: A_TEST_CAPACITY_PROFILE.accounts }, (_, ordinal) => ordinal),
+    Array.from({ length: SINGLE_HOST_CAPACITY_PROFILE.accounts }, (_, ordinal) => ordinal),
     random,
   );
 
   return Object.freeze(Array.from(
-    { length: A_TEST_CAPACITY_PROFILE.projects },
+    { length: SINGLE_HOST_CAPACITY_PROFILE.projects },
     (_, ordinal) => {
       const membershipCount = memberships[ordinal] ?? 0;
       const indexes = [ordinal, ordinal + 29, ordinal + 53];
@@ -265,7 +265,7 @@ function invalidWorkload(): never {
 
 function createAccounts(seedSha256: string): readonly CapacityAccountSeed[] {
   return Object.freeze(Array.from(
-    { length: A_TEST_CAPACITY_PROFILE.accounts },
+    { length: SINGLE_HOST_CAPACITY_PROFILE.accounts },
     (_, ordinal) => Object.freeze({
       opaqueAccountId: `account_${sha256(`account:${seedSha256}:${String(ordinal)}`).slice(0, 32)}`,
       ordinal,
@@ -300,7 +300,7 @@ function createEvents(
   const addOperation = <Kind extends CapacityOperationEvent['kind']>(
     atMs: number,
     kind: Kind,
-    projectOrdinal = random.integer(A_TEST_CAPACITY_PROFILE.projects),
+    projectOrdinal = random.integer(SINGLE_HOST_CAPACITY_PROFILE.projects),
     trafficClass: CapacityTrafficClass = maintenanceKinds.includes(kind)
       ? 'maintenance'
       : 'ordinary',
@@ -369,10 +369,10 @@ function createEvents(
     atMs: number,
     kind: 'git-fetch' | 'git-push' | 'publish',
   ): void => {
-    const firstProject = random.integer(A_TEST_CAPACITY_PROFILE.projects);
-    let secondProject = random.integer(A_TEST_CAPACITY_PROFILE.projects);
+    const firstProject = random.integer(SINGLE_HOST_CAPACITY_PROFILE.projects);
+    let secondProject = random.integer(SINGLE_HOST_CAPACITY_PROFILE.projects);
     if (secondProject === firstProject) {
-      secondProject = (secondProject + 1) % A_TEST_CAPACITY_PROFILE.projects;
+      secondProject = (secondProject + 1) % SINGLE_HOST_CAPACITY_PROFILE.projects;
     }
     addOperation(atMs, kind, firstProject);
     addOperation(atMs, kind, secondProject);
@@ -397,10 +397,10 @@ function createEvents(
   }
   const firstTransferAt = Math.floor(durationMs / 3);
   const secondTransferAt = Math.floor((durationMs * 2) / 3);
-  const firstProject = random.integer(A_TEST_CAPACITY_PROFILE.projects);
-  let secondProject = random.integer(A_TEST_CAPACITY_PROFILE.projects);
+  const firstProject = random.integer(SINGLE_HOST_CAPACITY_PROFILE.projects);
+  let secondProject = random.integer(SINGLE_HOST_CAPACITY_PROFILE.projects);
   if (secondProject === firstProject) {
-    secondProject = (secondProject + 1) % A_TEST_CAPACITY_PROFILE.projects;
+    secondProject = (secondProject + 1) % SINGLE_HOST_CAPACITY_PROFILE.projects;
   }
 
   const firstTransfer = addOperation(
@@ -458,24 +458,24 @@ function createEvents(
 
   const ceilingAt = Math.floor(durationMs / 2);
   const ceilingProbeSequences: number[] = [];
-  for (let ordinal = 0; ordinal < A_TEST_CAPACITY_LIMITS.controlRequestsInFlight; (
+  for (let ordinal = 0; ordinal < SINGLE_HOST_CAPACITY_LIMITS.controlRequestsInFlight; (
     ordinal += 1
   )) {
     ceilingProbeSequences.push(addOperation(
       ceilingAt,
       'control-read',
-      ordinal % A_TEST_CAPACITY_PROFILE.projects,
+      ordinal % SINGLE_HOST_CAPACITY_PROFILE.projects,
       'ordinary',
       {
         controlRequests: 1,
         ordinaryPostgresTransactions: ordinal
-          < A_TEST_CAPACITY_LIMITS.ordinaryPostgresTransactions ? 1 : 0,
+          < SINGLE_HOST_CAPACITY_LIMITS.ordinaryPostgresTransactions ? 1 : 0,
         pinnedProjectLeaseConnections: ordinal
-          < A_TEST_CAPACITY_LIMITS.pinnedProjectLeaseConnections ? 1 : 0,
+          < SINGLE_HOST_CAPACITY_LIMITS.pinnedProjectLeaseConnections ? 1 : 0,
         reservedRecoveryConnections: ordinal
-          >= A_TEST_CAPACITY_LIMITS.pinnedProjectLeaseConnections
-          && ordinal < A_TEST_CAPACITY_LIMITS.pinnedProjectLeaseConnections
-            + A_TEST_CAPACITY_LIMITS.reservedRecoveryConnections ? 1 : 0,
+          >= SINGLE_HOST_CAPACITY_LIMITS.pinnedProjectLeaseConnections
+          && ordinal < SINGLE_HOST_CAPACITY_LIMITS.pinnedProjectLeaseConnections
+            + SINGLE_HOST_CAPACITY_LIMITS.reservedRecoveryConnections ? 1 : 0,
       },
       0,
     ).sequence);
@@ -483,7 +483,7 @@ function createEvents(
   addOperation(
     ceilingAt,
     'control-read',
-    A_TEST_CAPACITY_LIMITS.controlRequestsInFlight,
+    SINGLE_HOST_CAPACITY_LIMITS.controlRequestsInFlight,
     'ordinary',
     null,
     0,
@@ -507,16 +507,16 @@ function createEvents(
         admittedGitRequests: 1,
         cloneRequests: kind === 'git-clone' ? 1 : 0,
         fetchRequests: kind === 'git-fetch' ? 1 : 0,
-        gitChildren: ordinal < A_TEST_CAPACITY_LIMITS.runningGitChildren ? 1 : 0,
-        perProjectGitReads: ordinal < A_TEST_CAPACITY_LIMITS.perProjectGitReads ? 1 : 0,
+        gitChildren: ordinal < SINGLE_HOST_CAPACITY_LIMITS.runningGitChildren ? 1 : 0,
+        perProjectGitReads: ordinal < SINGLE_HOST_CAPACITY_LIMITS.perProjectGitReads ? 1 : 0,
         perProjectQueuedRequests: ordinal
-          >= A_TEST_CAPACITY_LIMITS.runningGitChildren ? 1 : 0,
+          >= SINGLE_HOST_CAPACITY_LIMITS.runningGitChildren ? 1 : 0,
         pushRequests: kind === 'git-push' ? 1 : 0,
       },
       1,
     ).sequence);
   });
-  for (let ordinal = 0; ordinal < A_TEST_CAPACITY_LIMITS.concurrentPublishes; (
+  for (let ordinal = 0; ordinal < SINGLE_HOST_CAPACITY_LIMITS.concurrentPublishes; (
     ordinal += 1
   )) {
     ceilingProbeSequences.push(addOperation(
@@ -528,7 +528,7 @@ function createEvents(
       1,
     ).sequence);
   }
-  for (let ordinal = 0; ordinal < A_TEST_CAPACITY_LIMITS.concurrentAccepts; ordinal += 1) {
+  for (let ordinal = 0; ordinal < SINGLE_HOST_CAPACITY_LIMITS.concurrentAccepts; ordinal += 1) {
     ceilingProbeSequences.push(addOperation(
       ceilingAt,
       'accept',
@@ -582,13 +582,13 @@ export function createCapacityWorkload(
   const subscribedProjectOrdinals = Object.freeze(shuffled(
     projects.map(project => project.ordinal),
     random,
-  ).slice(0, A_TEST_CAPACITY_PROFILE.subscriptions));
+  ).slice(0, SINGLE_HOST_CAPACITY_PROFILE.subscriptions));
 
   const workload: CapacityWorkload = Object.freeze({
     accounts: createAccounts(seedSha256),
     durationMs,
     events: createEvents(durationMs, random, subscribedProjectOrdinals),
-    limits: A_TEST_CAPACITY_LIMITS,
+    limits: SINGLE_HOST_CAPACITY_LIMITS,
     measurement: Object.freeze({
       projectGitProcessingWindowEndAtMs: Object.freeze([
         Math.floor(durationMs / 2),
@@ -601,7 +601,7 @@ export function createCapacityWorkload(
       ]),
       resourceSampleIntervalMs: 60_000,
     }),
-    profile: A_TEST_CAPACITY_PROFILE.profile,
+    profile: SINGLE_HOST_CAPACITY_PROFILE.profile,
     projects,
     scenario: options.scenario,
     seedSha256,

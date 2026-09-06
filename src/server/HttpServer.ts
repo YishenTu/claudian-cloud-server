@@ -4,11 +4,7 @@ import {
   type Server,
   type ServerResponse,
 } from 'node:http';
-import {
-  createServer as createTcpServer,
-  type Server as TcpServer,
-  type Socket,
-} from 'node:net';
+import type { Socket } from 'node:net';
 import type { Duplex } from 'node:stream';
 
 import type { HttpConfig } from '../config/ServerConfig.js';
@@ -33,9 +29,6 @@ export interface HttpUpgradeHandler {
 
 export interface HttpServerOptions {
   readonly config: HttpConfig;
-  readonly connectionIngress?: Readonly<{
-    accept(socket: Socket, acceptHttp: (socket: Socket) => void): void;
-  }>;
   readonly isReady: () => boolean;
   readonly routes?: readonly HttpRouteHandler[];
   readonly upgradeRoutes?: readonly HttpUpgradeHandler[];
@@ -45,10 +38,8 @@ export class HttpServer {
   readonly #config: HttpConfig;
   readonly #activeHttpSockets = new Map<Socket, number>();
   readonly #healthRoutes: HealthRoutes;
-  readonly #listener: TcpServer;
   readonly #routes: readonly HttpRouteHandler[];
   readonly #server: Server;
-  readonly #pendingIngressSockets = new Set<Socket>();
   readonly #sockets = new Set<Socket>();
   readonly #upgradeRoutes: readonly HttpUpgradeHandler[];
   readonly #upgradedSockets = new Set<Socket>();
@@ -84,20 +75,7 @@ export class HttpServer {
       this.#sockets.add(socket);
       socket.once('close', () => this.#sockets.delete(socket));
     };
-    this.#listener = options.connectionIngress === undefined
-      ? this.#server
-      : createTcpServer({ pauseOnConnect: true }, socket => {
-          track(socket);
-          this.#pendingIngressSockets.add(socket);
-          socket.once('close', () => this.#pendingIngressSockets.delete(socket));
-          options.connectionIngress?.accept(socket, accepted => {
-            this.#pendingIngressSockets.delete(accepted);
-            this.#server.emit('connection', accepted);
-          });
-        });
-    if (this.#listener === this.#server) {
-      this.#server.on('connection', track);
-    }
+    this.#server.on('connection', track);
     this.#server.on('upgrade', (request, socket, head) => {
       const accepted = socket as Socket;
       this.#upgradedSockets.add(accepted);
@@ -120,19 +98,19 @@ export class HttpServer {
 
     this.#startPromise = new Promise<HttpServerAddress>((resolve, reject) => {
       const onClose = (): void => {
-        this.#listener.off('error', onError);
-        this.#listener.off('listening', onListening);
+        this.#server.off('error', onError);
+        this.#server.off('listening', onListening);
         reject(new Error('http-server-closed'));
       };
       const onError = (error: Error): void => {
-        this.#listener.off('close', onClose);
-        this.#listener.off('listening', onListening);
+        this.#server.off('close', onClose);
+        this.#server.off('listening', onListening);
         reject(error);
       };
       const onListening = (): void => {
-        this.#listener.off('close', onClose);
-        this.#listener.off('error', onError);
-        const address = this.#listener.address();
+        this.#server.off('close', onClose);
+        this.#server.off('error', onError);
+        const address = this.#server.address();
         if (address === null || typeof address === 'string') {
           reject(new Error('http-server-address-unavailable'));
           return;
@@ -144,10 +122,10 @@ export class HttpServer {
         resolve(this.#address);
       };
 
-      this.#listener.once('close', onClose);
-      this.#listener.once('error', onError);
-      this.#listener.once('listening', onListening);
-      this.#listener.listen({
+      this.#server.once('close', onClose);
+      this.#server.once('error', onError);
+      this.#server.once('listening', onListening);
+      this.#server.listen({
         host: this.#config.host,
         port: this.#config.port,
       });
@@ -163,9 +141,8 @@ export class HttpServer {
   }
 
   async #close(timeoutMs: number): Promise<void> {
-    if (this.#startPromise === undefined && !this.#listener.listening) return;
+    if (this.#startPromise === undefined && !this.#server.listening) return;
 
-    for (const socket of this.#pendingIngressSockets) socket.destroy();
     for (const socket of this.#sockets) {
       if (
         !this.#activeHttpSockets.has(socket)
@@ -179,7 +156,7 @@ export class HttpServer {
       }, timeoutMs);
       timeout.unref();
 
-      this.#listener.close((error) => {
+      this.#server.close((error) => {
         clearTimeout(timeout);
         this.#address = undefined;
         if (

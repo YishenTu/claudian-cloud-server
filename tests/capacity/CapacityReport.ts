@@ -1,6 +1,6 @@
 import {
-  A_TEST_CAPACITY_LIMITS,
-  A_TEST_CAPACITY_PROFILE,
+  SINGLE_HOST_CAPACITY_LIMITS,
+  SINGLE_HOST_CAPACITY_PROFILE,
 } from './CapacityWorkload.js';
 
 export type CapacityScenario = 'eight-hour-soak' | 'one-hour-mixed';
@@ -39,7 +39,7 @@ export interface CapacityObservation {
     readonly restoreDurationMs: number;
     readonly restoreObjectiveMs: number;
   };
-  readonly profile: 'a-test';
+  readonly profile: 'single-host';
   readonly requests: {
     readonly admissionRejected: number;
     readonly overloadProbeRetryable: boolean;
@@ -198,7 +198,7 @@ function evaluateThresholds(observation: CapacityObservation): readonly Threshol
     },
     {
       name: 'membership-count',
-      passed: observation.workload.memberships === A_TEST_CAPACITY_PROFILE.memberships,
+      passed: observation.workload.memberships === SINGLE_HOST_CAPACITY_PROFILE.memberships,
       safetyCritical: true,
     },
     {
@@ -228,7 +228,7 @@ function evaluateThresholds(observation: CapacityObservation): readonly Threshol
     },
     {
       name: 'project-count',
-      passed: observation.workload.projects === A_TEST_CAPACITY_PROFILE.projects,
+      passed: observation.workload.projects === SINGLE_HOST_CAPACITY_PROFILE.projects,
       safetyCritical: true,
     },
     {
@@ -240,67 +240,67 @@ function evaluateThresholds(observation: CapacityObservation): readonly Threshol
     {
       name: 'running-git-children',
       passed: observation.resources.peakGitChildren
-        === A_TEST_CAPACITY_LIMITS.runningGitChildren,
+        === SINGLE_HOST_CAPACITY_LIMITS.runningGitChildren,
       safetyCritical: true,
     },
     {
       name: 'admitted-git-requests',
       passed: observation.resources.peakAdmittedGitRequests
-        === A_TEST_CAPACITY_LIMITS.admittedGitRequests,
+        === SINGLE_HOST_CAPACITY_LIMITS.admittedGitRequests,
       safetyCritical: true,
     },
     {
       name: 'clone-requests',
       passed: observation.resources.peakCloneRequests
-        === A_TEST_CAPACITY_LIMITS.cloneRequests,
+        === SINGLE_HOST_CAPACITY_LIMITS.cloneRequests,
       safetyCritical: true,
     },
     {
       name: 'fetch-requests',
       passed: observation.resources.peakFetchRequests
-        === A_TEST_CAPACITY_LIMITS.fetchRequests,
+        === SINGLE_HOST_CAPACITY_LIMITS.fetchRequests,
       safetyCritical: true,
     },
     {
       name: 'push-requests',
       passed: observation.resources.peakPushRequests
-        === A_TEST_CAPACITY_LIMITS.pushRequests,
+        === SINGLE_HOST_CAPACITY_LIMITS.pushRequests,
       safetyCritical: true,
     },
     {
       name: 'control-requests-in-flight',
       passed: observation.resources.peakControlRequests
-        === A_TEST_CAPACITY_LIMITS.controlRequestsInFlight,
+        === SINGLE_HOST_CAPACITY_LIMITS.controlRequestsInFlight,
       safetyCritical: true,
     },
     {
       name: 'ordinary-postgres-transactions',
       passed: observation.resources.peakOrdinaryPostgresTransactions
-        === A_TEST_CAPACITY_LIMITS.ordinaryPostgresTransactions,
+        === SINGLE_HOST_CAPACITY_LIMITS.ordinaryPostgresTransactions,
       safetyCritical: true,
     },
     {
       name: 'pinned-project-lease-connections',
       passed: observation.resources.peakPinnedProjectLeaseConnections
-        === A_TEST_CAPACITY_LIMITS.pinnedProjectLeaseConnections,
+        === SINGLE_HOST_CAPACITY_LIMITS.pinnedProjectLeaseConnections,
       safetyCritical: true,
     },
     {
       name: 'reserved-recovery-connections',
       passed: observation.resources.peakReservedRecoveryConnections
-        === A_TEST_CAPACITY_LIMITS.reservedRecoveryConnections,
+        === SINGLE_HOST_CAPACITY_LIMITS.reservedRecoveryConnections,
       safetyCritical: true,
     },
     {
       name: 'per-project-git-reads',
       passed: observation.resources.peakPerProjectGitReads
-        === A_TEST_CAPACITY_LIMITS.perProjectGitReads,
+        === SINGLE_HOST_CAPACITY_LIMITS.perProjectGitReads,
       safetyCritical: true,
     },
     {
       name: 'per-project-queued-requests',
       passed: observation.resources.peakPerProjectQueuedRequests
-        === A_TEST_CAPACITY_LIMITS.perProjectQueuedRequests,
+        === SINGLE_HOST_CAPACITY_LIMITS.perProjectQueuedRequests,
       safetyCritical: true,
     },
     {
@@ -312,19 +312,19 @@ function evaluateThresholds(observation: CapacityObservation): readonly Threshol
     {
       name: 'concurrent-publishes',
       passed: observation.resources.peakPublishes
-        === A_TEST_CAPACITY_LIMITS.concurrentPublishes,
+        === SINGLE_HOST_CAPACITY_LIMITS.concurrentPublishes,
       safetyCritical: true,
     },
     {
       name: 'concurrent-accepts',
       passed: observation.resources.peakAccepts
-        === A_TEST_CAPACITY_LIMITS.concurrentAccepts,
+        === SINGLE_HOST_CAPACITY_LIMITS.concurrentAccepts,
       safetyCritical: true,
     },
     {
       name: 'subscription-count',
-      passed: observation.workload.subscriptions === A_TEST_CAPACITY_PROFILE.subscriptions
-        && observation.resources.peakSubscriptions === A_TEST_CAPACITY_PROFILE.subscriptions,
+      passed: observation.workload.subscriptions === SINGLE_HOST_CAPACITY_PROFILE.subscriptions
+        && observation.resources.peakSubscriptions === SINGLE_HOST_CAPACITY_PROFILE.subscriptions,
       safetyCritical: true,
     },
     {
@@ -587,7 +587,7 @@ function decodeObservation(input: Record<string, unknown>): CapacityObservation 
       restoreDurationMs: safeInteger(operations['restoreDurationMs']),
       restoreObjectiveMs: safeInteger(operations['restoreObjectiveMs']),
     },
-    profile: exactString(input['profile'], ['a-test']),
+    profile: exactString(input['profile'], ['single-host']),
     requests: {
       admissionRejected: safeInteger(requests['admissionRejected']),
       ordinaryAdmissionRejected: safeInteger(requests['ordinaryAdmissionRejected']),

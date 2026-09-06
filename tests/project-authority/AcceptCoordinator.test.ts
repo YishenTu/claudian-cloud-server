@@ -34,7 +34,7 @@ import {
   ProjectAcceptRepositoryError,
   type ProjectAcceptRepository,
 } from '../../src/project-authority/acceptance/ProjectAcceptRepository.js';
-import { createDevelopmentIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
+import { createDevelopmentPrincipal } from '../../src/request-context/RequestPrincipal.js';
 import { createRepositoryPlacementLease } from '../../src/repositories/RepositoryPlacement.js';
 
 const T0 = '2026-08-24T00:00:00.000Z';
@@ -338,7 +338,7 @@ describe('ProjectAcceptCoordinator', () => {
       operationIdFactory: () => 'accept-operation',
       repository,
     });
-    const principal = createDevelopmentIngressPrincipal('manager-actor');
+    const principal = createDevelopmentPrincipal('manager-actor');
     try {
       const response = await coordinator.accept(principal, input());
       const replay = await coordinator.accept(principal, input());
@@ -407,7 +407,7 @@ describe('ProjectAcceptCoordinator', () => {
     try {
       await assert.rejects(
         coordinator.accept(
-          createDevelopmentIngressPrincipal('manager-actor'),
+          createDevelopmentPrincipal('manager-actor'),
           {
             ...input(),
             expectedResolvingTickets: [{ revision: 3, ticketId: 'ticket-a' }],
@@ -433,7 +433,7 @@ describe('ProjectAcceptCoordinator', () => {
     });
     try {
       const response = await coordinator.accept(
-        createDevelopmentIngressPrincipal('manager-actor'),
+        createDevelopmentPrincipal('manager-actor'),
         { ...input(), idempotencyKey: 'accept-contained-key' },
       );
 
@@ -463,7 +463,7 @@ describe('ProjectAcceptCoordinator', () => {
       operationIdFactory: () => 'accept-operation',
       repository,
     });
-    const principal = createDevelopmentIngressPrincipal('manager-actor');
+    const principal = createDevelopmentPrincipal('manager-actor');
     try {
       await assert.rejects(
         coordinator.accept(principal, input()),

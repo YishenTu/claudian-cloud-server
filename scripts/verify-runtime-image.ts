@@ -7,7 +7,7 @@ import {
   rm,
   writeFile,
 } from 'node:fs/promises';
-import { createConnection, createServer } from 'node:net';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
@@ -94,27 +94,6 @@ async function waitForHealth(
   throw new Error('runtime-image-readiness-timeout');
 }
 
-function proxyV2Ipv4Frame(): Buffer {
-  return Buffer.from([
-    0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d, 0x0a, 0x51,
-    0x55, 0x49, 0x54, 0x0a, 0x21, 0x11, 0x00, 0x0c,
-    100, 64, 0, 10,
-    127, 0, 0, 1,
-    0x30, 0x39, 0x22, 0x53,
-  ]);
-}
-
-async function rawRequest(port: number, chunks: readonly Buffer[]): Promise<string> {
-  const socket = createConnection({ host: '127.0.0.1', port });
-  const response: Buffer[] = [];
-  socket.on('data', chunk => response.push(Buffer.from(chunk)));
-  socket.on('error', () => undefined);
-  await once(socket, 'connect');
-  for (const chunk of chunks) socket.write(chunk);
-  await once(socket, 'close');
-  return Buffer.concat(response).toString('utf8');
-}
-
 async function verifyRuntimeImage(): Promise<void> {
   assert.equal(
     await docker(['image', 'inspect', IMAGE, '--format', '{{.Config.User}} {{.Config.StopSignal}}']),
@@ -166,13 +145,10 @@ async function verifyRuntimeImage(): Promise<void> {
         'CLAUDIAN_CLOUD_GIT_EXECUTABLE=/usr/bin/git',
         `CLAUDIAN_CLOUD_PORT=${String(port)}`,
         `CLAUDIAN_CLOUD_POSTGRES_URL=${database.runtimeUrl}`,
-        'CLAUDIAN_CLOUD_PRINCIPAL_PROFILE=trusted-ingress',
+        'CLAUDIAN_CLOUD_PRINCIPAL_PROFILE=vault-credential',
         'CLAUDIAN_CLOUD_REPOSITORY_ROOT=/var/lib/claudian-cloud/repositories',
         'CLAUDIAN_CLOUD_STAGING_ROOT=/var/lib/claudian-cloud/staging',
         'CLAUDIAN_CLOUD_STORAGE_NODE_ID=image-test-node',
-        'CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE=proxy-v2',
-        'CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID=runtime-image',
-        `CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCES=${JSON.stringify(['100.64.0.10'])}`,
         '',
       ].join('\n'),
       { mode: 0o600 },
@@ -339,23 +315,22 @@ async function verifyRuntimeImage(): Promise<void> {
       protocolVersion: COLLAB_PROTOCOL_VERSION,
       requestId: 'runtime-image-snapshot',
     });
-    const protectedHttp = Buffer.from([
-      `${protectedRoute.method} ${protectedRoute.target} HTTP/1.1`,
-      'Host: cloud',
-      'Connection: close',
-      'Content-Type: application/json',
-      'x-claudian-ingress-principal: principal-runtime-image',
-      `Content-Length: ${String(Buffer.byteLength(protectedBody))}`,
-      '',
-      protectedBody,
-    ].join('\r\n'));
-    const mapped = await rawRequest(port, [proxyV2Ipv4Frame(), protectedHttp]);
-    assert.match(mapped, /^HTTP\/1\.1 404 Not Found/mu);
+    const vaultCredential = randomBytes(32).toString('hex');
+    const authenticated = await fetch(`${origin}${protectedRoute.target}`, {
+      body: protectedBody,
+      headers: {
+        authorization: `Bearer ${vaultCredential}`,
+        'content-type': 'application/json',
+      },
+      method: protectedRoute.method,
+    });
+    assert.equal(authenticated.status, 404);
+    await authenticated.body?.cancel();
     const untrusted = await fetch(`${origin}${protectedRoute.target}`, {
       body: protectedBody,
       headers: {
         'content-type': 'application/json',
-        'x-claudian-trusted-principal': 'principal-runtime-image',
+        'x-claudian-ingress-principal': 'principal-runtime-image',
       },
       method: protectedRoute.method,
     });
@@ -373,6 +348,7 @@ async function verifyRuntimeImage(): Promise<void> {
     assert.equal(exitCode, 0);
     assert.equal(signal, null);
     assert.equal(stderr.join(''), '');
+    assert.equal(stdout.join('').includes(vaultCredential), false);
     assert.deepEqual(parseEvents(stdout), [
       'server.starting',
       'server.listening',

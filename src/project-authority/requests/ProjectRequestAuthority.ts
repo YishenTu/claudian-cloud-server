@@ -21,7 +21,7 @@ import {
 import { OperationDrain } from '../OperationDrain.js';
 import { CoordinationError } from '../../coordination/CoordinationError.js';
 import type { ProjectScope } from '../../coordination/ProjectCoordination.js';
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import {
   ProjectCollaborationReadAdmission,
   ProjectCollaborationReadAdmissionError,
@@ -272,7 +272,7 @@ export class ProjectRequestAuthority {
   }
 
   async getRequest(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: GetRequestRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<CollabRequestDetail> {
@@ -343,7 +343,7 @@ export class ProjectRequestAuthority {
   }
 
   async listRequestComments(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: ListRequestCommentsRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<CollabCommentPage> {
@@ -389,7 +389,7 @@ export class ProjectRequestAuthority {
   }
 
   async createComment(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: CreateCommentRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<CreateCommentResponse> {
@@ -466,7 +466,7 @@ export class ProjectRequestAuthority {
   }
 
   async updateMyRequestMetadata(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: UpdateMyRequestMetadataRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<UpdateMyRequestMetadataResponse> {
@@ -587,7 +587,7 @@ export class ProjectRequestAuthority {
   }
 
   ensureMyRequest(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: EnsureMyRequestRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<EnsureMyRequestResponse> {
@@ -597,7 +597,7 @@ export class ProjectRequestAuthority {
   }
 
   async #ensureMyRequest(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: EnsureMyRequestRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<EnsureMyRequestResponse> {
@@ -798,5 +798,4 @@ function sameRelations(
   ));
 }
 
-// Kept here so the repository port remains decision-complete for S7B reads.
 export type ProjectRequestDetail = CollabRequestDetail;

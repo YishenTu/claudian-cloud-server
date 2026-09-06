@@ -18,7 +18,7 @@ import type {
   CloudProjectCreationLease,
   PrepareCloudProjectCreationInput,
 } from '../../coordination/CloudProjectCreationPersistence.js';
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import {
   EmptyProjectRepositoryError,
   type EmptyProjectPublicationPlan,
@@ -170,7 +170,7 @@ function publicationPlan(
 
 function exactReplay(
   journal: CloudProjectCreationJournal,
-  principal: IngressPrincipal,
+  principal: RequestPrincipal,
   request: CreateCloudProjectRequest,
   fingerprint: string,
 ): boolean {
@@ -244,7 +244,7 @@ export class CloudProjectCreationCoordinator {
   }
 
   create(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: CreateCloudProjectRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<CreateCloudProjectResponse> {
@@ -256,11 +256,11 @@ export class CloudProjectCreationCoordinator {
   }
 
   async #create(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: CreateCloudProjectRequest,
     options: Readonly<{ readonly signal: AbortSignal }>,
   ): Promise<CreateCloudProjectResponse> {
-    if (principal.provenance.kind !== 'operator-protected-channel') {
+    if (principal.provenance.kind !== 'vault-credential') {
       throw domainError('authorization-denied', 'project-create-principal-untrusted');
     }
     const fingerprint = creationFingerprint(request);

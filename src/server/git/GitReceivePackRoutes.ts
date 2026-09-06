@@ -6,7 +6,7 @@ import {
 } from '@claudian-collab/protocol';
 
 import { ProjectWriteAdmissionError } from '../../project-authority/admission/ProjectWriteAdmission.js';
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import {
   RequestPrincipalBinding,
   RequestPrincipalBindingError,
@@ -41,12 +41,12 @@ export interface ProjectReceivePackOptions {
 
 export interface GitReceivePackWriteAuthority {
   advertiseReceivePack(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     options?: ProjectReceivePackAdvertisementOptions,
   ): Promise<Buffer>;
   runReceivePack(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     options: ProjectReceivePackOptions,
   ): Promise<void>;
@@ -177,7 +177,7 @@ export class GitReceivePackRoutes {
     const timeout = setTimeout(abort, this.#operationTimeoutMs);
     timeout.unref();
     try {
-      let principal: IngressPrincipal;
+      let principal: RequestPrincipal;
       try {
         principal = this.#principalBinding.bind(request);
       } catch (error: unknown) {

@@ -28,9 +28,9 @@ import {
   type DevelopmentBootstrapSettlementPort,
 } from '../../src/onboarding/development/DevelopmentBootstrapProfile.js';
 import {
-  createDevelopmentIngressPrincipal,
-  type IngressPrincipal,
-} from '../../src/request-context/IngressPrincipal.js';
+  createDevelopmentPrincipal,
+  type RequestPrincipal,
+} from '../../src/request-context/RequestPrincipal.js';
 import { DevelopmentBootstrapUploadGate } from '../../src/project-authority/lifecycle/DevelopmentBootstrapUploadGate.js';
 import type {
   ImportGitBundleInput,
@@ -45,8 +45,8 @@ const MEMBER_ONE_OID = '2'.repeat(40);
 const MEMBER_TWO_OID = '3'.repeat(40);
 const BUNDLE_SHA256 = 'a'.repeat(64);
 
-function principal(actorId: 'member_1' | 'member_2' | 'member_3'): IngressPrincipal {
-  return createDevelopmentIngressPrincipal(actorId);
+function principal(actorId: 'member_1' | 'member_2' | 'member_3'): RequestPrincipal {
+  return createDevelopmentPrincipal(actorId);
 }
 
 function comparison(overrides: Readonly<Record<string, unknown>> = {}) {

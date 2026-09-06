@@ -23,11 +23,11 @@ import type {
   EmptyProjectRepository,
   EmptyProjectRepositoryReservation,
 } from '../../src/repositories/EmptyProjectRepositoryAuthority.js';
-import { createTrustedIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
+import { createVaultCredentialPrincipal } from '../../src/request-context/RequestPrincipal.js';
 
 const CREATED_AT = '2026-08-30T01:02:03.000Z';
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
-// Independently worked from the canonical Git commit bytes in the Step 12 fixture.
+// Independently worked from the canonical empty-Project Git commit bytes.
 const INITIAL_COMMIT = '6b1a12d6d3b4714801617caa850adf32f9858bf5';
 const MARKER_SHA256 = 'a'.repeat(64);
 const MEMBER_ID = 'member_initial_manager';
@@ -38,9 +38,8 @@ const REQUEST: CreateCloudProjectRequest = {
   projectId: 'project_cloud_empty',
   projectName: 'Empty Cloud Project',
 };
-const PRINCIPAL = createTrustedIngressPrincipal({
+const PRINCIPAL = createVaultCredentialPrincipal({
   principalId: 'principal_operator_asserted',
-  providerId: 'test-provider',
 });
 
 class MemoryCreationPersistence implements CloudProjectCreationPersistence {
@@ -277,9 +276,8 @@ describe('CloudProjectCreationCoordinator', () => {
     await coordinator.create(PRINCIPAL, REQUEST);
 
     for (const [principal, request] of [
-      [createTrustedIngressPrincipal({
+      [createVaultCredentialPrincipal({
         principalId: 'different-principal',
-        providerId: 'test-provider',
       }), REQUEST],
       [PRINCIPAL, { ...REQUEST, idempotencyKey: 'different-key' }],
       [PRINCIPAL, { ...REQUEST, projectName: 'Different name' }],

@@ -17,7 +17,7 @@ import type {
   PinnedProjectLease,
 } from '../../coordination/ProjectCoordination.js';
 import { ProjectMutationRejection } from '../ProjectMutationRejection.js';
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import {
   OperationDrain,
   OperationDrainClosedError,
@@ -138,7 +138,7 @@ implements ProjectRecoveryPort, ProjectLifecycleRecoveryOwner {
   }
 
   remove(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: RemoveMemberRequest,
     options: Readonly<{ readonly signal?: AbortSignal }> = {},
   ): Promise<RemoveMemberResponse> {
@@ -150,7 +150,7 @@ implements ProjectRecoveryPort, ProjectLifecycleRecoveryOwner {
   }
 
   async #remove(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: RemoveMemberRequest,
     options: Readonly<{ readonly signal: AbortSignal }>,
   ): Promise<RemoveMemberResponse> {

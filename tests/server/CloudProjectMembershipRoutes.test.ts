@@ -10,7 +10,6 @@ import {
 } from '@claudian-collab/protocol';
 
 import { ProjectMutationRejection } from '../../src/project-authority/ProjectMutationRejection.js';
-import { TrustedPrincipalProvider } from '../../src/request-context/TrustedPrincipalProvider.js';
 import { CloudProjectMembershipRoutes } from '../../src/server/control/CloudProjectMembershipRoutes.js';
 
 const PROJECT_ID = 'project_cloud_route';
@@ -35,16 +34,6 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
       join: { join: () => Promise.reject(failure) },
       maximumJsonBytes: 64 * 1024,
       operationTimeoutMs: 2_000,
-      trustedPrincipal: {
-        establishedAssertion: () => ({
-          principalId: 'principal_route',
-          provenance: {
-            kind: 'operator-protected-channel',
-            providerId: 'test-provider',
-          },
-        }),
-        provider: new TrustedPrincipalProvider(),
-      },
     });
     const server = createServer((request, response) => {
       if (!routes.handle(request, response)) {
@@ -72,7 +61,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
             protocolVersion: 9,
             requestId: 'request-join-rejected',
           }),
-          headers: { 'content-type': 'application/json' },
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${'a'.repeat(64)}` },
           method: route.method,
         },
       );
@@ -101,16 +90,6 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
       },
       maximumJsonBytes: 64 * 1024,
       operationTimeoutMs: 2_000,
-      trustedPrincipal: {
-        establishedAssertion: () => ({
-          principalId: 'principal_route',
-          provenance: {
-            kind: 'operator-protected-channel',
-            providerId: 'test-provider',
-          },
-        }),
-        provider: new TrustedPrincipalProvider(),
-      },
     });
     const server = createServer((request, response) => {
       if (!routes.handle(request, response)) {
@@ -137,7 +116,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
           protocolVersion: 9,
           requestId: 'request-join-diverged',
         }),
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${'a'.repeat(64)}` },
         method: route.method,
       },
     );
@@ -169,16 +148,6 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
       },
       maximumJsonBytes: 64 * 1024,
       operationTimeoutMs: 2_000,
-      trustedPrincipal: {
-        establishedAssertion: () => ({
-          principalId: 'principal_route',
-          provenance: {
-            kind: 'operator-protected-channel',
-            providerId: 'test-provider',
-          },
-        }),
-        provider: new TrustedPrincipalProvider(),
-      },
     });
     const server = createServer((request, response) => {
       if (!routes.handle(request, response)) {
@@ -206,7 +175,9 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
         }),
         headers: {
           'content-type': 'application/json',
+          authorization: `Bearer ${'a'.repeat(64)}`,
           'x-claudian-development-actor': 'must-not-be-read',
+          'x-claudian-ingress-principal': 'must-not-be-read',
         },
         method: route.method,
       },
@@ -223,10 +194,9 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
       readonly signal: AbortSignal;
     };
     assert.deepEqual(call.principal, {
-      principalId: 'principal_route',
+      principalId: 'vault-ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb',
       provenance: {
-        kind: 'operator-protected-channel',
-        providerId: 'test-provider',
+        kind: 'vault-credential',
       },
     });
     assert.equal(call.request.projectId, PROJECT_ID);
@@ -414,13 +384,6 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
       },
       maximumJsonBytes: 64 * 1024,
       operationTimeoutMs: 2_000,
-      trustedPrincipal: {
-        establishedAssertion: () => ({
-          principalId: 'principal_route',
-          provenance: { kind: 'operator-protected-channel', providerId: 'test-provider' },
-        }),
-        provider: new TrustedPrincipalProvider(),
-      },
     });
     const server = createServer((request, response) => {
       if (!routes.handle(request, response)) {
@@ -539,7 +502,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
       const route = collabCloudProjectOperationRoute(PROJECT_ID, operation);
       const response = await fetch(`${base}${route.target}`, {
         body: JSON.stringify({ data, protocolVersion: 9, requestId: `request-${operation}` }),
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${'a'.repeat(64)}` },
         method: route.method,
       });
       assert.equal(response.status, 200);

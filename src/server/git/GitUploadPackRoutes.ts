@@ -10,7 +10,7 @@ import {
   type ProjectUploadPackAdvertisementOptions,
   type ProjectUploadPackOptions,
 } from '../../project-authority/reads/ProjectReadAuthority.js';
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import {
   RequestPrincipalBinding,
   RequestPrincipalBindingError,
@@ -28,12 +28,12 @@ import {
 
 export interface GitUploadPackReadAuthority {
   advertiseUploadPack(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     options?: ProjectUploadPackAdvertisementOptions,
   ): Promise<Buffer>;
   runUploadPack(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     projectId: CollabProjectId,
     options: ProjectUploadPackOptions,
   ): Promise<void>;
@@ -169,7 +169,7 @@ export class GitUploadPackRoutes {
     const timeout = setTimeout(abort, this.#operationTimeoutMs);
     timeout.unref();
     try {
-      let principal: IngressPrincipal;
+      let principal: RequestPrincipal;
       try {
         principal = this.#principalBinding.bind(request);
       } catch (error: unknown) {

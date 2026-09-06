@@ -28,7 +28,7 @@ import {
   DevelopmentPrincipalError,
   type DevelopmentPrincipalAdapter,
 } from '../request-context/DevelopmentPrincipalAdapter.js';
-import type { IngressPrincipal } from '../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../request-context/RequestPrincipal.js';
 import {
   parseOptionalContentLength,
   requestHeaderValues,
@@ -36,27 +36,27 @@ import {
 
 export interface DevelopmentBootstrapRequestHandler {
   activateDevelopmentBootstrap(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: ActivateDevelopmentBootstrapRequest,
   ): Promise<DevelopmentBootstrapAttemptStatus>;
   beginDevelopmentBootstrap(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: BeginDevelopmentBootstrapRequest,
   ): Promise<DevelopmentBootstrapAttemptStatus>;
   cancelDevelopmentBootstrap(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: CancelDevelopmentBootstrapRequest,
   ): Promise<DevelopmentBootstrapAttemptStatus>;
   getDevelopmentBootstrap(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: GetDevelopmentBootstrapRequest,
   ): Promise<DevelopmentBootstrapAttemptStatus>;
   putDevelopmentBootstrapGitBundle(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     input: PutDevelopmentBootstrapGitBundleInput,
   ): Promise<DevelopmentBootstrapAttemptStatus>;
   submitDevelopmentBootstrapReport(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: SubmitDevelopmentBootstrapReportRequest,
   ): Promise<DevelopmentBootstrapAttemptStatus>;
 }
@@ -237,7 +237,7 @@ export class DevelopmentBootstrapRoutes {
   ): Promise<void> {
     let requestId = this.#newRequestId();
     try {
-    let principal: IngressPrincipal;
+    let principal: RequestPrincipal;
     try {
       principal = this.#principalAdapter.bind({
         headerValues: requestHeaderValues(request, 'x-claudian-development-actor'),

@@ -47,7 +47,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 const GIT_EXECUTABLE = '/usr/bin/git';
-const PROJECT_ID = 'project-local-milestone';
+const PROJECT_ID = 'project-bootstrap-persistence';
 const HOST_MEMBER_ID = 'member-alice';
 const OTHER_MEMBER_ID = 'member-bob';
 
@@ -117,7 +117,7 @@ function config(
       operationTimeoutMs: 10_000,
       outputMaxBytes: 256 * 1024,
       root: repositoryRoot,
-      storageNodeId: 'local-milestone-node',
+      storageNodeId: 'bootstrap-persistence-node',
     }),
     shutdownTimeoutMs: 5_000,
   });
@@ -137,7 +137,7 @@ async function createBundle(root: string): Promise<BundleFixture> {
   const bundlePath = join(root, 'project.bundle');
   await mkdir(seedPath);
   await git(seedPath, ['init', '--initial-branch=main']);
-  await git(seedPath, ['config', 'user.name', 'Local Milestone']);
+  await git(seedPath, ['config', 'user.name', 'Bootstrap Persistence']);
   await git(seedPath, ['config', 'user.email', 'gate@claudian.local']);
   await writeFile(join(seedPath, 'shared.md'), 'canonical main\n');
   await git(seedPath, ['add', 'shared.md']);
@@ -169,7 +169,7 @@ async function createBundle(root: string): Promise<BundleFixture> {
 
 function manifest(bundle: BundleFixture): DevelopmentBootstrapManifest {
   return {
-    attemptId: 'attempt-local-milestone',
+    attemptId: 'attempt-bootstrap-persistence',
     comparison: {
       mainOid: bundle.mainOid,
       mainRef: COLLAB_MAIN_REF,
@@ -193,7 +193,7 @@ function manifest(bundle: BundleFixture): DevelopmentBootstrapManifest {
       }],
       projectCreatedAt: '2026-08-22T00:00:00.000Z',
       projectId: PROJECT_ID,
-      projectName: 'Local Milestone Project',
+      projectName: 'Bootstrap Persistence Project',
       sourceCaFingerprint: 'd'.repeat(64),
       sourceEventSequence: 0,
       sourceHostMemberId: HOST_MEMBER_ID,
@@ -259,7 +259,7 @@ function report(
         attemptId: source.attemptId,
         autoStartDisabled: true,
         fenceDurable: true,
-        fenceId: 'local-milestone-fence',
+        fenceId: 'bootstrap-persistence-fence',
         hostStopped: true,
         manifestSha256,
         projectId: PROJECT_ID,
@@ -350,11 +350,13 @@ async function snapshot(baseUrl: string, actor: string) {
 }
 
 async function runClientGate(worktree: string, descriptorPath: string): Promise<void> {
+  const clientTest = process.env.CLAUDIAN_CLOUD_CLIENT_TEST_FILE;
+  assert.ok(clientTest, 'CLAUDIAN_CLOUD_CLIENT_TEST_FILE is required with CLAUDIAN_CLOUD_CLIENT_WORKTREE');
   try {
     await execFileAsync(process.execPath, [
       join(worktree, 'scripts/run-jest.js'),
       '--runInBand',
-      'tests/integration/app/collab/gates/CloudLocalMilestoneGate.test.ts',
+      clientTest,
     ], {
       cwd: worktree,
       encoding: 'utf8',
@@ -363,11 +365,11 @@ async function runClientGate(worktree: string, descriptorPath: string): Promise<
       timeout: 120_000,
     });
   } catch {
-    throw new Error('Claudian localhost milestone client gate failed');
+    throw new Error('Claudian client interoperability test failed');
   }
 }
 
-describe('localhost milestone server gate', { concurrency: false }, () => {
+describe('development bootstrap persistence', { concurrency: false }, () => {
   let database: PostgresTestDatabase;
   let root: string;
   let repositoryRoot: string;
@@ -376,7 +378,7 @@ describe('localhost milestone server gate', { concurrency: false }, () => {
   before(async () => {
     database = await acquirePostgresTestDatabase();
     await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
-    root = await mkdtemp(join(tmpdir(), 'claudian-local-milestone-'));
+    root = await mkdtemp(join(tmpdir(), 'claudian-bootstrap-persistence-'));
     repositoryRoot = join(root, 'repositories');
     stagingRoot = join(root, 'staging');
     await mkdir(repositoryRoot, { mode: 0o700 });
@@ -391,7 +393,7 @@ describe('localhost milestone server gate', { concurrency: false }, () => {
     await rm(root, { force: true, recursive: true });
   });
 
-  it('persists an activated Project across a real two-client Claudian milestone', {
+  it('persists an activated Project across restart for both admitted Members', {
     timeout: 150_000,
   }, async () => {
     const applicationConfig = config(database, repositoryRoot, stagingRoot);

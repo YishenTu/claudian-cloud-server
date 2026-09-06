@@ -1,26 +1,8 @@
 # Server transports
 
-## Boundary
-
-- Transport adapters operate only after the deployment-owned trusted ingress. They bind an accepted `IngressPrincipal`, decode the canonical Cloud protocol, dispatch to owning application modules, stream responses, and map only safe errors.
-- This repository does not authenticate callers or validate presented caller credentials. Do not add login, token parsing, credential lookup, refresh, revocation, or identity-provider behavior here.
-- Fail closed when the trusted principal is absent, malformed, or presented through an unsupported backend path. Client bodies, query parameters, Git fields, and headers outside the admitted ingress channel cannot populate or override ingress identity.
-- In the self-hosted production profile, the loopback listener may consume one bounded PROXY protocol v2 frame from the operator-owned TCP ingress and admit only its exact allowlisted source, then bind the operator-established identity header separately for each request. Raw HTTP, headers without an admitted channel, unlisted sources, malformed frames, and a second frame never establish identity; public health and capability routes remain principal-free.
-- Server code never issues SQL, resolves repository paths, or invokes raw Git.
-
-## Surface ownership
-
-- `control/` implements the shared operation registry without a duplicate dispatch catalog.
-- JSON error transport preserves canonical negative settlement only from the authority-owned `ProjectMutationRejection`; status, error codes, diagnostic context and request bodies never establish proof.
-- Cloud Project membership control dispatches creation, invitations, Join, imported-claim administration, member listing, Manager responsibility, Removal, and Leave only to their owning authorities. It does not inspect claim digests, offer state, membership role, principal binding, lifecycle phase, or expected-generation policy.
-- `git/` owns Smart HTTP streaming, disconnect detection, response settlement, and child cancellation handoff; receive-pack still enters Project mutation admission and the repository authority.
-- `events/` streams durable Project invalidations. Process-local notification is only a wake-up mechanism, never event authority.
-- `transfer/` owns bounded authority-transfer artifact streaming after trusted ingress. Rejected incomplete uploads close their connection, and every acquired or late-arriving download stream is deterministically destroyed when transport cannot consume it. This scope never interprets checkpoint contents, derives lifecycle phase, or invents digest headers outside the package binding.
-- `health/` distinguishes liveness, readiness, and version without exposing secrets, storage paths, Project existence, or recovery details.
-- The server consumes package-owned wire v9 and Cloud binding v5 only from exact `@claudian-collab/protocol@4.2.0`. It never registers previous bindings in parallel, creates a compatibility shim/registry, or reinterprets old input as current input.
-- A v5 capability is advertised only after its complete transport-to-owner path and server gate pass. The exact package pin alone advertises nothing; partial JSON or streaming work remains absent.
-- LAN-source-only proposal and Host-acceptance operations remain on the dedicated LAN binding. The Cloud v5 router must not register them or infer a source direction through fallback mutation attempts.
-
-## Lifecycle tests
-
-- Cover malformed input, slow and disconnected clients, response backpressure, admission closure, reconnect, and forced shutdown. Every admitted stream must have one explicit cancellation and settlement owner.
+- All Project JSON, Git, event, lifecycle, and artifact requests enter through the same request-context binding. Health and capability discovery remain principal-free and must not expose Project existence or recovery details.
+- Decode and dispatch the canonical protocol through its package-owned registry. Do not register LAN-source-only proposal or Host-acceptance operations on the Cloud binding, or probe multiple mutation owners to infer transfer direction.
+- Server code never issues SQL, resolves repository storage paths, invokes raw Git, or interprets lifecycle journals. Authority-transfer dispatch and Project authorization remain behind their owners.
+- Preserve negative-settlement evidence only from the authority-owned `ProjectMutationRejection`. HTTP status, error codes, diagnostics, or request contents cannot prove that an ambiguous mutation had no effect.
+- Durable Project events are the source of invalidation history; process-local notifications only wake readers.
+- Stream cancellation includes rejected uploads and download streams that arrive after cancellation. Close incomplete rejected uploads and destroy every stream the transport cannot consume; preserve bounded streaming and package-owned artifact headers.

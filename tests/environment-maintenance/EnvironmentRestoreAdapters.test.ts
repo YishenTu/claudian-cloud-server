@@ -567,7 +567,7 @@ describe('production environment restore adapters', () => {
     );
   });
 
-  it('reopens and verifies the canonical O1 publication before exposing it', async () => {
+  it('reopens and verifies the canonical backup publication before exposing it', async () => {
     const { exactManifest, events, source } = publishedSource();
     const exactProject = project(exactManifest.manifestSha256);
     const verified = await source.verifyProjectBackup({

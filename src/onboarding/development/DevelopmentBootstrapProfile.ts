@@ -28,8 +28,8 @@ import type {
   PersistencePutResult,
 } from '../../coordination/DevelopmentBootstrapPersistence.js';
 import type { ProjectRecord } from '../../coordination/ProjectPersistence.js';
-import type { IngressPrincipal } from '../../request-context/IngressPrincipal.js';
-import { createDevelopmentIngressPrincipal } from '../../request-context/IngressPrincipal.js';
+import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
+import { createDevelopmentPrincipal } from '../../request-context/RequestPrincipal.js';
 import {
   DevelopmentBootstrapUploadGateError,
   type DevelopmentBootstrapUploadGate,
@@ -217,7 +217,7 @@ export class DevelopmentBootstrapProfile {
   }
 
   async beginDevelopmentBootstrap(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: BeginDevelopmentBootstrapRequest,
   ): Promise<DevelopmentBootstrapAttemptStatus> {
     const manifest = decodeDevelopmentBootstrapManifest(request.manifest);
@@ -265,7 +265,7 @@ export class DevelopmentBootstrapProfile {
   }
 
   async submitDevelopmentBootstrapReport(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: SubmitDevelopmentBootstrapReportRequest,
   ): Promise<DevelopmentBootstrapAttemptStatus> {
     const report = decodeDevelopmentBootstrapReport(request.report);
@@ -322,7 +322,7 @@ export class DevelopmentBootstrapProfile {
   }
 
   async getDevelopmentBootstrap(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: GetDevelopmentBootstrapRequest,
   ): Promise<DevelopmentBootstrapAttemptStatus> {
     const loaded = await this.#load(request.attemptId);
@@ -331,7 +331,7 @@ export class DevelopmentBootstrapProfile {
   }
 
   async putDevelopmentBootstrapGitBundle(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     input: PutDevelopmentBootstrapGitBundleInput,
   ): Promise<DevelopmentBootstrapAttemptStatus> {
     const projectId = await this.#locate(input.attemptId);
@@ -457,7 +457,7 @@ export class DevelopmentBootstrapProfile {
   }
 
   async activateDevelopmentBootstrap(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: ActivateDevelopmentBootstrapRequest,
   ): Promise<DevelopmentBootstrapAttemptStatus> {
     const loaded = await this.#load(request.attemptId);
@@ -488,7 +488,7 @@ export class DevelopmentBootstrapProfile {
   }
 
   async cancelDevelopmentBootstrap(
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     request: CancelDevelopmentBootstrapRequest,
   ): Promise<DevelopmentBootstrapAttemptStatus> {
     const loaded = await this.#load(request.attemptId);
@@ -555,7 +555,7 @@ export class DevelopmentBootstrapProfile {
 
   #authorize(
     loaded: LoadedAttempt,
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
     hostOnly: boolean,
   ): void {
     const accepted = loaded.manifest.comparison.members.some(
@@ -574,7 +574,7 @@ export class DevelopmentBootstrapProfile {
   #validateReport(
     loaded: LoadedAttempt,
     report: DevelopmentBootstrapReport,
-    principal: IngressPrincipal,
+    principal: RequestPrincipal,
   ): void {
     if (
       report.attemptId !== loaded.record.attemptId
@@ -625,7 +625,7 @@ export class DevelopmentBootstrapProfile {
       this.#validateReport(
         loaded,
         report,
-        createDevelopmentIngressPrincipal(stored.reporterMemberId),
+        createDevelopmentPrincipal(stored.reporterMemberId),
       );
       if (sha256(canonicalReportJson(report)) !== stored.reportSha256) {
         fail('dependency-failed');

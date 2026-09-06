@@ -1,13 +1,7 @@
 # Composition
 
-- This scope owns construction, startup, readiness publication, admission closure, drain, and reverse-order disposal. It contains no Project, authorization, idempotency, recovery, or quota policy.
-- Wire concrete implementations in one explicit composition root. Do not add a service locator, hidden singleton, module-level mutable registry, or import cycle to simplify assembly.
-- Keep resource ownership visible: the owner that creates a server, pool, scheduler, subscription hub, or process supervisor must also close it.
-- Startup validates runtime safety constraints before accepting traffic. Shutdown stops new admission before closing dependencies used by admitted work.
-- Readiness remains closed until nonterminal recovery settles and every cataloged active repository passes exact Project-scoped Git integrity verification.
-- Authority-transfer and retirement capabilities enter the route list as one complete lifecycle runtime. Composition never advertises either capability for a partial control, artifact, recovery, expiry, or close path.
-- A lifecycle runtime reconciles recovery and due terminal responders before readiness, starts periodic expiry only after successful HTTP admission and the readiness transition, and closes expiry and recovery admission before its declared owner disposal order. Every close stage is bounded by the shared shutdown budget so one hung owner cannot prevent later owners from receiving close.
-- Cloud membership expiry reconciliation enters each active Project through its canonical lease, runs once before readiness, starts periodic cleanup only after readiness, and drains before coordination closes. Immutable timestamps in the transaction remain the semantic authority.
-- Environment restore policy lives under `src/environment-maintenance/`. Composition may construct its coordinator, invoke startup recovery and readiness, and close it, but it must not interpret restore phases or register restore with Project recovery.
-- The compiled Project lifecycle recovery maintenance entry may construct the complete existing recovery dispatcher for an offline startup gate. It does not advertise online lifecycle capabilities or move recovery policy into composition.
-- Composition tests verify construction failure cleanup, startup ordering, readiness transitions, bounded shutdown, and repeated close behavior.
+- Resource construction and disposal belong to the same visible owner. Startup failure and shutdown must reach every constructed owner; one hung close must not consume an unbounded budget or prevent later owners from receiving close.
+- Complete locally actionable recovery and verify the database/volume pair, retained key references, and active repositories before readiness. A transfer waiting for external proof may remain fenced in its recovery catalog; it must not be treated as completed or reopened.
+- Advertise a lifecycle capability only when its control, streaming, recovery, expiry, and shutdown dependencies are all composed. An offline recovery command does not imply online capability support.
+- Run initial reconciliation before readiness. Start periodic work only after successful HTTP admission and readiness, and close its admission before disposing the storage it uses. Transaction timestamps, not timer execution, determine semantic expiry.
+- Environment restore and Project recovery have separate policy owners. Composition may invoke them but cannot interpret their phases or register environment restore as Project recovery.

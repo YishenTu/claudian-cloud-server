@@ -1,0 +1,11 @@
+# Releases
+
+Push a new version tag such as `v0.1.0` or `v0.1.0-rc.1` on the reviewed commit. The tag-triggered Release workflow runs the full CI workflow, creates or resumes a draft release, and builds the shared Dockerfile for `linux/amd64` and `linux/arm64`.
+
+The workflow publishes the versioned GHCR image, attaches the installation archive and SHA-256 checksum, and verifies an anonymous pull of the exact image digest. Only then does it publish the GitHub Release. Tags with a prerelease suffix produce prereleases and are excluded from the README's latest stable download URL. A failed build, upload, or anonymous pull leaves the release unpublished; rerun the failed workflow after resolving the cause. Published versions are not overwritten.
+
+For the first image publication, set the GHCR package visibility to **Public** in its package settings and rerun the anonymous-access gate if needed. The workflow's registry login does not prove users can pull without credentials. See [GitHub's Container registry documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
+
+The archive contains the shared Compose deployment, configuration initializer, README, runtime example, and `release.env` with the image digest. Installation requires no source checkout, Node.js installation, npm, or local build. Release notes must state storage compatibility: an existing installation must match the candidate's exact schema or use a separately verified clean restore. Image replacement is not a schema upgrade.
+
+The README covers fresh installation and configuration. `deploy/deploy.sh` is the recovery-fenced update path for operators using a source checkout. GitHub CLI's [draft release controls](https://cli.github.com/manual/gh_release_create) keep installation assets out of public release discovery until publication.

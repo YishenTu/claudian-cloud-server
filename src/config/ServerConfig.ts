@@ -1,5 +1,4 @@
 import { isAbsolute, normalize, parse } from 'node:path';
-import { isIP, SocketAddress } from 'node:net';
 
 import { COLLAB_CLOUD_BINDING_LIMITS } from '@claudian-collab/protocol';
 
@@ -68,14 +67,7 @@ export interface RepositoryConfig {
   readonly storageNodeId: string;
 }
 
-export interface TrustedIngressConfig {
-  readonly mode: 'proxy-v2';
-  readonly preambleTimeoutMs: number;
-  readonly allowedSources: readonly string[];
-  readonly providerId: string;
-}
-
-export type PrincipalProfile = 'private-development' | 'trusted-ingress';
+export type PrincipalProfile = 'private-development' | 'vault-credential';
 
 export interface ServerConfig {
   readonly developmentBootstrap: DevelopmentBootstrapConfig;
@@ -86,20 +78,11 @@ export interface ServerConfig {
   readonly principalProfile: PrincipalProfile;
   readonly repository: RepositoryConfig;
   readonly shutdownTimeoutMs: number;
-  readonly trustedIngress?: TrustedIngressConfig;
 }
 
 const SHUTDOWN_TIMEOUT_MS = 15_000;
 const STORAGE_NODE_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
-const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const PRINCIPAL_PROFILE_FIELD = 'CLAUDIAN_CLOUD_PRINCIPAL_PROFILE';
-const PROXY_V2_PREAMBLE_TIMEOUT_MS = 5_000;
-const TRUSTED_INGRESS_MODE_FIELD = 'CLAUDIAN_CLOUD_TRUSTED_INGRESS_MODE';
-const TRUSTED_INGRESS_PROVIDER_FIELD =
-  'CLAUDIAN_CLOUD_TRUSTED_INGRESS_PROVIDER_ID';
-const TRUSTED_INGRESS_SOURCES_FIELD =
-  'CLAUDIAN_CLOUD_TRUSTED_INGRESS_SOURCES';
-
 const CONFIG_FIELDS = new Set([
   'CLAUDIAN_CLOUD_BIND_HOST',
   'CLAUDIAN_CLOUD_BOOTSTRAP_ATTEMPT_TTL_MS',
@@ -136,74 +119,7 @@ const CONFIG_FIELDS = new Set([
   'CLAUDIAN_CLOUD_REPOSITORY_ROOT',
   'CLAUDIAN_CLOUD_STAGING_ROOT',
   'CLAUDIAN_CLOUD_STORAGE_NODE_ID',
-  TRUSTED_INGRESS_MODE_FIELD,
-  TRUSTED_INGRESS_PROVIDER_FIELD,
-  TRUSTED_INGRESS_SOURCES_FIELD,
 ]);
-
-function canonicalIpAddress(value: string): string | undefined {
-  const family = isIP(value);
-  if (family === 0) return undefined;
-  try {
-    return new SocketAddress({
-      address: value,
-      family: family === 4 ? 'ipv4' : 'ipv6',
-      port: 0,
-    }).address;
-  } catch {
-    return undefined;
-  }
-}
-
-function decodeTrustedIngress(
-  source: ConfigSource,
-  profile: PrincipalProfile,
-): TrustedIngressConfig | undefined {
-  const selected = [
-    TRUSTED_INGRESS_MODE_FIELD,
-    TRUSTED_INGRESS_PROVIDER_FIELD,
-    TRUSTED_INGRESS_SOURCES_FIELD,
-  ].some(field => source[field] !== undefined);
-  if (profile === 'private-development') {
-    if (selected) throw new ConfigError('profile-conflict', PRINCIPAL_PROFILE_FIELD);
-    return undefined;
-  }
-  if (!selected) throw new ConfigError('missing-field', TRUSTED_INGRESS_MODE_FIELD);
-  const mode = requireConfigValue(source, TRUSTED_INGRESS_MODE_FIELD);
-  if (mode !== 'proxy-v2') {
-    throw new ConfigError('profile-conflict', TRUSTED_INGRESS_MODE_FIELD);
-  }
-  const providerId = requireConfigValue(source, TRUSTED_INGRESS_PROVIDER_FIELD);
-  if (!OPAQUE_ID_PATTERN.test(providerId)) {
-    throw new ConfigError('invalid-field', TRUSTED_INGRESS_PROVIDER_FIELD);
-  }
-  const encoded = requireConfigValue(source, TRUSTED_INGRESS_SOURCES_FIELD);
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(encoded) as unknown;
-  } catch {
-    throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCES_FIELD);
-  }
-  if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 256) {
-    throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCES_FIELD);
-  }
-  const allowedSources: string[] = [];
-  for (const value of parsed) {
-    if (typeof value !== 'string' || canonicalIpAddress(value) !== value) {
-      throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCES_FIELD);
-    }
-    allowedSources.push(value);
-  }
-  if (new Set(allowedSources).size !== allowedSources.length) {
-    throw new ConfigError('invalid-field', TRUSTED_INGRESS_SOURCES_FIELD);
-  }
-  return Object.freeze({
-    mode: 'proxy-v2' as const,
-    preambleTimeoutMs: PROXY_V2_PREAMBLE_TIMEOUT_MS,
-    allowedSources: Object.freeze(allowedSources),
-    providerId,
-  });
-}
 
 function parseInteger(
   source: ConfigSource,
@@ -254,11 +170,10 @@ function invalidWhen(condition: boolean, field: string): void {
 export function decodeServerConfig(source: ConfigSource): ServerConfig {
   rejectUnknownConfigFields(source, CONFIG_FIELDS);
   const profileValue = requireConfigValue(source, PRINCIPAL_PROFILE_FIELD);
-  if (profileValue !== 'private-development' && profileValue !== 'trusted-ingress') {
+  if (profileValue !== 'private-development' && profileValue !== 'vault-credential') {
     throw new ConfigError('invalid-field', PRINCIPAL_PROFILE_FIELD);
   }
   const principalProfile: PrincipalProfile = profileValue;
-  const trustedIngress = decodeTrustedIngress(source, principalProfile);
 
   const host = requireConfigValue(source, 'CLAUDIAN_CLOUD_BIND_HOST');
   if (host !== '127.0.0.1') {
@@ -575,6 +490,5 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
     principalProfile,
     repository,
     shutdownTimeoutMs: SHUTDOWN_TIMEOUT_MS,
-    ...(trustedIngress === undefined ? {} : { trustedIngress }),
   });
 }

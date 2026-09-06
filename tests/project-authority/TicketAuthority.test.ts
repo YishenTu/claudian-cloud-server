@@ -24,7 +24,7 @@ import {
   ProjectTicketAuthority,
   type ProjectTicketAuthorityCoordination,
 } from '../../src/project-authority/tickets/ProjectTicketAuthority.js';
-import { createDevelopmentIngressPrincipal } from '../../src/request-context/IngressPrincipal.js';
+import { createDevelopmentPrincipal } from '../../src/request-context/RequestPrincipal.js';
 import { createRepositoryPlacementLease } from '../../src/repositories/RepositoryPlacement.js';
 
 const CREATED = '2026-08-23T00:00:00.000Z';
@@ -404,7 +404,7 @@ describe('Project Ticket authority', () => {
     });
     try {
       const response = await authority.createTicket(
-        createDevelopmentIngressPrincipal('actor-a'),
+        createDevelopmentPrincipal('actor-a'),
         {
           body: '\r\nHello @Member B\r\n\r\n',
           idempotencyKey: 'ticket-idempotency-a',
@@ -453,7 +453,7 @@ describe('Project Ticket authority', () => {
       coordination,
       recovery: { recoverProject: () => Promise.resolve() },
     });
-    const principal = createDevelopmentIngressPrincipal('actor-a');
+    const principal = createDevelopmentPrincipal('actor-a');
     try {
       const first = await authority.listTickets(principal, {
         limit: 1,
@@ -508,7 +508,7 @@ describe('Project Ticket authority', () => {
     });
     try {
       const response = await authority.updateTicketContent(
-        createDevelopmentIngressPrincipal('actor-b'),
+        createDevelopmentPrincipal('actor-b'),
         {
           body: '\nUpdated for @Member A\n',
           expectedRevision: 1,
@@ -545,7 +545,7 @@ describe('Project Ticket authority', () => {
       projectId: 'project-a',
       ticketId: 'ticket-a',
     };
-    const principal = createDevelopmentIngressPrincipal('actor-a');
+    const principal = createDevelopmentPrincipal('actor-a');
     try {
       const created = await authority.createTicketComment(principal, input);
       const replayed = await authority.createTicketComment(principal, input);
@@ -572,7 +572,7 @@ describe('Project Ticket authority', () => {
     });
     try {
       const closed = await authority.closeTicket(
-        createDevelopmentIngressPrincipal('actor-a'),
+        createDevelopmentPrincipal('actor-a'),
         {
           expectedRevision: 1,
           idempotencyKey: 'close-ticket-a',
@@ -586,7 +586,7 @@ describe('Project Ticket authority', () => {
       coordination.state.pendingResolve = true;
       await assert.rejects(
         authority.reopenTicket(
-          createDevelopmentIngressPrincipal('actor-b'),
+          createDevelopmentPrincipal('actor-b'),
           {
             expectedRevision: 2,
             idempotencyKey: 'reopen-ticket-a',
@@ -598,7 +598,7 @@ describe('Project Ticket authority', () => {
       );
       coordination.state.pendingResolve = false;
       const reopened = await authority.reopenTicket(
-        createDevelopmentIngressPrincipal('actor-b'),
+        createDevelopmentPrincipal('actor-b'),
         {
           expectedRevision: 2,
           idempotencyKey: 'reopen-ticket-a',
@@ -623,7 +623,7 @@ describe('Project Ticket authority', () => {
     try {
       await assert.rejects(
         authority.updateTicketContent(
-          createDevelopmentIngressPrincipal('actor-a'),
+          createDevelopmentPrincipal('actor-a'),
           {
             body: 'Changed body',
             expectedRevision: 1,
@@ -651,7 +651,7 @@ describe('Project Ticket authority', () => {
       now: () => new Date(CREATED),
       recovery: { recoverProject: () => Promise.resolve() },
     });
-    const principal = createDevelopmentIngressPrincipal('actor-a');
+    const principal = createDevelopmentPrincipal('actor-a');
     const input = {
       body: 'Ticket body',
       idempotencyKey: 'ticket-idempotency-a',

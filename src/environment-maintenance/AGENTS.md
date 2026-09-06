@@ -1,23 +1,10 @@
 # Environment maintenance
 
-## Ownership
-
-- This scope owns environment-wide offline lifecycle policy that cannot be authorized or recovered as one Project operation. It currently owns clean restore and the compiled maintenance command boundary.
-- Project backup/export coordinators, Project deletion authorization, PostgreSQL mechanics, repository paths/Git execution, configuration decoding, composition, and deployment sequencing remain behind their owning ports.
-- Operator commands adapt validated input to owning application services. They never create Project authorization, infer deletion intent, interpret Project journals, or become a second lifecycle registry.
-- Export delivery expiry is operator-scheduled through the bounded `reconcile-exports` one-shot command. The command re-enters each due Project through the existing export settlement owner and never treats the filesystem marker as Project authority.
-
-## Restore contract
-
-- Clean restore accepts only an empty PostgreSQL environment and empty authority volume while ordinary runtime admission is closed.
-- One private startup-readable environment journal owns `validated`, `database-created`, `coordination-imported`, `repositories-staged`, `pair-prepared`, `repositories-published`, `authority-published`, `verified`, and `completed`.
-- Before `authority-published`, recovery may remove only exact restore-owned state. At or after publication, recovery is forward-only and readiness remains closed until the same journal verifies every Project and terminal responder.
-- The journal is paired with the authority-volume marker and database authority identity. It never enters the Project recovery catalog or infers environment state from a partial database or directory.
-- Restore validates the entire backup catalog, every retained claim-custody key reference, and every live protected transfer-claim, invitation, and claim-override envelope before creating target state. Private keys come only from the deployment-owned keyring mount and never enter the backup.
-- An environment backup contains active Project checkpoints plus a separate canonical continuity artifact for each terminal-only Project. Verification and restore preserve both sets without synthesizing active Project state or repository placement, and operator-reported Project counts include both sets. Backup and restore dependencies provide the complete terminal-continuity contract; an active-only environment returns an empty terminal list rather than omitting those capabilities.
-- Before enumerating active or terminal Projects, environment backup strictly drains the canonical lifecycle recovery catalog. A candidate still waiting for external proof, an unsupported recovery kind, or any recovery failure aborts the whole backup; enumeration never silently omits a post-relinquishment Project that has not yet activated its placement.
-- Backup, authority verification, and restore accept only the current coordination schema. Backup and authority verification enumerate active and terminal Projects through ordinary runtime credentials; only clean restore receives the migration credential needed to create an empty current-schema target.
-
-## Verification
-
-- Use multi-Project real PostgreSQL/Git fault injection after every phase, including database/volume marker ambiguity, exact pre-publication cleanup, forward-only post-publication recovery, representative domain reads, exact refs/OIDs, and terminal claim redemption after restore.
+- Maintenance commands adapt operator input to existing owners. They cannot create Project authorization, infer deletion intent, or become a second Project lifecycle dispatcher.
+- Environment backup drains canonical lifecycle recovery before enumerating active and terminal Projects. External-proof waiting, unknown recovery, or dependency failure aborts the backup; an incomplete lifecycle must not silently remove a Project from its inventory.
+- Capture and restore both active Project checkpoints and terminal-only continuity. Terminal claims and replay records cannot be reconstructed by inventing an active Project or placement. A published catalog is not a verified backup until isolated restore, repository integrity, and representative continuity reads pass.
+- Clean restore starts with empty PostgreSQL and authority storage while ordinary admission is closed. One private environment journal is paired with database/volume identities; neither partial storage nor the Project recovery catalog can substitute for it.
+- Before `authority-published`, recovery may remove only exact restore-owned state. At or after publication, recover forward and keep readiness closed until the same journal verifies every active and terminal Project.
+- Validate the complete catalog, retained key references, and live protected envelopes before creating target state. Key material comes from the separately mounted deployment keyring and never enters a backup.
+- Runtime credentials enumerate and capture active/terminal Project state. Schema-creating restore work receives the separate migration credential; ordinary backup and authority verification do not.
+- Export expiry re-enters each due Project through its export settlement owner. Filesystem delivery markers never grant cleanup authority or replace the journal.

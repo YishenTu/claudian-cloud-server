@@ -14,7 +14,7 @@ import {
   ProjectReadAuthority,
   ProjectReadAuthorityError,
 } from '../../../src/project-authority/reads/ProjectReadAuthority.js';
-import { createDevelopmentIngressPrincipal } from '../../../src/request-context/IngressPrincipal.js';
+import { createDevelopmentPrincipal } from '../../../src/request-context/RequestPrincipal.js';
 import { ResourceAdmission } from '../../../src/resource-admission/ResourceAdmission.js';
 import { GitRepositoryAuthority } from '../../../src/repositories/GitRepositoryAuthority.js';
 import {
@@ -162,7 +162,7 @@ describe('Project read authority integration', () => {
         await seed.query('COMMIT');
 
         const snapshot = await authority.getProjectSnapshot(
-          createDevelopmentIngressPrincipal('member-a'),
+          createDevelopmentPrincipal('member-a'),
           projectId,
         );
         assert.equal(snapshot.project.expectedMainOid, oid);
@@ -175,7 +175,7 @@ describe('Project read authority integration', () => {
         driftAfterRepositoryVerification = true;
         await assert.rejects(
           authority.getProjectSnapshot(
-            createDevelopmentIngressPrincipal('member-a'),
+            createDevelopmentPrincipal('member-a'),
             projectId,
           ),
           error => error instanceof ProjectReadAuthorityError
@@ -184,7 +184,7 @@ describe('Project read authority integration', () => {
 
         await assert.rejects(
           authority.getProjectSnapshot(
-            createDevelopmentIngressPrincipal('outsider'),
+            createDevelopmentPrincipal('outsider'),
             projectId,
           ),
           error => error instanceof ProjectReadAuthorityError
@@ -205,7 +205,7 @@ describe('Project read authority integration', () => {
         await seed.query('COMMIT');
         await assert.rejects(
           authority.getProjectSnapshot(
-            createDevelopmentIngressPrincipal('member-a'),
+            createDevelopmentPrincipal('member-a'),
             projectId,
           ),
           error => error instanceof ProjectReadAuthorityError

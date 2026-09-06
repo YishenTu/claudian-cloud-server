@@ -12,7 +12,7 @@ import { LeaveCoordinator } from '../../../src/project-authority/lifecycle/leave
 import { RetireCoordinator } from '../../../src/project-authority/lifecycle/retire/RetireCoordinator.js';
 import { DeletionCoordinator } from '../../../src/project-authority/lifecycle/delete/DeletionCoordinator.js';
 import { TerminalResponderExpiry } from '../../../src/project-authority/lifecycle/retire/TerminalResponderExpiry.js';
-import { createTrustedIngressPrincipal } from '../../../src/request-context/IngressPrincipal.js';
+import { createVaultCredentialPrincipal } from '../../../src/request-context/RequestPrincipal.js';
 import {
   type PostgresTestDatabase,
   withPostgresTestDatabase,
@@ -1229,9 +1229,8 @@ describe('portability lifecycle persistence', () => {
         const results = [];
         for (const actor of actors) {
           results.push(await leave.leave(
-            createTrustedIngressPrincipal({
+            createVaultCredentialPrincipal({
               principalId: actor.principalId,
-              providerId: 'test',
             }),
             {
               expectedManagerSetGeneration: 1,

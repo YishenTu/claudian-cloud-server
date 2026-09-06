@@ -26,8 +26,8 @@ import {
   ProjectRecoveryCoordinator,
 } from '../../src/project-authority/recovery/ProjectRecoveryCoordinator.js';
 import {
-  createDevelopmentIngressPrincipal,
-} from '../../src/request-context/IngressPrincipal.js';
+  createDevelopmentPrincipal,
+} from '../../src/request-context/RequestPrincipal.js';
 
 const CREATED_AT = '2026-08-25T00:00:00.000Z';
 
@@ -803,7 +803,7 @@ describe('ProjectLifecycleRecoveryDispatcher', () => {
     const admission = new ProjectWriteAdmission({ coordination, recovery });
 
     await assert.rejects(admission.run(
-      createDevelopmentIngressPrincipal('former-member'),
+      createDevelopmentPrincipal('former-member'),
       'project-a',
       () => Promise.reject(new Error('unexpected-write')),
     ), error => {

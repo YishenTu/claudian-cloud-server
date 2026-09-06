@@ -1,22 +1,19 @@
 # Verification
 
-## Test ownership
+## Evidence boundaries
 
-- `contract/` proves the one shared Cloud protocol registry, codecs, compatibility behavior, safe errors, and trusted-principal binding.
-- `integration/postgres/` uses real PostgreSQL for current-schema initialization, grants, RLS, advisory locks, pool budgets, idempotency, events, and concurrency.
-- `integration/git/` uses real Git and bare repositories for Smart HTTP, refs, placement generations, path containment, quotas, sandboxing, and process lifecycle.
-- `fault-injection/` kills work after every documented durable phase and proves exact completion, idempotent replay, permitted staging cleanup, or `recovery-required` isolation.
-- `capacity/` exercises the staged workloads and provisional limits in `ARCHITECTURE.md`; results revise configuration and do not silently become product commitments.
-- Steps 5–8 advance through `G5`, `G6R`, `G6W`, `G7`, `G8A`, and `GI`. A changed contract, durable phase, owner, or advertised capability reopens its gate and every dependent gate.
-- Step 11 fault injection covers both authority-transfer directions, Leave settlement, Retire/deletion, backup, and environment restore after every documented durable phase. Recovery must finish the exact operation, return its idempotent result, clean only phase-permitted owned staging, recover forward after relinquishment/publication, or isolate the correct Project/environment.
-- Claim-custody fault tests lose and reorder batch delivery, acknowledgement, and receipt around target staging. They prove exact committed-revision replay, rotation only after authoritative not-retained proof, atomic invalidation of every older target hash, stale delayed-message rejection, and at most one redeemable batch.
-- Leave fault injection proves a lost response after membership revocation remains recoverable only by the same accepted former principal and exact intent/fingerprint; unrelated principals, changed requests, and all ordinary Project operations remain denied.
+- Consumer contract tests verify compatibility with the exact protocol package. Shared codec/registry tests belong to the protocol repository; do not recreate its contract owner here. Vault credential binding belongs to request-context and real HTTP tests.
+- Use real PostgreSQL for schema initialization, grants, RLS, advisory locks, pool exhaustion, transaction isolation, and process-death lock release. Use real Git/processes for refs, placement, containment, quotas, corruption, stream settlement, cancellation, and child cleanup.
+- Exercise application behavior through its owning interface. Direct SQL/Git inspection is appropriate when the storage or process contract itself is the seam under test.
+- Isolation evidence must include concurrent same-Project exclusion and different-Project progress. Use colliding human-readable labels where relevant; globally unique test IDs alone do not expose missing scope predicates.
+- Capture affected logging/error/process sinks and assert sensitive data is absent. A timeout, disconnected response, or missing file does not establish completed cleanup or settlement.
+- Capacity results describe measured workloads and configured limits, not product guarantees. A service container or controlled child environment is not evidence of per-Project sandbox isolation.
 
-## Evidence rules
+## Recovery evidence
 
-- Do not replace PostgreSQL advisory-lock/RLS behavior or Git ref/process behavior with mocks when the real dependency is what establishes safety.
-- Every multi-Project isolation test uses overlapping display names, Ticket numbers, Member names, and unrelated IDs to expose missing scope predicates.
-- Tests involving logs, errors, process arguments, or metrics assert sensitive data absence.
-- Timeouts, disconnects, restart, and forced process death must prove cleanup and recovery; a missing response or file is never treated as completion.
-- Protected-claim recovery proves backup contains no plaintext/private key, missing or wrong keyring fails before restore publication, and a restored former Member can retrieve and redeem the exact claim, replay the signed receipt, and scrub only its source envelope.
-- Deletion fault injection kills immediately after coordination removal and proves the same surviving journal/candidate resumes under the canonical Project lock, exact former-principal terminal replay and protected claims still work, `resume-delete` requires the original authorized identity/digest, and no ordinary content or admission is recreated.
+- Cross-store and lifecycle changes inject failure after each affected durable phase. Prove exact replay, permitted owned cleanup, forward recovery after the irreversible fence, or isolation at the correct Project/environment scope, including restart by another process.
+- Membership tests preserve invisibility before activation, invitation capacity reservations, single redemption, exact personal-ref CAS, monotonic claim/role revisions, and final-Manager succession. Revoked principals may replay only their exact retained result, never regain ordinary admission.
+- Transfer tests prove one writable generation, target-proof cancellation, exact claim-batch replay, rotation only after authoritative non-retention proof, and no scrubbing from custody acknowledgement. Terminal status/claim access must not authorize target-only activation replay.
+- Deletion tests kill work immediately after coordination-content removal and recover through the surviving journal under the same Project lock. Verify retained terminal claims/replay without recreating ordinary content or admission, and reject maintenance that lacks the original authorized journal identity/digest.
+- Backup/restore tests use multi-Project real stores, including terminal-only Projects, keyring mismatch, database/volume ambiguity, and failure before/after publication. Verify exact refs/OIDs and claim redemption continuity after restore; backups contain neither plaintext claims nor private keys.
+- Deployment changes verify the rendered Compose model and affected privilege/mount boundaries. Image or process-lifecycle changes also exercise real container readiness and bounded SIGTERM shutdown.

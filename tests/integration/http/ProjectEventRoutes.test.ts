@@ -14,7 +14,7 @@ import {
   ProjectReadAuthorityError,
   type ProjectEventReadResult,
 } from '../../../src/project-authority/reads/ProjectReadAuthority.js';
-import type { createDevelopmentIngressPrincipal } from '../../../src/request-context/IngressPrincipal.js';
+import type { createDevelopmentPrincipal } from '../../../src/request-context/RequestPrincipal.js';
 import { DevelopmentPrincipalAdapter } from '../../../src/request-context/DevelopmentPrincipalAdapter.js';
 import { ProjectEventWakeup } from '../../../src/project-authority/reads/ProjectEventWakeup.js';
 import { ProjectEventAdmission } from '../../../src/resource-admission/ProjectEventAdmission.js';
@@ -350,7 +350,7 @@ describe('ProjectEventRoutes', () => {
     });
     const authority = {
       getProjectEvents: (
-        _principal: ReturnType<typeof createDevelopmentIngressPrincipal>,
+        _principal: ReturnType<typeof createDevelopmentPrincipal>,
         projectId: CollabProjectId,
         afterSequence: number,
       ): Promise<ProjectEventReadResult> => {
