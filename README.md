@@ -8,25 +8,11 @@ Persistent Git repositories and collaboration services for Claudian Collab, dist
 
 Requires a Linux amd64 or arm64 host, Docker Engine, the Docker Compose plugin **2.24.0 or newer**, Bash, `curl`, `tar`, `sha256sum`, and a user with `sudo` access. Docker must be running and accessible through `sudo docker`. The loopback ports must be available (defaults: PostgreSQL `5432`, server `8787`).
 
-For a fresh installation, start in an empty directory. For a public release, download the installation files:
+For a fresh installation, start in an empty directory and run these commands in order. Continue only when each command succeeds:
 
 ```bash
 curl -fL https://github.com/YishenTu/claudian-cloud-server/releases/latest/download/claudian-cloud-server.tar.gz -o claudian-cloud-server.tar.gz
 curl -fL https://github.com/YishenTu/claudian-cloud-server/releases/latest/download/claudian-cloud-server.tar.gz.sha256 -o claudian-cloud-server.tar.gz.sha256
-```
-
-For a private release, use [GitHub CLI](https://cli.github.com/) with an account that has read access to the repository. Authenticate once, then download the installation files instead:
-
-```bash
-gh auth login --hostname github.com
-gh release download --repo YishenTu/claudian-cloud-server --pattern 'claudian-cloud-server.tar.gz*'
-```
-
-Private images also require read access to the GHCR package. Before configuring or starting services, run `sudo docker login ghcr.io --username YOUR_GITHUB_USERNAME` and enter a personal access token (classic) with `read:packages` at the password prompt. Using `sudo` stores the login for the same Docker client that runs the installation commands. See [GitHub's Container registry authentication requirements](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-to-the-container-registry).
-
-After downloading either release, run these commands in order. Continue only when each command succeeds:
-
-```bash
 sha256sum --check claudian-cloud-server.tar.gz.sha256
 tar -xzf claudian-cloud-server.tar.gz
 cd claudian-cloud-server
