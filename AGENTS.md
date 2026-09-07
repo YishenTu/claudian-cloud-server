@@ -46,6 +46,8 @@
 - Production behavior changes and bug fixes use TDD: establish a failing executable test before implementation. Documentation and non-behavioral mechanical changes are exempt. If automation is infeasible, record repeatable failing evidence and cover the closest stable interface.
 - Existing owning-module and public interfaces are accepted test seams. Do not add test-only public APIs or replace owned modules with mocks to bypass those boundaries. Mock external dependencies through operation-specific ports.
 - Expected results come from protocol fixtures, specification literals, or worked examples, not a copy of the production algorithm. See `tests/AGENTS.md` for real-dependency and recovery evidence requirements.
+- Do not test statically defined values whose correctness is already established by their source or type declaration. Test the observable behavior that consumes them only when that behavior has meaningful regression risk.
+- When logic is deleted, do not add negative tests that merely prove the removed path no longer exists. Cover only the observable replacement behavior or contract that could realistically regress.
 - Reviews report material findings first, then residual risks or evidence gaps. State when no material finding remains.
 
 ## Instruction maintenance
