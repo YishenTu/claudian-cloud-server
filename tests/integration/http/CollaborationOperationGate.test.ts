@@ -337,7 +337,7 @@ async function pushPersonalCommit(
     '-c',
     `http.extraHeader=X-Claudian-Development-Actor: ${actor}`,
     'push',
-    `${baseUrl}/v5/projects/${PROJECT_ID}/repository.git`,
+    `${baseUrl}/v6/projects/${PROJECT_ID}/repository.git`,
     `HEAD:${personalRef}`,
   ]);
   return oid;
@@ -444,6 +444,61 @@ describe('collaboration operation gate', { concurrency: false }, () => {
         };
       };
       const ticketId = createdTicket.ticket.ticket.id;
+      const secondCreatedTicket = await collaborationOperation(
+        baseUrl,
+        'createTicket',
+        ACTORS[0],
+        { ...ticketCreateInput, projectId: SECOND_PROJECT_ID },
+        'request-second-ticket-create',
+        SECOND_PROJECT_ID,
+      ) as { readonly ticket: { readonly ticket: { readonly id: string } } };
+      const secondTicketId = secondCreatedTicket.ticket.ticket.id;
+      assert.notEqual(secondTicketId, ticketId);
+      const resolveNumber = (
+        projectId: string,
+        ticketNumber: number,
+        actor: string = ACTORS[1],
+        bodyProjectId = projectId,
+      ): Promise<Response> => fetch(
+        `${baseUrl}/v6/projects/${projectId}/operations/resolveTicketNumber`,
+        {
+          body: JSON.stringify(envelope({
+            projectId: bodyProjectId,
+            ticketNumber,
+          }, 'request-ticket-number')),
+          headers: {
+            'content-type': 'application/json',
+            'x-claudian-development-actor': actor,
+          },
+          method: 'POST',
+        },
+      );
+      for (const [projectId, expectedId] of [
+        [PROJECT_ID, ticketId],
+        [SECOND_PROJECT_ID, secondTicketId],
+      ] as const) {
+        const resolved = await resolveNumber(projectId, 1);
+        assert.equal(resolved.status, 200, 'The ticket-number operation must be registered');
+        assert.deepEqual(decodeCollabCloudSuccessEnvelope(await resolved.json()).data, {
+          ticketId: expectedId,
+        });
+        const missing = await resolveNumber(projectId, 2);
+        assert.equal(missing.status, 200);
+        assert.deepEqual(decodeCollabCloudSuccessEnvelope(await missing.json()).data, {
+          ticketId: null,
+        });
+      }
+      const outsider = await resolveNumber(PROJECT_ID, 1, 'member-outsider');
+      assert.equal(outsider.status, 403);
+      assert.equal(decodeCollabCloudErrorEnvelope(await outsider.json()).error.code, 'authorization-denied');
+      const mismatch = await resolveNumber(PROJECT_ID, 1, ACTORS[1], SECOND_PROJECT_ID);
+      assert.equal(mismatch.status, 400);
+      assert.equal(decodeCollabCloudErrorEnvelope(await mismatch.json()).error.code, 'protocol-payload-invalid');
+      for (const ticketNumber of [0, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+        const invalid = await resolveNumber(PROJECT_ID, ticketNumber);
+        assert.equal(invalid.status, 400);
+        assert.equal(decodeCollabCloudErrorEnvelope(await invalid.json()).error.code, 'protocol-payload-invalid');
+      }
       const replayedTicket = await collaborationOperation(
         baseUrl,
         'createTicket',
@@ -628,6 +683,11 @@ describe('collaboration operation gate', { concurrency: false }, () => {
         'request-ticket-close',
       ) as { readonly ticket: { readonly revision: number; readonly status: string } };
       assert.equal(closedTicket.ticket.status, 'closed');
+      const resolvedClosedTicket = await resolveNumber(PROJECT_ID, 1);
+      assert.equal(resolvedClosedTicket.status, 200);
+      assert.deepEqual(decodeCollabCloudSuccessEnvelope(await resolvedClosedTicket.json()).data, {
+        ticketId,
+      });
       const reopenedTicket = await collaborationOperation(
         baseUrl,
         'reopenTicket',

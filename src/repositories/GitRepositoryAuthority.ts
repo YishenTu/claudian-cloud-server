@@ -733,6 +733,14 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
     placement: RepositoryPlacementLease,
     options: VerifyRepositoryIntegrityOptions = {},
   ): Promise<RepositoryIntegrityResult> {
+    return this.#verifyRepositoryIntegrity(placement, options, true);
+  }
+
+  async #verifyRepositoryIntegrity(
+    placement: RepositoryPlacementLease,
+    options: VerifyRepositoryIntegrityOptions,
+    verifyObjects: boolean,
+  ): Promise<RepositoryIntegrityResult> {
     if (this.#closed) throw new GitRepositoryError('closed');
     let placementSnapshot: RepositoryPlacementLease;
     try {
@@ -799,10 +807,12 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
             assertRequiredRefs(refs, options.requiredRefs);
           }
         }
-        await this.#supervisor.runIntegrityCheck(
-          resolved.repositoryPath,
-          options.signal,
-        );
+        if (verifyObjects) {
+          await this.#supervisor.runIntegrityCheck(
+            resolved.repositoryPath,
+            options.signal,
+          );
+        }
       } catch (error: unknown) {
         if (error instanceof RepositoryPlacementError) {
           throw mapPlacementError(error);
@@ -818,15 +828,26 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
   }
 
   async verifyProjectRead(options: VerifyProjectReadOptions): Promise<void> {
+    await this.#verifyProjectRead(options, true);
+  }
+
+  async verifyProjectEventRead(options: VerifyProjectReadOptions): Promise<void> {
+    await this.#verifyProjectRead(options, false);
+  }
+
+  async #verifyProjectRead(
+    options: VerifyProjectReadOptions,
+    verifyObjects: boolean,
+  ): Promise<void> {
     if (!options.expectedRefs.some(ref => (
       ref.name === COLLAB_MAIN_REF && ref.oid === options.expectedMainOid
     ))) {
       throw new GitRepositoryError('repository-corrupt');
     }
-    await this.verifyIntegrity(options.placement, {
+    await this.#verifyRepositoryIntegrity(options.placement, {
       expectedRefs: options.expectedRefs,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
-    });
+    }, verifyObjects);
   }
 
   inspectRequest(

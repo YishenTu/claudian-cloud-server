@@ -9,10 +9,11 @@ import {
   encodeCollabProjectBackupCheckpointCoordinationNdjson,
   type CollabProjectBackupRecord,
 } from '@claudian-collab/protocol';
-import { Client } from 'pg';
+import { Client, type QueryResultRow } from 'pg';
 
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
 import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
+import { PostgresProjectCheckpointPersistence } from '../../../src/coordination/postgres/PostgresProjectCheckpointPersistence.js';
 import {
   type PostgresTestDatabase,
   withPostgresTestDatabase,
@@ -116,6 +117,74 @@ const metadata = Object.freeze({
 });
 
 describe('Project checkpoint persistence', () => {
+  it('traverses ordered pages and closes SQL cursors after completion and byte-budget rejection', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
+      await seed(database);
+      const writer = new Client({ connectionString: database.migrationUrl });
+      const reader = new Client({ connectionString: database.runtimeUrl });
+      try {
+        await writer.connect();
+        await writer.query('BEGIN');
+        await writer.query("SELECT set_config('claudian_cloud.project_id', $1, true)", [PROJECT_ID]);
+        await writer.query(
+          `INSERT INTO claudian_cloud.change_requests (
+             project_id, request_id, member_id, status, first_base_oid,
+             latest_head_oid, merged_oid, description, revision,
+             created_at, updated_at
+           ) VALUES ($1, 'request-pages', 'member-manager', 'open', $2, $2,
+                     NULL, 'Checkpoint pages', 1, $3, $3)`,
+          [PROJECT_ID, 'a'.repeat(40), CREATED_AT],
+        );
+        await writer.query(
+          `INSERT INTO claudian_cloud.request_comments (
+             project_id, comment_id, request_id, author_member_id, body, created_at
+           ) SELECT $1, 'comment-' || lpad(n::text, 3, '0'), 'request-pages',
+                    'member-manager', 'Comment ' || n::text || repeat('x', 1_000), $2
+               FROM generate_series(299, 0, -1) AS n`,
+          [PROJECT_ID, CREATED_AT],
+        );
+        await writer.query('COMMIT');
+        await reader.connect();
+        await reader.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+        await reader.query("SELECT set_config('claudian_cloud.project_id', $1, true)", [PROJECT_ID]);
+        const persistence = new PostgresProjectCheckpointPersistence(
+          PROJECT_ID,
+          async <Row extends QueryResultRow>(sql: string, values: readonly unknown[]) => (
+            (await reader.query<Row>(sql, [...values])).rows
+          ),
+        );
+        const input = {
+          excludedOperationId: 'export-pages',
+          maximumCoordinationBytes: 1024 * 1024,
+          metadata,
+          profile: 'export' as const,
+          snapshotAt: CREATED_AT,
+        };
+        const records = await persistence.readProjectCheckpointRecords(input);
+        const comments = records.filter(record => record.kind === 'request-comment');
+        assert.deepEqual(comments.map(comment => comment.recordId), Array.from(
+          { length: 300 },
+          (_, index) => `comment-${String(index).padStart(3, '0')}`,
+        ));
+        assert.equal(comments[0]?.value.body, `Comment 0${'x'.repeat(1_000)}`);
+        assert.equal(comments.at(-1)?.value.body, `Comment 299${'x'.repeat(1_000)}`);
+        assert.deepEqual((await reader.query('SELECT name FROM pg_cursors')).rows, []);
+        await assert.rejects(persistence.readProjectCheckpointRecords({
+          ...input,
+          maximumCoordinationBytes: 25 * 1024,
+        }), (error: unknown) => typeof error === 'object' && error !== null
+          && 'code' in error && error.code === 'resource-limit');
+        assert.deepEqual((await reader.query('SELECT name FROM pg_cursors')).rows, []);
+        assert.deepEqual(await persistence.readProjectCheckpointRecords(input), records);
+        await reader.query('COMMIT');
+      } finally {
+        await reader.end();
+        await writer.end();
+      }
+    });
+  });
+
   it('captures completed Removal recovery and exact replay continuity', async () => {
     await withPostgresTestDatabase(async database => {
       await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();

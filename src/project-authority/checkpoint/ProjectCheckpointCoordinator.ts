@@ -1036,10 +1036,6 @@ export class ProjectCheckpointCoordinator {
           coordinationJson,
           expectedProfile,
         ));
-        if (
-          encodeOutboundCoordination(records, expectedProfile)
-            !== coordinationJson
-        ) fail('invalid-checkpoint');
         return records;
       } catch (error: unknown) {
         return mapDependency(error, operationSignal);
@@ -1098,10 +1094,6 @@ export class ProjectCheckpointCoordinator {
           coordinationJson,
           expectedProfile,
         ));
-        if (
-          encodeOutboundCoordination(records, expectedProfile)
-            !== coordinationJson
-        ) fail('invalid-checkpoint');
         return records;
       } catch (error: unknown) {
         return mapDependency(error, operationSignal);

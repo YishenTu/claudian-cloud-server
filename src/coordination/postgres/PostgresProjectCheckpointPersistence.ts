@@ -304,6 +304,7 @@ export class PostgresProjectCheckpointPersistence
 implements ProjectCheckpointPersistence {
   readonly #projectId: string;
   readonly #query: ProjectQuery;
+  #nextCursor = 0;
 
   constructor(projectId: string, query: ProjectQuery) {
     if (!IDENTITY_PATTERN.test(projectId)) invalidRecord();
@@ -2223,24 +2224,35 @@ implements ProjectCheckpointPersistence {
       || rowCount < 0
     ) dependencyFailure();
     if (maximumRowBytes > records.maximumBytes) resourceLimit();
+    if (rowCount === 0) return;
     const pageSize = maximumRowBytes === 0
       ? MAXIMUM_CHECKPOINT_QUERY_PAGE_ROWS
       : Math.max(1, Math.min(
           MAXIMUM_CHECKPOINT_QUERY_PAGE_ROWS,
           Math.floor(records.maximumBytes / maximumRowBytes),
         ));
-    for (let offset = 0; offset < rowCount; offset += pageSize) {
-      const rows = await this.#query<Row>(
-        `${sql}
-        LIMIT $${String(values.length + 1)} OFFSET $${String(values.length + 2)}`,
-        [...values, pageSize, offset],
-      );
-      if (
-        rows.length === 0
-        || rows.length > pageSize
-        || rows.length > rowCount - offset
-      ) dependencyFailure();
-      for (const row of rows) yield row;
+    const cursor = `checkpoint_rows_${String(this.#nextCursor++)}`;
+    await this.#query(
+      `DECLARE ${cursor} NO SCROLL CURSOR WITHOUT HOLD FOR ${sql}`,
+      values,
+    );
+    try {
+      let consumed = 0;
+      while (consumed < rowCount) {
+        const rows = await this.#query<Row>(
+          `FETCH FORWARD ${String(pageSize)} FROM ${cursor}`,
+          [],
+        );
+        if (
+          rows.length === 0
+          || rows.length > pageSize
+          || rows.length > rowCount - consumed
+        ) dependencyFailure();
+        consumed += rows.length;
+        for (const row of rows) yield row;
+      }
+    } finally {
+      await this.#query(`CLOSE ${cursor}`, []);
     }
   }
 }

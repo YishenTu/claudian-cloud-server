@@ -95,6 +95,44 @@ async function seedProject(
 }
 
 describe('Project event persistence', () => {
+  it('returns the retention floor for absent counters and fully pruned Project history', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
+      await seedProject(database, 'project-empty');
+      await seedProject(database, 'project-other');
+      const store = coordination(database);
+      const writer = new Client({ connectionString: database.migrationUrl });
+      try {
+        await store.withProjectScope('project-other', scope => scope.appendProjectEvent({
+          kind: 'membership.updated',
+          occurredAt: NOW,
+          payload: { memberId: 'member-a' },
+        }));
+        assert.deepEqual(await store.withProjectReadScope('project-empty', scope => (
+          scope.readProjectEvents({ afterSequence: 0, limit: 500 })
+        )), { events: [], latestSequence: 0, retainedFromSequence: 1 });
+        await writer.connect();
+        await writer.query('BEGIN');
+        await writer.query("SELECT set_config('claudian_cloud.project_id', $1, true)", ['project-empty']);
+        await writer.query(
+          `INSERT INTO claudian_cloud.project_event_sequences (
+             project_id, current_sequence, updated_at
+           ) VALUES ($1, 7, $2::timestamptz)`,
+          ['project-empty', NOW],
+        );
+        await writer.query('COMMIT');
+        for (const afterSequence of [0, 7, 8]) {
+          assert.deepEqual(await store.withProjectReadScope('project-empty', scope => (
+            scope.readProjectEvents({ afterSequence, limit: 500 })
+          )), { events: [], latestSequence: 7, retainedFromSequence: 8 });
+        }
+      } finally {
+        await writer.end();
+        await store.close();
+      }
+    });
+  });
+
   it('initializes current storage with forced RLS and least-privilege grants', async () => {
     await withPostgresTestDatabase(async database => {
       const migrator = new PostgresSchemaInitializer({
@@ -190,7 +228,7 @@ describe('Project event persistence', () => {
           occurredAt: YOUNG,
           payload: { memberId: 'member-a' },
           projectId: 'project-a',
-          protocolVersion: 9,
+          protocolVersion: 10,
           sequence: 1,
         });
 
@@ -366,7 +404,7 @@ describe('Project event persistence', () => {
               occurredAt: YOUNG,
               payload: { memberId: `member-${String(index + 3)}` },
               projectId: 'project-retention',
-              protocolVersion: 9,
+              protocolVersion: 10,
               sequence: index + 3,
             })),
             latestSequence: 10004,

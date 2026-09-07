@@ -138,7 +138,7 @@ class MemoryCoordination implements ProjectReadAuthorityCoordination {
             occurredAt: CREATED,
             payload: { memberId: 'member-001' },
             projectId,
-            protocolVersion: 9,
+            protocolVersion: 10,
             sequence: 1,
           },
           {
@@ -146,7 +146,7 @@ class MemoryCoordination implements ProjectReadAuthorityCoordination {
             occurredAt: CREATED,
             payload: { mainOid: MAIN_OID, requestId: 'request-001' },
             projectId,
-            protocolVersion: 9,
+            protocolVersion: 10,
             sequence: 2,
           },
         ] : [],
@@ -194,6 +194,10 @@ class MemoryRepository implements ProjectReadRepository {
       return Promise.reject(new Error('main-mismatch'));
     }
     return Promise.resolve();
+  }
+
+  verifyProjectEventRead(input: Parameters<ProjectReadRepository['verifyProjectEventRead']>[0]) {
+    return this.verifyProjectRead(input);
   }
 }
 
@@ -427,7 +431,7 @@ describe('ProjectReadAuthority', () => {
           occurredAt: CREATED,
           payload: { memberId: 'member-001' },
           projectId: 'project-a',
-          protocolVersion: 9,
+          protocolVersion: 10,
           sequence: 1,
         },
         {
@@ -435,7 +439,7 @@ describe('ProjectReadAuthority', () => {
           occurredAt: CREATED,
           payload: { mainOid: MAIN_OID, requestId: 'request-001' },
           projectId: 'project-a',
-          protocolVersion: 9,
+          protocolVersion: 10,
           sequence: 2,
         },
       ],

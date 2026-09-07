@@ -231,14 +231,14 @@ async function pushRound(
     '-c',
     `http.extraHeader=X-Claudian-Development-Actor: ${fixture.actor}`,
     'push',
-    `${baseUrl}/v5/projects/${fixture.project.projectId}/repository.git`,
+    `${baseUrl}/v6/projects/${fixture.project.projectId}/repository.git`,
     `HEAD:${personalRef}`,
   ]);
   const advertised = await git(fixture.checkout, [
     '-c',
     `http.extraHeader=X-Claudian-Development-Actor: ${fixture.actor}`,
     'ls-remote',
-    `${baseUrl}/v5/projects/${fixture.project.projectId}/repository.git`,
+    `${baseUrl}/v6/projects/${fixture.project.projectId}/repository.git`,
     COLLAB_MAIN_REF,
     personalRef,
   ]);

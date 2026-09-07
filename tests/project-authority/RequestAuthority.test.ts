@@ -225,7 +225,7 @@ class MemoryCoordination implements ProjectRequestAuthorityCoordination {
         const event = {
           ...input,
           projectId: 'project-a',
-          protocolVersion: 9 as const,
+          protocolVersion: 10 as const,
           sequence: this.collaboration.events.length + 1,
         } as CollabCloudProjectEvent;
         this.collaboration.events.push(event);

@@ -58,7 +58,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
               projectId: PROJECT_ID,
               secret: Buffer.alloc(32, 7).toString('base64url'),
             },
-            protocolVersion: 9,
+            protocolVersion: 10,
             requestId: 'request-join-rejected',
           }),
           headers: { 'content-type': 'application/json', authorization: `Bearer ${'a'.repeat(64)}` },
@@ -113,7 +113,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
             projectId: PROJECT_ID,
             secret: Buffer.alloc(32, 7).toString('base64url'),
           },
-          protocolVersion: 9,
+          protocolVersion: 10,
           requestId: 'request-join-diverged',
         }),
         headers: { 'content-type': 'application/json', authorization: `Bearer ${'a'.repeat(64)}` },
@@ -170,7 +170,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
             projectId: PROJECT_ID,
             projectName: 'Cloud Route Project',
           },
-          protocolVersion: 9,
+          protocolVersion: 10,
           requestId: 'route_request',
         }),
         headers: {
@@ -501,7 +501,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
     for (const [operation, data] of requests) {
       const route = collabCloudProjectOperationRoute(PROJECT_ID, operation);
       const response = await fetch(`${base}${route.target}`, {
-        body: JSON.stringify({ data, protocolVersion: 9, requestId: `request-${operation}` }),
+        body: JSON.stringify({ data, protocolVersion: 10, requestId: `request-${operation}` }),
         headers: { 'content-type': 'application/json', authorization: `Bearer ${'a'.repeat(64)}` },
         method: route.method,
       });

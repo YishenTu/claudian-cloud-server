@@ -755,13 +755,16 @@ class PostgresProjectScope
     const facts = await safeQuery<ProjectEventSequenceRow>(
       this.#client,
       `SELECT counter.current_sequence,
-              COALESCE(MIN(event.sequence), counter.current_sequence + 1)
+              COALESCE((
+                SELECT event.sequence
+                  FROM claudian_cloud.project_events AS event
+                 WHERE event.project_id = counter.project_id
+                 ORDER BY event.sequence
+                 LIMIT 1
+              ), counter.current_sequence + 1)
                 AS retained_from_sequence
          FROM claudian_cloud.project_event_sequences AS counter
-         LEFT JOIN claudian_cloud.project_events AS event
-           ON event.project_id = counter.project_id
-        WHERE counter.project_id = $1
-        GROUP BY counter.current_sequence`,
+        WHERE counter.project_id = $1`,
       [this.#projectId],
       this.#markBroken,
     );

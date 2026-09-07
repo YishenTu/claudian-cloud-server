@@ -94,6 +94,7 @@ export interface ProjectReadRepository {
     }>,
   ): Promise<void>;
   verifyProjectRead(input: VerifyProjectReadInput): Promise<void>;
+  verifyProjectEventRead(input: VerifyProjectReadInput): Promise<void>;
 }
 
 export interface ProjectReadAuthorityOptions {
@@ -389,15 +390,18 @@ export class ProjectReadAuthority {
   async #verifyRepository(
     facts: AdmissionFacts,
     signal: AbortSignal | undefined,
+    kind: 'content' | 'events' = 'content',
   ): Promise<void> {
     this.#assertAvailable(signal);
     try {
-      await this.#repository.verifyProjectRead({
+      const input = {
         expectedRefs: facts.expectedRefs,
         expectedMainOid: facts.expectedMainOid,
         placement: facts.placement,
         ...(signal === undefined ? {} : { signal }),
-      });
+      };
+      if (kind === 'events') await this.#repository.verifyProjectEventRead(input);
+      else await this.#repository.verifyProjectRead(input);
     } catch (error: unknown) {
       if (error instanceof ProjectReadAuthorityError) throw error;
       if (signal?.aborted === true) fail('cancelled');
@@ -458,7 +462,7 @@ export class ProjectReadAuthority {
       return fail('state-conflict');
     }
     const initial = await this.#readAdmission(principal, projectId, signal);
-    await this.#verifyRepository(initial, signal);
+    await this.#verifyRepository(initial, signal, 'events');
     const observed = await this.#coordination.withProjectReadScope(
       projectId,
       async scope => {
@@ -474,7 +478,7 @@ export class ProjectReadAuthority {
       },
       signal === undefined ? {} : { signal },
     );
-    await this.#verifyRepository(observed.current, signal);
+    await this.#verifyRepository(observed.current, signal, 'events');
     const { result } = observed;
     const needsSnapshot = afterSequence > result.latestSequence
       || afterSequence + 1 < result.retainedFromSequence

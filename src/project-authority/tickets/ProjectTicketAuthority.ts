@@ -23,6 +23,8 @@ import {
   type ListTicketAcceptedRelationsRequest,
   type ListTicketCommentsRequest,
   type ListTicketsRequest,
+  type ResolveTicketNumberRequest,
+  type ResolveTicketNumberResponse,
   type TicketMutationResponse,
   type UpdateTicketContentRequest,
 } from '@claudian-collab/protocol';
@@ -337,6 +339,30 @@ export class ProjectTicketAuthority {
             ),
             ticket: base.ticket,
           });
+        }),
+        options,
+      );
+    } catch (error: unknown) {
+      return mapInfrastructureError(error);
+    }
+  }
+
+  async resolveTicketNumber(
+    principal: RequestPrincipal,
+    request: ResolveTicketNumberRequest,
+    options: Readonly<{ readonly signal?: AbortSignal }> = {},
+  ): Promise<ResolveTicketNumberResponse> {
+    try {
+      const decoded = collabControlOperationCodec('resolveTicketNumber').decodeRequest(request);
+      if (decoded.status !== 'ok') throw decoded.error;
+      return await this.#readAdmission.run(
+        principal,
+        decoded.value.projectId,
+        read => read.transact(async scope => {
+          const ticket = await scope.collaboration.tickets.findByNumber(
+            decoded.value.ticketNumber,
+          );
+          return Object.freeze({ ticketId: ticket?.id ?? null });
         }),
         options,
       );

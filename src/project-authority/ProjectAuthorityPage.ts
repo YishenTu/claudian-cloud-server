@@ -170,17 +170,20 @@ export function boundProjectAuthorityPage<T>(
 ): BoundedProjectAuthorityPage<T> {
   const accepted: T[] = [];
   let nextCursor: string | undefined;
+  let itemsUtf8Bytes = 0;
   for (const [index, item] of items.entries()) {
-    const candidate = [...accepted, item];
+    const itemUtf8Bytes = Buffer.byteLength(JSON.stringify([item]), 'utf8') - 2;
+    const candidateItemsUtf8Bytes = itemsUtf8Bytes + itemUtf8Bytes
+      + (accepted.length === 0 ? 0 : 1);
     const hasMore = index + 1 < items.length || options.hasMore;
     const cursor = hasMore
       ? (options.encodeKey ?? encodeProjectAuthorityCursor)(options.key(item))
       : undefined;
     if (
       Buffer.byteLength(JSON.stringify({
-        [options.itemField]: candidate,
+        [options.itemField]: [],
         ...(cursor === undefined ? {} : { nextCursor: cursor }),
-      }), 'utf8') > options.maximumUtf8Bytes
+      }), 'utf8') + candidateItemsUtf8Bytes > options.maximumUtf8Bytes
     ) {
       if (accepted.length === 0) {
         throw new CollabError({
@@ -191,7 +194,20 @@ export function boundProjectAuthorityPage<T>(
       break;
     }
     accepted.push(item);
+    itemsUtf8Bytes = candidateItemsUtf8Bytes;
     nextCursor = cursor;
+  }
+  if (
+    accepted.length > 0
+    && Buffer.byteLength(JSON.stringify({
+      [options.itemField]: accepted,
+      ...(nextCursor === undefined ? {} : { nextCursor }),
+    }), 'utf8') > options.maximumUtf8Bytes
+  ) {
+    throw new CollabError({
+      code: 'authority-integrity-error',
+      safeContext: { reason: 'authority-page-item-exceeds-byte-budget' },
+    });
   }
   return Object.freeze({
     items: Object.freeze(accepted),

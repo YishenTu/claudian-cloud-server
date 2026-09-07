@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -76,6 +76,7 @@ describe('Project read authority integration', () => {
         repository: {
           advertiseUploadPack: repository.advertiseUploadPack.bind(repository),
           runUploadPack: repository.runUploadPack.bind(repository),
+          verifyProjectEventRead: input => repository.verifyProjectEventRead(input),
           verifyProjectRead: async input => {
             await repository.verifyProjectRead(input);
             if (!driftAfterRepositoryVerification) return;
@@ -171,6 +172,27 @@ describe('Project read authority integration', () => {
         assert.equal(snapshot.currentMember.activatedAt, ACTIVATED);
         assert.deepEqual(snapshot.openRequests, []);
         assert.deepEqual(snapshot.ticketHighlights, []);
+
+        // Events invalidate coordination projections; they do not certify
+        // unrelated Git objects. Content reads still detect their corruption.
+        const corruptObjectDirectory = join(repositoryPath, 'objects', 'ee');
+        const corruptObject = join(corruptObjectDirectory, 'e'.repeat(38));
+        await mkdir(corruptObjectDirectory, { recursive: true });
+        await writeFile(corruptObject, 'invalid unreachable object');
+        assert.deepEqual(await authority.getProjectEvents(
+          createDevelopmentPrincipal('member-a'), projectId, 0,
+        ), { events: [], kind: 'events', latestSequence: 0 });
+        await assert.rejects(
+          authority.getProjectSnapshot(createDevelopmentPrincipal('member-a'), projectId),
+          error => error instanceof ProjectReadAuthorityError
+            && error.code === 'dependency-failed',
+        );
+        await assert.rejects(
+          authority.getProjectEvents(createDevelopmentPrincipal('outsider'), projectId, 0),
+          error => error instanceof ProjectReadAuthorityError
+            && error.code === 'project-not-found',
+        );
+        await rm(corruptObject);
 
         driftAfterRepositoryVerification = true;
         await assert.rejects(

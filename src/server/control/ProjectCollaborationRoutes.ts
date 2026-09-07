@@ -186,6 +186,13 @@ export class ProjectCollaborationRoutes {
           await this.#ticketAuthority.getTicket(context.principal, request, options),
         );
       }
+      case 'resolveTicketNumber': {
+        const request = decodedRequest(operation, context.data);
+        assertPathProject(pathProjectId, request);
+        return collabControlOperationCodec(operation).decodeResponse(
+          await this.#ticketAuthority.resolveTicketNumber(context.principal, request, options),
+        );
+      }
       case 'listTicketComments': {
         const request = decodedRequest(operation, context.data);
         assertPathProject(pathProjectId, request);

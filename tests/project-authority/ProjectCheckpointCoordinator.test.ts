@@ -122,7 +122,7 @@ function fixture(
     operationId: 'operation-transfer',
     profile: 'authority-transfer',
     projectId: 'project-a',
-    protocolVersion: 9,
+    protocolVersion: 10,
     refs: Object.freeze([
       Object.freeze({ name: 'refs/heads/main', oid: MAIN_OID }),
       Object.freeze({
@@ -766,6 +766,62 @@ async function publishOutboundReserved(
 }
 
 describe('ProjectCheckpointCoordinator', () => {
+  it('reads canonical outbound records with immutable results and rejects invalid artifact bytes', async () => {
+    for (const profile of ['backup', 'export'] as const) {
+      const staging = new MemoryOutboundStaging();
+      const publication = new MemoryOutboundStaging();
+      const coordinator = new ProjectCheckpointCoordinator({
+        publication: { backup: publication, export: publication },
+        repository: new MemoryRepositoryStaging(),
+        repositoryCapture: new MemoryRepositoryCapture(),
+        staging,
+      });
+      const expected = profile === 'backup' ? backupRecords() : fixture().records;
+      const encoded = profile === 'backup'
+        ? encodeCollabProjectBackupCheckpointCoordinationNdjson(backupRecords())
+        : encodeCollabProjectCheckpointCoordinationNdjson(fixture().records, 'export');
+      const reservation = await coordinator.reserveOutbound('project-a');
+      const input = { ...staging.attempt, expectedProfile: profile };
+      try {
+        for (const [store, read] of [
+          [staging, coordinator.readOutboundRecords.bind(coordinator)],
+          [publication, coordinator.readPublishedOutboundRecords.bind(coordinator)],
+        ] as const) {
+          const install = (bytes: Buffer, digest = sha256(bytes)): void => {
+            store.artifacts.set('coordination.ndjson', bytes);
+            store.facts.set('coordination.ndjson', {
+              attemptKey: store.attempt.attemptKey,
+              byteCount: bytes.length,
+              name: 'coordination.ndjson',
+              operationId: store.attempt.operationId,
+              projectId: store.attempt.projectId,
+              sha256: digest,
+            });
+          };
+          install(Buffer.from(encoded));
+          const records = await read(input, reservation);
+          assert.deepEqual(records, expected);
+          assert.equal(Object.isFrozen(records), true);
+          assert.ok(records[0]);
+          assert.equal(Object.isFrozen(records[0].value), true);
+          for (const bytes of [
+            Buffer.from(` ${encoded}`),
+            Buffer.from(encoded.slice(0, -1)),
+            Buffer.from([0xff]),
+          ]) {
+            install(bytes);
+            await expectCheckpointError(read(input, reservation), 'invalid-checkpoint');
+          }
+          install(Buffer.from(encoded), '0'.repeat(64));
+          await expectCheckpointError(read(input, reservation), 'invalid-checkpoint');
+        }
+      } finally {
+        await reservation.close();
+        await coordinator.close();
+      }
+    }
+  });
+
   it('captures one canonical backup and retains its immutable artifacts', async () => {
     const publication = new MemoryOutboundStaging();
     const staging = new MemoryOutboundStaging();
