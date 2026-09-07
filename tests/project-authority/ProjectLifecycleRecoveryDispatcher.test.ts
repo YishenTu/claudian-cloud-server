@@ -201,6 +201,99 @@ async function expectRecoveryError(
 }
 
 describe('ProjectLifecycleRecoveryDispatcher', () => {
+  it('serving recovery reaches lifecycle work after other owners\' catalog pages', async () => {
+    const record = journal();
+    const coordination = new MemoryLifecycleCoordination(record);
+    const dispatcher = new ProjectLifecycleRecoveryDispatcher({
+      coordination,
+      owners: owners({
+        recover: input => {
+          coordination.current = Object.freeze({
+            ...input.journal,
+            phase: 'completed',
+            state: 'completed',
+          });
+          return Promise.resolve('settled');
+        },
+      }),
+    });
+    const cursor = Object.freeze({
+      kind: 'join-project',
+      operationId: 'operation-other-owner',
+      projectId: 'project-other-owner',
+      scheduledAt: CREATED_AT,
+    });
+    try {
+      await dispatcher.recoverAvailable({
+        listRecoveryCandidates: options => Promise.resolve(options?.after === undefined ? {
+          candidates: (['accept', 'activation', 'create-project', 'join-project'] as const)
+            .map(kind => ({ ...cursor, kind })),
+          nextCursor: cursor,
+        } : {
+          candidates: [{
+            kind: record.kind,
+            operationId: record.operationId,
+            projectId: record.projectId,
+            scheduledAt: record.scheduledAt,
+          }],
+          nextCursor: undefined,
+        }),
+      });
+      assert.equal(coordination.current?.state, 'completed');
+    } finally {
+      dispatcher.close();
+    }
+  });
+
+  for (const kind of ['accept', 'activation', 'create-project', 'join-project'] as const) {
+    it(`keeps ${kind} blocking a strict offline recovery drain`, async () => {
+      const dispatcher = new ProjectLifecycleRecoveryDispatcher({
+        coordination: new MemoryLifecycleCoordination(undefined),
+        owners: owners({ recover: () => Promise.reject(new Error('unexpected-recovery')) }),
+      });
+      try {
+        await expectRecoveryError(dispatcher.recoverAll({
+          listRecoveryCandidates: () => Promise.resolve({
+            candidates: [{
+              kind,
+              operationId: 'operation-other-owner',
+              projectId: 'project-other-owner',
+              scheduledAt: CREATED_AT,
+            }],
+            nextCursor: undefined,
+          }),
+        }), 'dependency-failed');
+      } finally {
+        dispatcher.close();
+      }
+    });
+  }
+
+  it('still rejects unknown catalog kinds without recovering later lifecycle work', async () => {
+    const coordination = new MemoryLifecycleCoordination(journal());
+    const dispatcher = new ProjectLifecycleRecoveryDispatcher({
+      coordination,
+      owners: owners({ recover: () => Promise.reject(new Error('unexpected-recovery')) }),
+    });
+    try {
+      await expectRecoveryError(dispatcher.recoverAvailable({
+        listRecoveryCandidates: () => Promise.resolve({
+          candidates: [{
+            kind: 'unknown',
+            operationId: 'operation-unknown',
+            projectId: 'project-unknown',
+            scheduledAt: CREATED_AT,
+            unrecognizedKind: 'future-operation',
+          }],
+          nextCursor: undefined,
+        }),
+      }), 'dependency-failed');
+      assert.equal(coordination.current?.state, 'active');
+    } finally {
+      dispatcher.close();
+    }
+  });
+
   it('strictly drains lifecycle catalog candidates before maintenance work', async () => {
     const record = journal();
     const coordination = new MemoryLifecycleCoordination(record);

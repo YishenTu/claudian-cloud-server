@@ -221,6 +221,14 @@ implements ProjectLifecycleRecoveryPort {
       }
       for (const candidate of page.candidates) {
         if (this.#isClosed()) fail('closed');
+        // Serving recovery shares this catalog; strict maintenance must still
+        // reject pending work whose recovery owner it cannot run.
+        if (!rejectWaiting && (
+          candidate.kind === 'accept'
+          || candidate.kind === 'activation'
+          || candidate.kind === 'create-project'
+          || candidate.kind === 'join-project'
+        )) continue;
         await this.#recoverCandidate(snapshotCandidate(candidate), rejectWaiting);
       }
       if (page.nextCursor === undefined) return;

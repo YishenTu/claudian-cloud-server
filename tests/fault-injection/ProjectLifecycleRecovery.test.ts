@@ -219,6 +219,87 @@ async function within<Result>(
 }
 
 describe('Project lifecycle cross-store recovery', () => {
+  it('recovers past a full page of ordinary candidates after a lifecycle fault and restart', async context => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
+      const projectId = 'project-lifecycle-mixed';
+      const operationId = 'backup-lifecycle-mixed';
+      await seedProject(database, projectId);
+      const client = new Client({ connectionString: database.migrationUrl });
+      try {
+        await client.connect();
+        // Catalog metadata for other owners remains pending throughout this test.
+        await client.query(
+          `INSERT INTO claudian_cloud.recovery_candidates (
+             kind, project_id, operation_id, scheduled_at, created_at
+           )
+           SELECT 'accept', 'project-ordinary-' || value::text,
+                  'operation-ordinary-' || value::text, $1::timestamptz, $1::timestamptz
+             FROM generate_series(1, 105) AS value`,
+          [T0],
+        );
+      } finally {
+        await client.end();
+      }
+      const root = await mkdtemp(join(tmpdir(), 'claudian-mixed-recovery-'));
+      context.after(() => rm(root, { recursive: true, force: true }));
+      const repository = new DurableRepositoryEffect(root);
+      const controller = new FaultController();
+      controller.target = 'after-repository-effect';
+      const firstStore = coordination(database);
+      const first = new ProjectLifecycleRecoveryDispatcher({
+        coordination: firstStore,
+        owners: owners(new VerticalOwner(controller, repository)),
+      });
+      try {
+        await firstStore.withProjectScope(projectId, scope => scope.portability.putLifecycleJournal({
+          actorMemberId: undefined,
+          createdAt: T0,
+          direction: undefined,
+          expectedAuthorityGeneration: 1,
+          idempotencyKey: 'intent-lifecycle-mixed',
+          kind: 'backup',
+          operationId,
+          phase: 'prepared',
+          projectId,
+          requestFingerprint: 'b'.repeat(64),
+          scheduledAt: T0,
+        }));
+        await assert.rejects(first.recoverAvailable(firstStore), error => (
+          error instanceof ProjectRecoveryError && error.code === 'dependency-failed'
+        ));
+        await repository.assertApplied(operationId);
+      } finally {
+        first.close();
+        await firstStore.close();
+      }
+      const restartedStore = coordination(database);
+      const restarted = new ProjectLifecycleRecoveryDispatcher({
+        coordination: restartedStore,
+        owners: owners(new VerticalOwner(new FaultController(), repository)),
+      });
+      try {
+        await restarted.recoverAvailable(restartedStore);
+        await restarted.recoverAvailable(restartedStore);
+        const settled = await restartedStore.withProjectScope(projectId, scope => (
+          scope.portability.getLifecycleJournal(operationId)
+        ));
+        assert.equal(settled?.state, 'completed');
+        await repository.assertApplied(operationId);
+        const head = await restartedStore.listRecoveryCandidates();
+        assert.equal(head.candidates.length, 100);
+        assert.ok(head.nextCursor);
+        const tail = await restartedStore.listRecoveryCandidates({ after: head.nextCursor });
+        assert.equal(tail.candidates.length, 5);
+        assert.equal(tail.nextCursor, undefined);
+        assert.ok([...head.candidates, ...tail.candidates].every(candidate => candidate.kind === 'accept'));
+      } finally {
+        restarted.close();
+        await restartedStore.close();
+      }
+    });
+  });
+
   it('settles exact replay after failure at every shared durable edge', async () => {
     await withPostgresTestDatabase(async database => {
       await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();

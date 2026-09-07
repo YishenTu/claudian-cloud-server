@@ -55,6 +55,46 @@ function keyring() {
 }
 
 describe('production Cloud lifecycle runtime', () => {
+  it('keeps serving reconciliation available while ordinary recovery candidates remain pending', async () => {
+    const runtime = createProductionCloudLifecycleRuntime({
+      config: {
+        developmentBootstrap: {
+          stagingFreeSpaceFloorBytes: 1_073_741_824,
+          stagingRoot: '/tmp/claudian-runtime-test-staging',
+          uploadDeadlineMs: 900_000,
+          uploadIdleTimeoutMs: 30_000,
+        },
+        gitAdmission: { queueTimeoutMs: 1_000 },
+        repository: { root: '/tmp/claudian-runtime-test-repositories' },
+      } as never,
+      coordination: {
+        acquireProjectLease: () => Promise.reject(new Error('ordinary-recovery-entered-lifecycle')),
+        listRecoveryCandidates: () => Promise.resolve({
+          candidates: (['accept', 'activation', 'create-project', 'join-project'] as const)
+            .map(kind => ({
+              kind,
+              operationId: `operation-runtime-${kind}`,
+              projectId: `project-runtime-${kind}`,
+              scheduledAt: CREATED_AT,
+            })),
+          nextCursor: undefined,
+        }),
+        listTerminalResponders: () => Promise.resolve({ nextCursor: undefined, responders: [] }),
+      } as never,
+      importer: {} as never,
+      keyring: keyring(),
+      leave: {} as never,
+      removal: {} as never,
+      repository: {} as never,
+    });
+    try {
+      await runtime.reconcileAll();
+      await runtime.reconcileAll();
+    } finally {
+      await runtime.close(1_000);
+    }
+  });
+
   it('keeps readiness closed on offline-only backup and export recovery', async () => {
     for (const kind of ['backup', 'export'] as const) {
       const record = journal(kind);
