@@ -65,6 +65,7 @@ import type {
 import {
   defaultAuthorityTransferExpiresAt,
 } from '../AuthorityTransferExpiry.js';
+import type { DeletionCoordinator } from '../delete/DeletionCoordinator.js';
 import { isDurableAuthorityTransferProof } from '../AuthorityTransferProof.js';
 
 export type LanToCloudTransferCoordinatorErrorCode =
@@ -169,6 +170,7 @@ export interface LanToCloudTransferCoordinatorOptions {
   readonly clock?: () => Date;
   readonly coordination: LanToCloudTransferCoordination;
   readonly custodyReceiptIdFactory?: () => string;
+  readonly deletion: Pick<DeletionCoordinator, 'resumeAuthorized'>;
   readonly receiptIdFactory?: () => string;
   readonly receiptSigner: LanToCloudReceiptSigner;
   readonly relinquishmentTrust: LanToCloudSourceTrustPort;
@@ -797,6 +799,7 @@ implements ProjectLifecycleRecoveryOwner {
   readonly #clock: () => Date;
   readonly #coordination: LanToCloudTransferCoordination;
   readonly #custodyReceiptIdFactory: () => string;
+  readonly #deletion: LanToCloudTransferCoordinatorOptions['deletion'];
   readonly #pendingClaimBatches = new Map<string, PendingClaimBatch>();
   readonly #postCutoverRecovery: LanToCloudPostCutoverRecovery;
   readonly #receiptIdFactory: () => string;
@@ -826,6 +829,7 @@ implements ProjectLifecycleRecoveryOwner {
     this.#claimFactory = options.claimFactory ?? defaultClaim;
     this.#clock = options.clock ?? (() => new Date());
     this.#coordination = options.coordination;
+    this.#deletion = options.deletion;
     this.#custodyReceiptIdFactory = options.custodyReceiptIdFactory
       ?? (() => defaultOpaqueId('custody'));
     this.#receiptIdFactory = options.receiptIdFactory
@@ -851,7 +855,7 @@ implements ProjectLifecycleRecoveryOwner {
       'beginLanToCloudTransfer',
       input.request,
     );
-    return this.#run(request.projectId, async lease => {
+    return this.#track(async () => {
       if (!PRINCIPAL_PATTERN.test(input.principalId)) {
         return fail('authorization-denied');
       }
@@ -868,121 +872,157 @@ implements ProjectLifecycleRecoveryOwner {
         targetUrl: request.targetUrl,
         transferId: request.transferId,
       })) return fail('authorization-denied');
-      const evidence = Object.freeze({
-        checkpointManifestSha256: request.checkpointManifestSha256,
-        principalId: input.principalId,
-        proof: request.sourceProof,
-        receiptKeyId: this.#receiptKeyId,
-        receiptPublicKey: this.#receiptPublicKey,
-        schemaVersion: 1 as const,
-      });
-      const requestFingerprint = sha256(JSON.stringify(request));
-      const preparation = await lease.withProjectScope(async scope => {
-        const existing = await scope.portability.getLifecycleJournal(
-          request.transferId,
-        );
-        if (existing === undefined) {
-          const createdAt = timestamp(this.#clock);
-          const expiresAt = defaultAuthorityTransferExpiresAt(createdAt);
-          const [project, tombstone] = await Promise.all([
-            scope.getProject(),
-            scope.portability.getProjectTombstone(),
-          ]);
-          if (project !== undefined) return fail('state-conflict');
-          if (tombstone !== undefined) {
-            if (tombstone.terminalOperationKind !== 'authority-transfer') {
-              return fail('state-conflict');
+      await this.#resumePreviousHandoffDeletion(request);
+      return this.#run(request.projectId, async lease => {
+        const evidence = Object.freeze({
+          checkpointManifestSha256: request.checkpointManifestSha256,
+          principalId: input.principalId,
+          proof: request.sourceProof,
+          receiptKeyId: this.#receiptKeyId,
+          receiptPublicKey: this.#receiptPublicKey,
+          schemaVersion: 1 as const,
+        });
+        const requestFingerprint = sha256(JSON.stringify(request));
+        const preparation = await lease.withProjectScope(async scope => {
+          const existing = await scope.portability.getLifecycleJournal(
+            request.transferId,
+          );
+          if (existing === undefined) {
+            const createdAt = timestamp(this.#clock);
+            const expiresAt = defaultAuthorityTransferExpiresAt(createdAt);
+            const [project, tombstone] = await Promise.all([
+              scope.getProject(),
+              scope.portability.getProjectTombstone(),
+            ]);
+            if (project !== undefined) return fail('state-conflict');
+            if (tombstone !== undefined) {
+              if (tombstone.terminalOperationKind !== 'authority-transfer') {
+                return fail('state-conflict');
+              }
+              const authority = await scope.portability.getProjectReturnAuthority();
+              if (
+                authority === undefined
+                || authority.authorityGeneration !== request.expectedSourceAuthorityGeneration
+                || authority.hostMemberId !== request.sourceHostMemberId
+                || authority.principalId !== input.principalId
+                || authority.authorityFingerprint !== verified.authorityFingerprint
+              ) return fail('state-conflict');
             }
-            const authority = await scope.portability.getProjectReturnAuthority();
-            if (
-              authority === undefined
-              || authority.authorityGeneration !== request.expectedSourceAuthorityGeneration
-              || authority.hostMemberId !== request.sourceHostMemberId
-              || authority.principalId !== input.principalId
-              || authority.authorityFingerprint !== verified.authorityFingerprint
-            ) return fail('state-conflict');
+            await scope.portability.putLifecycleJournal({
+              actorMemberId: request.sourceHostMemberId,
+              createdAt,
+              direction: 'lan-to-cloud',
+              expectedAuthorityGeneration: request.expectedSourceAuthorityGeneration,
+              idempotencyKey: request.idempotencyKey,
+              kind: 'authority-transfer',
+              operationId: request.transferId,
+              phase: 'source-quiesced',
+              projectId: request.projectId,
+              requestFingerprint,
+              scheduledAt: expiresAt,
+            });
+            await scope.portability.putAuthorityTransferRecovery({
+              createdAt,
+              expiresAt,
+              sourceAuthority: Object.freeze({
+                generation: request.expectedSourceAuthorityGeneration,
+                kind: 'lan',
+              }),
+              sourceHostMemberId: request.sourceHostMemberId,
+              targetAuthority: Object.freeze({
+                generation: request.expectedSourceAuthorityGeneration + 1,
+                kind: 'cloud',
+              }),
+              targetHostMemberId: undefined,
+              targetUrl: request.targetUrl,
+              transferId: request.transferId,
+            });
+            await scope.portability.advanceAuthorityTransferRecoveryEvidence({
+              expectedUpdatedAt: createdAt,
+              sourceProof: encodeSourceEvidence(evidence),
+              transferId: request.transferId,
+              updatedAt: timestamp(this.#clock, createdAt),
+            });
+            return Object.freeze({ expiresAt, prepareAttempt: true });
           }
-          await scope.portability.putLifecycleJournal({
-            actorMemberId: request.sourceHostMemberId,
-            createdAt,
-            direction: 'lan-to-cloud',
-            expectedAuthorityGeneration: request.expectedSourceAuthorityGeneration,
-            idempotencyKey: request.idempotencyKey,
-            kind: 'authority-transfer',
-            operationId: request.transferId,
-            phase: 'source-quiesced',
-            projectId: request.projectId,
-            requestFingerprint,
-            scheduledAt: expiresAt,
-          });
-          await scope.portability.putAuthorityTransferRecovery({
-            createdAt,
-            expiresAt,
-            sourceAuthority: Object.freeze({
-              generation: request.expectedSourceAuthorityGeneration,
-              kind: 'lan',
-            }),
-            sourceHostMemberId: request.sourceHostMemberId,
-            targetAuthority: Object.freeze({
-              generation: request.expectedSourceAuthorityGeneration + 1,
-              kind: 'cloud',
-            }),
-            targetHostMemberId: undefined,
-            targetUrl: request.targetUrl,
-            transferId: request.transferId,
-          });
-          await scope.portability.advanceAuthorityTransferRecoveryEvidence({
-            expectedUpdatedAt: createdAt,
-            sourceProof: encodeSourceEvidence(evidence),
-            transferId: request.transferId,
-            updatedAt: timestamp(this.#clock, createdAt),
-          });
-          return Object.freeze({ expiresAt, prepareAttempt: true });
-        }
-        if (
-          existing.kind !== 'authority-transfer'
-          || existing.direction !== 'lan-to-cloud'
-          || existing.actorMemberId !== request.sourceHostMemberId
-          || existing.expectedAuthorityGeneration
-            !== request.expectedSourceAuthorityGeneration
-          || existing.idempotencyKey !== request.idempotencyKey
-          || existing.requestFingerprint !== requestFingerprint
-        ) return fail('state-conflict');
-        const recovery = await scope.portability.getAuthorityTransferRecovery(
-          request.transferId,
-        );
-        const storedEvidence = decodeSourceEvidence(recovery?.sourceProof);
-        if (
-          storedEvidence.principalId !== evidence.principalId
-          || storedEvidence.checkpointManifestSha256
-            !== evidence.checkpointManifestSha256
-          || storedEvidence.proof !== evidence.proof
-        ) return fail('state-conflict');
-        if (recovery === undefined) return fail('recovery-required');
-        if (existing.state === 'completed' || existing.state === 'cancelled') {
+          if (
+            existing.kind !== 'authority-transfer'
+            || existing.direction !== 'lan-to-cloud'
+            || existing.actorMemberId !== request.sourceHostMemberId
+            || existing.expectedAuthorityGeneration
+              !== request.expectedSourceAuthorityGeneration
+            || existing.idempotencyKey !== request.idempotencyKey
+            || existing.requestFingerprint !== requestFingerprint
+          ) return fail('state-conflict');
+          const recovery = await scope.portability.getAuthorityTransferRecovery(
+            request.transferId,
+          );
+          const storedEvidence = decodeSourceEvidence(recovery?.sourceProof);
+          if (
+            storedEvidence.principalId !== evidence.principalId
+            || storedEvidence.checkpointManifestSha256
+              !== evidence.checkpointManifestSha256
+            || storedEvidence.proof !== evidence.proof
+          ) return fail('state-conflict');
+          if (recovery === undefined) return fail('recovery-required');
+          if (existing.state === 'completed' || existing.state === 'cancelled') {
+            return Object.freeze({
+              expiresAt: recovery.expiresAt,
+              prepareAttempt: false,
+            });
+          }
+          const observedAt = timestamp(this.#clock);
+          if (Date.parse(recovery.expiresAt) <= Date.parse(observedAt)) {
+            return fail('expired');
+          }
           return Object.freeze({
             expiresAt: recovery.expiresAt,
-            prepareAttempt: false,
+            prepareAttempt: existing.phase === 'source-quiesced',
+          });
+        });
+        if (preparation.prepareAttempt) {
+          await this.#staging.prepareAttempt({
+            expiresAt: preparation.expiresAt,
+            operationId: request.transferId,
+            projectId: request.projectId,
           });
         }
-        const observedAt = timestamp(this.#clock);
-        if (Date.parse(recovery.expiresAt) <= Date.parse(observedAt)) {
-          return fail('expired');
-        }
-        return Object.freeze({
-          expiresAt: recovery.expiresAt,
-          prepareAttempt: existing.phase === 'source-quiesced',
-        });
+        return this.#requireStatus(lease, request.transferId);
       });
-      if (preparation.prepareAttempt) {
-        await this.#staging.prepareAttempt({
-          expiresAt: preparation.expiresAt,
-          operationId: request.transferId,
+    }).catch(dependency);
+  }
+
+  async #resumePreviousHandoffDeletion(request: BeginLanToCloudTransferRequest): Promise<void> {
+    const pending = await this.#run(request.projectId, lease => (
+      lease.withProjectScope(async scope => {
+        if (await scope.portability.getLifecycleJournal(request.transferId) !== undefined) return undefined;
+        const tombstone = await scope.portability.getProjectTombstone();
+        if (
+          tombstone?.terminalOperationKind !== 'authority-transfer'
+          || tombstone.authorityGeneration !== request.expectedSourceAuthorityGeneration
+        ) return undefined;
+        const journal = await scope.portability.getNonterminalLifecycleJournal();
+        if (
+          journal?.kind !== 'delete'
+          || journal.expectedAuthorityGeneration !== tombstone.authorityGeneration
+          || journal.requestFingerprint !== tombstone.resultSha256
+        ) return undefined;
+        const intent = await scope.portability.getDeletionIntent(journal.operationId);
+        if (
+          intent?.reason !== 'cloud-to-lan'
+          || intent.terminalOperationId !== tombstone.terminalOperationId
+          || intent.authorizationSha256 !== tombstone.resultSha256
+        ) return fail('recovery-required');
+        return Object.freeze({
+          authorizationSha256: intent.authorizationSha256,
+          operationId: journal.operationId,
           projectId: request.projectId,
         });
-      }
-      return this.#requireStatus(lease, request.transferId);
-    });
+      })
+    ));
+    if (pending !== undefined && await this.#deletion.resumeAuthorized(pending) !== 'settled') {
+      return fail('recovery-required');
+    }
   }
 
   getReceiptVerifier(

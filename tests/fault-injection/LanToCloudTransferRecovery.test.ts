@@ -1,3 +1,4 @@
+import { DeletionCoordinator } from '../../src/project-authority/lifecycle/delete/DeletionCoordinator.js';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -576,6 +577,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
         transfer: TransferFixture,
         injected = false,
       ) => new LanToCloudTransferCoordinator({
+        deletion: new DeletionCoordinator({ coordination, repository }),
         activation,
         checkpoint: checkpointPort(transfer),
         claimFactory: () => {

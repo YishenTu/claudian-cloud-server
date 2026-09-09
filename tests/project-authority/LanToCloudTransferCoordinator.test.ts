@@ -182,6 +182,10 @@ class MemoryPortability {
     return Promise.resolve('created');
   }
 
+  getNonterminalLifecycleJournal(): Promise<undefined> {
+    return Promise.resolve(undefined);
+  }
+
   getAuthorityTransferRecovery(): Promise<AuthorityTransferRecoveryRecord | undefined> {
     return Promise.resolve(this.recovery);
   }
@@ -859,6 +863,7 @@ function fixture(includeOfflineMember = true): Fixture {
     repository,
   });
   const restart = () => new LanToCloudTransferCoordinator({
+      deletion: { resumeAuthorized: () => Promise.reject(new Error('unexpected-deletion')) },
       activation,
       checkpoint: checkpointPort,
       claimFactory: () => Buffer.from(`claim-${String(claimSequence += 1)}`).toString('base64url'),

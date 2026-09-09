@@ -104,7 +104,12 @@ export function createProductionCloudLifecycleRuntime(
   });
   const signer = new KeyringAuthorityTransferSigner(options.keyring);
   const trust = new ProductionAuthorityTransferTrust();
+  const deletion = new DeletionCoordinator({
+    coordination: options.coordination,
+    repository: options.repository,
+  });
   const lanToCloud = new LanToCloudTransferCoordinator({
+    deletion,
     activation: new LanToCloudProjectActivation(),
     checkpoint,
     coordination: options.coordination,
@@ -137,10 +142,6 @@ export function createProductionCloudLifecycleRuntime(
     lanToCloud,
   });
   const retire = new RetireCoordinator({
-    coordination: options.coordination,
-    repository: options.repository,
-  });
-  const deletion = new DeletionCoordinator({
     coordination: options.coordination,
     repository: options.repository,
   });
