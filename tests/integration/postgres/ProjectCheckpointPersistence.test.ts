@@ -775,7 +775,7 @@ describe('Project checkpoint persistence', () => {
     });
   });
 
-  it('captures terminal responder principals only for backup', async () => {
+  it('captures terminal responder principals in their separate continuity artifact', async () => {
     await withPostgresTestDatabase(async database => {
       await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
@@ -822,11 +822,15 @@ describe('Project checkpoint persistence', () => {
             profile: 'backup',
             snapshotAt: CREATED_AT,
           });
-          assert.equal(backup.some(record => (
+          assert.equal(backup.some(record => record.kind === 'terminal-responder'), false);
+          const continuity = await scope.checkpoint.readTerminalProjectContinuityRecords({
+            maximumCoordinationBytes: 1024 * 1024,
+          });
+          assert.equal(continuity.some(record => (
             record.kind === 'terminal-responder'
             && record.value.operationId === 'retire-continuity'
           )), true);
-          assert.equal(backup.some(record => (
+          assert.equal(continuity.some(record => (
             record.kind === 'terminal-principal'
             && record.value.operationId === 'retire-continuity'
             && record.value.principalId === 'principal:manager'

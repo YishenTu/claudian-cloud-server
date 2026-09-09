@@ -220,7 +220,7 @@ export class DeletionCoordinator implements ProjectLifecycleRecoveryOwner {
           ));
         } else if (journal.phase === 'coordination-removed') {
           const tombstone = await input.lease.withProjectScope(scope => (
-            scope.portability.getProjectTombstone()
+            scope.portability.getProjectTombstone(intent.terminalOperationId)
           ));
           if (
             tombstone?.terminalOperationId !== intent.terminalOperationId
@@ -229,7 +229,7 @@ export class DeletionCoordinator implements ProjectLifecycleRecoveryOwner {
           await this.#advance(input.lease, journal, 'tombstoned');
         } else if (journal.phase === 'tombstoned') {
           const tombstone = await input.lease.withProjectScope(scope => (
-            scope.portability.getProjectTombstone()
+            scope.portability.getProjectTombstone(intent.terminalOperationId)
           ));
           if (tombstone === undefined) return fail('recovery-required');
           await input.lease.withProjectScope(scope => (

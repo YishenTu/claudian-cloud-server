@@ -53,6 +53,12 @@ describe('FileEnvironmentBackupCatalogPublication', () => {
       recordId: projectId,
       revision: 1,
       value: {
+        terminalOperationId: projectId,
+        terminalOperationKind: 'retire',
+        resultSha256: 'a'.repeat(64),
+        returnHostMemberId: null,
+        returnPrincipalId: null,
+        returnAuthorityFingerprint: null,
         authorityGeneration: 1,
         projectId,
         retiredAt: '2026-08-29T00:00:00.000Z',

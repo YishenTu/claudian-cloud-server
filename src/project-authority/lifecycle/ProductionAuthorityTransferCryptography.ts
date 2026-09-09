@@ -337,6 +337,7 @@ implements CloudToLanTargetTrustPort, LanToCloudSourceTrustPort {
       const envelope = sourceEnvelope(input.proof);
       if (envelope.payload.sourcePrincipalId !== input.principalId) return fail();
       const verified: VerifiedLanToCloudSourceProof = Object.freeze({
+        authorityFingerprint: certificate(envelope.caCertificatePem).fingerprint256.replaceAll(':', '').toLowerCase(),
         checkpointManifestSha256: envelope.payload.checkpointManifestSha256,
         projectId: envelope.payload.projectId,
         sourceAuthorityGeneration: envelope.payload.sourceAuthorityGeneration,
@@ -384,6 +385,7 @@ implements CloudToLanTargetTrustPort, LanToCloudSourceTrustPort {
         || input.sourceAuthority.generation + 1 !== input.targetAuthority.generation
       ) return fail();
       return Object.freeze({
+        authorityFingerprint: envelope.caFingerprint,
         principalId: input.principalId,
         projectId: payload.projectId,
         receiptKeyId: payload.receiptKeyId,
@@ -403,7 +405,8 @@ implements CloudToLanTargetTrustPort, LanToCloudSourceTrustPort {
       const envelope = targetEnvelope(input.request.targetProof);
       const payload = envelope.payload;
       if (
-        payload.projectId !== input.target.projectId
+        envelope.caFingerprint !== input.target.authorityFingerprint
+        || payload.projectId !== input.target.projectId
         || payload.transferId !== input.target.transferId
         || payload.targetHostMemberId !== input.target.targetHostMemberId
         || payload.targetAuthorityGeneration !== input.target.targetAuthority.generation

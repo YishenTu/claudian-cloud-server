@@ -24,7 +24,7 @@ import type {
 } from '../EnvironmentRestorePersistence.js';
 import { PostgresSchemaInitializer } from './PostgresSchemaInitializer.js';
 import { PostgresProjectCheckpointPersistence } from './PostgresProjectCheckpointPersistence.js';
-import type { TerminalProjectContinuityRecord } from '../ProjectCheckpointPersistence.js';
+import type { TerminalProjectContinuityRecord, TerminalProjectTombstoneRecord } from '../ProjectCheckpointPersistence.js';
 import { createTerminalProjectContinuityArtifact } from '../../environment-maintenance/restore/TerminalProjectContinuityArtifact.js';
 import { unframeBackupProtectedSecretEnvelope } from '../backupProtectedSecretEnvelope.js';
 
@@ -199,47 +199,6 @@ function canonicalTerminalRecords(
   } catch {
     return fail('state-conflict');
   }
-}
-
-function terminalAssociation(
-  records: readonly TerminalProjectContinuityRecord[],
-): Readonly<{
-  readonly operationId: string;
-  readonly operationKind: 'authority-transfer' | 'retire';
-  readonly resultSha256: string;
-}> {
-  const tombstone = records.find(record => record.kind === 'tombstone');
-  if (tombstone?.kind !== 'tombstone') return fail('state-conflict');
-  const terminal = records.find(record => record.kind === 'terminal-responder');
-  if (terminal?.kind === 'terminal-responder') return Object.freeze({
-    operationId: terminal.value.operationId,
-    operationKind: terminal.value.operation === 'retireProject'
-      ? 'retire'
-      : 'authority-transfer',
-    resultSha256: createHash('sha256')
-      .update(terminal.value.responseJson)
-      .digest('hex'),
-  });
-  const candidates = records.flatMap(record => (
-    record.kind === 'lifecycle-journal'
-    && record.value.state === 'completed'
-    && record.value.resultSha256 !== null
-    && record.value.updatedAt === tombstone.value.retiredAt
-    && (
-      record.value.operationKind === 'retire'
-      || record.value.operationKind === 'authority-transfer'
-    )
-      ? [Object.freeze({
-          operationId: record.value.operationId,
-          operationKind: record.value.operationKind,
-          resultSha256: record.value.resultSha256,
-        })]
-      : []
-  ));
-  if (candidates.length !== 1 || candidates[0] === undefined) {
-    return fail('state-conflict');
-  }
-  return candidates[0];
 }
 
 async function schemaState(client: Client): Promise<RestoreSchemaState> {
@@ -1354,98 +1313,7 @@ implements EnvironmentRestorePersistence {
                 projectRecord.value.createdAt,
               ],
             );
-          } else if (record.kind === 'tombstone') {
-            const transferTerminal = records.find(candidate => (
-              candidate.kind === 'terminal-responder'
-              && candidate.value.operation === 'getProjectAuthorityTransfer'
-            ));
-            const retireTerminal = records.find(candidate => (
-              candidate.kind === 'terminal-responder'
-              && candidate.value.operation === 'retireProject'
-            ));
-            const terminal = transferTerminal ?? retireTerminal;
-            let association: Readonly<{
-              operationId: string;
-              operationKind: 'authority-transfer' | 'retire';
-              resultSha256: string;
-            }>;
-            if (terminal?.kind === 'terminal-responder') {
-              association = Object.freeze({
-                operationId: terminal.value.operationId,
-                operationKind: terminal.value.operation === 'retireProject'
-                  ? 'retire'
-                  : 'authority-transfer',
-                resultSha256: createHash('sha256')
-                  .update(terminal.value.responseJson)
-                  .digest('hex'),
-              });
-            } else {
-              const lifecycleCandidates: Array<Readonly<{
-                operationId: string;
-                operationKind: 'authority-transfer' | 'retire';
-                resultSha256: string;
-              }>> = [];
-              for (const candidate of records) {
-                if (
-                  candidate.kind !== 'lifecycle-journal'
-                  || candidate.value.state !== 'completed'
-                  || candidate.value.resultSha256 === null
-                  || candidate.value.updatedAt !== record.value.retiredAt
-                ) continue;
-                if (
-                  candidate.value.operationKind === 'retire'
-                  && candidate.value.expectedAuthorityGeneration
-                    === record.value.authorityGeneration
-                ) {
-                  lifecycleCandidates.push(Object.freeze({
-                    operationId: candidate.value.operationId,
-                    operationKind: 'retire',
-                    resultSha256: candidate.value.resultSha256,
-                  }));
-                } else if (
-                  candidate.value.operationKind === 'authority-transfer'
-                ) {
-                  const recovery = records.find(recoveryCandidate => (
-                    recoveryCandidate.kind === 'authority-transfer-recovery'
-                    && recoveryCandidate.value.transferId
-                      === candidate.value.operationId
-                  ));
-                  if (
-                    recovery?.kind === 'authority-transfer-recovery'
-                    && recovery.value.targetAuthority.generation
-                      === record.value.authorityGeneration
-                  ) {
-                    lifecycleCandidates.push(Object.freeze({
-                      operationId: candidate.value.operationId,
-                      operationKind: 'authority-transfer',
-                      resultSha256: candidate.value.resultSha256,
-                    }));
-                  }
-                }
-              }
-              const lifecycleAssociation = lifecycleCandidates.length === 1
-                ? lifecycleCandidates[0]
-                : undefined;
-              if (lifecycleAssociation === undefined) fail('state-conflict');
-              association = lifecycleAssociation;
-            }
-            await client.query(
-              `INSERT INTO claudian_cloud.project_tombstones (
-                 project_id, authority_generation, terminal_operation_kind,
-                 terminal_operation_id, result_sha256, retired_at,
-                 terminal_expires_at
-               ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-               ON CONFLICT (project_id) DO NOTHING`,
-              [
-                record.value.projectId,
-                record.value.authorityGeneration,
-                association.operationKind,
-                association.operationId,
-                association.resultSha256,
-                record.value.retiredAt,
-                record.value.terminalExpiresAt,
-              ],
-            );
+
           }
         }
         await assertImportedRecords(client, fence);
@@ -1690,9 +1558,9 @@ implements EnvironmentRestorePersistence {
       fail('state-conflict');
     }
     const records = canonicalTerminalRecords(input.projectId, input.records);
-    const tombstone = records.find(record => record.kind === 'tombstone');
-    if (tombstone?.kind !== 'tombstone') fail('state-conflict');
-    const association = terminalAssociation(records);
+    const tombstones = new Map(records.filter((record): record is TerminalProjectTombstoneRecord => (
+      record.kind === 'tombstone'
+    )).map(record => [record.value.terminalOperationId, record]));
     await this.#withClient(input.signal, async client => {
       await client.query('BEGIN');
       try {
@@ -1706,11 +1574,14 @@ implements EnvironmentRestorePersistence {
           "SELECT set_config('claudian_cloud.project_id', $1, true)",
           [input.projectId],
         );
-        const active = await client.query(
-          'SELECT project_id FROM claudian_cloud.projects WHERE project_id = $1',
+        const active = await client.query<{ authority_generation: string }>(
+          'SELECT authority_generation FROM claudian_cloud.projects WHERE project_id = $1',
           [input.projectId],
         );
-        if (active.rows.length !== 0) fail('state-conflict');
+        if (active.rows.length !== 0 && records.some(record => record.kind === 'tombstone' && (
+          record.value.terminalOperationKind === 'retire'
+          || record.value.authorityGeneration >= Number(active.rows[0]?.authority_generation)
+        ))) fail('state-conflict');
         for (const record of records) {
           if (record.kind !== 'lifecycle-journal') continue;
           await client.query(
@@ -1813,7 +1684,7 @@ implements EnvironmentRestorePersistence {
               createHash('sha256').update(record.value.responseJson).digest('hex'),
               record.value.responseJson,
               record.value.expiresAt,
-              tombstone.value.retiredAt,
+              tombstones.get(record.value.operationId)?.value.retiredAt,
               replay?.kind === 'terminal-responder-replay'
                 ? replay.value.memberId
                 : null,
@@ -1832,7 +1703,7 @@ implements EnvironmentRestorePersistence {
               operationKind,
               record.value.operationId,
               record.value.expiresAt,
-              tombstone.value.retiredAt,
+              tombstones.get(record.value.operationId)?.value.retiredAt,
             ],
           );
         }
@@ -1889,27 +1760,28 @@ implements EnvironmentRestorePersistence {
               record.value.ciphertext,
               record.value.tag,
               record.value.expiresAt,
-              tombstone.value.retiredAt,
+              tombstones.get(record.value.transferId)?.value.retiredAt,
             ],
           );
         }
-        await client.query(
-          `INSERT INTO claudian_cloud.project_tombstones (
-             project_id, authority_generation, terminal_operation_kind,
-             terminal_operation_id, result_sha256, retired_at,
-             terminal_expires_at
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-           ON CONFLICT (project_id) DO NOTHING`,
-          [
-            tombstone.value.projectId,
-            tombstone.value.authorityGeneration,
-            association.operationKind,
-            association.operationId,
-            association.resultSha256,
-            tombstone.value.retiredAt,
-            tombstone.value.terminalExpiresAt,
-          ],
-        );
+        for (const record of records) {
+          if (record.kind !== 'tombstone') continue;
+          await client.query(
+            `INSERT INTO claudian_cloud.project_tombstones (
+               project_id, authority_generation, terminal_operation_kind,
+               terminal_operation_id, result_sha256, retired_at, terminal_expires_at,
+               return_host_member_id, return_principal_id, return_authority_fingerprint
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (project_id, terminal_operation_id) DO NOTHING`,
+            [
+              record.value.projectId, record.value.authorityGeneration,
+              record.value.terminalOperationKind, record.value.terminalOperationId,
+              record.value.resultSha256, record.value.retiredAt, record.value.terminalExpiresAt,
+              record.value.returnHostMemberId, record.value.returnPrincipalId,
+              record.value.returnAuthorityFingerprint,
+            ],
+          );
+        }
         const restored = await this.#readTerminalRecords(client, input.projectId);
         if (JSON.stringify(restored) !== JSON.stringify(records)) {
           fail('state-conflict');

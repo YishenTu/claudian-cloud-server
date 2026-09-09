@@ -91,7 +91,7 @@ describe('ActiveClaimCustodyKeyReferenceGate', () => {
         read: () => Promise.resolve({
           authorityId: 'authority-a',
           authorityVolumeIdentity: 'volume-a',
-          coordinationSchemaVersion: 11,
+          coordinationSchemaVersion: 12,
           repositoryFormatVersion: 1,
           restoreEpoch: 1,
           serverBuild: '0.0.0',
@@ -180,7 +180,7 @@ describe('ActiveClaimCustodyKeyReferenceGate', () => {
         read: () => Promise.resolve({
           authorityId: 'authority-a',
           authorityVolumeIdentity: 'volume-a',
-          coordinationSchemaVersion: 11,
+          coordinationSchemaVersion: 12,
           repositoryFormatVersion: 1,
           restoreEpoch: 1,
           serverBuild: '0.0.0',
@@ -205,7 +205,10 @@ describe('ActiveClaimCustodyKeyReferenceGate', () => {
     );
   });
 
-  it('checks retained terminal continuity without a Project or placement row', async () => {
+  for (const active of [false, true]) {
+  it(`checks retained terminal continuity with active Project ${String(active)}`, async () => {
+    const placement = { active: true, generation: 1, projectId, repositoryStorageKey: 'repo-a', storageNodeId: 'node-a' };
+    const activeRecords = [{ kind: 'project' }];
     const records = [{ kind: 'tombstone', value: { projectId } }];
     const verified: unknown[] = [];
     const gate = new ActiveClaimCustodyKeyReferenceGate({
@@ -215,14 +218,15 @@ describe('ActiveClaimCustodyKeyReferenceGate', () => {
           withProjectScope: (operation: (scope: never) => unknown) => operation({
             checkpoint: {
               readTerminalProjectContinuityRecords: () => Promise.resolve(records),
+              readProjectCheckpointRecords: () => Promise.resolve(activeRecords),
             },
-            getProject: () => Promise.resolve(undefined),
-            getRepositoryPlacement: () => Promise.resolve(undefined),
+            getProject: () => Promise.resolve(active ? { projectId, serviceState: 'active' } : undefined),
+            getRepositoryPlacement: () => Promise.resolve(active ? placement : undefined),
           } as never),
         } as never),
         listActiveRepositoryPlacements: () => Promise.resolve({
           nextCursor: undefined,
-          placements: [],
+          placements: active ? [placement] : [],
         }),
         listRecoveryCandidates: () => Promise.resolve({
           candidates: [],
@@ -252,8 +256,10 @@ describe('ActiveClaimCustodyKeyReferenceGate', () => {
     });
 
     await gate.verifyAll(new AbortController().signal);
-    assert.deepEqual(verified, [records]);
+    assert.deepEqual(verified, active ? [activeRecords, records] : [records]);
   });
+
+  }
 
   it('checks canonical backup records for every active Project', async () => {
     const verified: unknown[] = [];
@@ -449,7 +455,7 @@ describe('ActiveClaimCustodyKeyReferenceGate', () => {
         read: () => Promise.resolve({
           authorityId: 'authority-a',
           authorityVolumeIdentity: 'volume-a',
-          coordinationSchemaVersion: 11,
+          coordinationSchemaVersion: 12,
           repositoryFormatVersion: 1,
           restoreEpoch: 1,
           serverBuild: '0.0.0',
@@ -531,7 +537,7 @@ describe('ActiveClaimCustodyKeyReferenceGate', () => {
           read: () => Promise.resolve({
             authorityId: 'authority-a',
             authorityVolumeIdentity: 'volume-a',
-            coordinationSchemaVersion: 11,
+            coordinationSchemaVersion: 12,
             repositoryFormatVersion: 1,
             restoreEpoch: 1,
             serverBuild: '0.0.0',

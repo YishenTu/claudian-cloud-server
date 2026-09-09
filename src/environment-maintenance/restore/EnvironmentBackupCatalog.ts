@@ -288,10 +288,8 @@ function decodeDocument(
   priorProjectId = undefined;
   for (const item of terminalProjects) {
     if (
-      seenProjects.has(item.projectId)
-      || (priorProjectId !== undefined && priorProjectId >= item.projectId)
+      (priorProjectId !== undefined && priorProjectId >= item.projectId)
     ) fail('invalid-backup');
-    seenProjects.add(item.projectId);
     priorProjectId = item.projectId;
   }
   const withoutDigest = Object.freeze({

@@ -119,6 +119,7 @@ export interface CloudToLanCheckpointCapturePort {
 }
 
 export interface VerifiedCloudToLanTarget {
+  readonly authorityFingerprint: string;
   readonly principalId: string;
   readonly projectId: CollabProjectId;
   readonly receiptKeyId: string;
@@ -1772,7 +1773,7 @@ implements ProjectLifecycleRecoveryOwner {
         terminalExpiresAt: exact.recovery.expiresAt,
         terminalOperationId: exact.journal.operationId,
         terminalOperationKind: 'authority-transfer',
-      });
+      }, this.#requireTarget(exact).authorityFingerprint);
       await scope.portability.putLifecycleJournal({
         actorMemberId: exact.journal.actorMemberId,
         createdAt: completedAt,
@@ -2165,17 +2166,18 @@ implements ProjectLifecycleRecoveryOwner {
       || facts.recovery.targetHostMemberId === undefined
     ) return fail('recovery-required');
     const evidence = decodeTargetEvidence(facts.recovery.targetProof);
-    const target = evidence === undefined ? undefined : Object.freeze({
+    const target = evidence === undefined ? undefined : await this.#targetTrust.verifyAcceptance({
       principalId: evidence.principalId,
-      projectId: facts.journal.projectId,
-      receiptKeyId: evidence.receiptKeyId,
-      receiptPublicKey: evidence.receiptPublicKey,
-      targetAuthority: facts.recovery.targetAuthority as CollabCheckpointAuthority & {
-        readonly kind: 'lan';
+      request: {
+        idempotencyKey: evidence.acceptanceIntentId,
+        projectId: facts.journal.projectId,
+        targetHostMemberId: facts.recovery.targetHostMemberId,
+        targetProof: evidence.proof,
+        transferId,
       },
-      targetHostMemberId: facts.recovery.targetHostMemberId,
+      sourceAuthority: { kind: 'cloud', generation: facts.recovery.sourceAuthority.generation },
+      targetAuthority: { kind: 'lan', generation: facts.recovery.targetAuthority.generation },
       targetUrl: facts.recovery.targetUrl,
-      transferId,
     });
     return Object.freeze({
       evidence,

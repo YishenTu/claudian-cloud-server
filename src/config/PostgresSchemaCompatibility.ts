@@ -1,4 +1,4 @@
-export const CURRENT_POSTGRES_SCHEMA_VERSION = 11;
+export const CURRENT_POSTGRES_SCHEMA_VERSION = 12;
 
 export function supportsPostgresSchemaVersion(
   value: unknown,

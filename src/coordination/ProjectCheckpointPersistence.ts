@@ -3,13 +3,33 @@ import type {
   CollabCheckpointProfile,
   CollabIsoTimestamp,
   CollabProjectBackupRecord,
+  CollabMemberId,
+  CollabProjectId,
 } from '@claudian-collab/protocol';
 
 export type ProjectCheckpointRecord =
   | CollabCheckpointPortableRecord
   | CollabProjectBackupRecord;
 
-export type TerminalProjectContinuityRecord = Extract<
+export interface TerminalProjectTombstoneRecord {
+  readonly kind: 'tombstone';
+  readonly recordId: string;
+  readonly revision: number;
+  readonly value: {
+    readonly authorityGeneration: number;
+    readonly projectId: CollabProjectId;
+    readonly resultSha256: string;
+    readonly retiredAt: CollabIsoTimestamp;
+    readonly terminalExpiresAt: CollabIsoTimestamp;
+    readonly terminalOperationId: string;
+    readonly terminalOperationKind: 'authority-transfer' | 'retire';
+    readonly returnHostMemberId: CollabMemberId | null;
+    readonly returnPrincipalId: string | null;
+    readonly returnAuthorityFingerprint: string | null;
+  };
+}
+
+export type TerminalProjectContinuityRecord = TerminalProjectTombstoneRecord | Extract<
   CollabProjectBackupRecord,
   { readonly kind:
     | 'lifecycle-journal'
@@ -17,7 +37,6 @@ export type TerminalProjectContinuityRecord = Extract<
     | 'terminal-principal'
     | 'terminal-responder'
     | 'terminal-responder-replay'
-    | 'tombstone'
     | 'transfer-receipt-key'
     | 'transfer-redemption-receipt'
   }

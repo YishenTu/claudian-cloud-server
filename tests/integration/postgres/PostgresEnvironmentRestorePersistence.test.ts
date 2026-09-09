@@ -171,6 +171,7 @@ const TRANSFER_STATUS = decodeCollabAuthorityTransferStatus({
   transferId: TRANSFER_ID,
   updatedAt: CREATED_AT,
 });
+const TRANSFER_RESULT_SHA256 = createHash('sha256').update(JSON.stringify(TRANSFER_STATUS)).digest('hex');
 const PROTECTED_ASSOCIATED_DATA = Object.freeze({
   authorityGeneration: 4,
   checkpointSha256: TRANSFER_CHECKPOINT_SHA256,
@@ -253,7 +254,7 @@ async function settleBeforeTest<T>(
   }
 }
 
-function minimumBackupRecords() {
+function allFixtureRecords() {
   return Object.freeze([
     Object.freeze({
       kind: 'project' as const,
@@ -765,7 +766,7 @@ function minimumBackupRecords() {
         projectId: PROJECT_ID,
         recoveryFromPhase: null,
         requestFingerprint: 'c'.repeat(64),
-        resultSha256: 'd'.repeat(64),
+        resultSha256: TRANSFER_RESULT_SHA256,
         scheduledAt: EXPIRES_AT,
         state: 'completed' as const,
         updatedAt: CREATED_AT,
@@ -1352,6 +1353,38 @@ function minimumBackupRecords() {
   ]);
 }
 
+function isHistoricalRecord(record: CollabProjectBackupRecord): boolean {
+  if (record.kind === 'tombstone') return true;
+  const value = record.value;
+  return ('operationId' in value && value.operationId === TRANSFER_ID)
+    || ('transferId' in value && value.transferId === TRANSFER_ID)
+    || ('receipt' in value && value.receipt.transferId === TRANSFER_ID);
+}
+
+function minimumBackupRecords() {
+  return allFixtureRecords().filter(record => !isHistoricalRecord(record));
+}
+
+function terminalBackupRecords() {
+  return allFixtureRecords().filter(record => isHistoricalRecord(record)
+    && record.kind !== 'authority-transfer-recovery'
+    && record.kind !== 'transfer-claim-batch-receipt')
+    .map(record => record.kind === 'tombstone' ? {
+      ...record, recordId: TRANSFER_ID,
+      value: {
+        authorityGeneration: record.value.authorityGeneration,
+        projectId: record.value.projectId,
+        resultSha256: TRANSFER_RESULT_SHA256,
+        retiredAt: record.value.retiredAt,
+        terminalExpiresAt: record.value.terminalExpiresAt,
+        terminalOperationId: TRANSFER_ID,
+        terminalOperationKind: 'authority-transfer' as const,
+        returnHostMemberId: 'member-manager', returnPrincipalId: 'principal:manager',
+        returnAuthorityFingerprint: 'f'.repeat(64),
+      },
+    } : record);
+}
+
 describe('PostgresEnvironmentRestorePersistence', () => {
   it('rejects an old backup schema before creating restore state', async () => {
     await withPostgresTestDatabase(async database => {
@@ -1807,12 +1840,11 @@ describe('PostgresEnvironmentRestorePersistence', () => {
         placementGeneration: 7,
         projectId: PROJECT_ID,
       });
-      const records = minimumBackupRecords().filter(record => (
+      const records = terminalBackupRecords().filter(record => (
         record.kind !== 'terminal-principal'
         && record.kind !== 'terminal-responder'
         && record.kind !== 'terminal-responder-replay'
       ));
-      encodeCollabProjectBackupCheckpointCoordinationNdjson(records);
 
       await persistence.createDatabase({
         authorityId: SOURCE_METADATA.authorityId,
@@ -1824,9 +1856,9 @@ describe('PostgresEnvironmentRestorePersistence', () => {
         restoreEpoch,
         signal,
       });
-      await persistence.importProject({
+      await persistence.importTerminalProject({
         operationId,
-        project,
+        projectId: project.projectId,
         records,
         restoreEpoch,
         signal,
@@ -1861,7 +1893,7 @@ describe('PostgresEnvironmentRestorePersistence', () => {
         );
         await client.query('COMMIT');
         assert.deepEqual(tombstone.rows, [{
-          result_sha256: 'd'.repeat(64),
+          result_sha256: TRANSFER_RESULT_SHA256,
           terminal_operation_id: TRANSFER_ID,
           terminal_operation_kind: 'authority-transfer',
         }]);
@@ -1873,7 +1905,7 @@ describe('PostgresEnvironmentRestorePersistence', () => {
     });
   });
 
-  it('restores retained terminal continuity without recreating a Project', async () => {
+  for (const active of [false, true]) it(`restores retained terminal continuity (active Project: ${String(active)})`, async () => {
     await withPostgresTestDatabase(async database => {
       const persistence = new PostgresEnvironmentRestorePersistence({
         connectionString: database.migrationUrl,
@@ -1881,19 +1913,7 @@ describe('PostgresEnvironmentRestorePersistence', () => {
       const signal = new AbortController().signal;
       const operationId = 'restore-terminal-continuity';
       const restoreEpoch = SOURCE_METADATA.restoreEpoch + 1;
-      const records = minimumBackupRecords().filter(record => (
-        (
-          record.kind === 'lifecycle-journal'
-          && record.value.operationKind === 'authority-transfer'
-        )
-        || record.kind === 'protected-claim-envelope'
-        || record.kind === 'terminal-principal'
-        || record.kind === 'terminal-responder'
-        || record.kind === 'terminal-responder-replay'
-        || record.kind === 'tombstone'
-        || record.kind === 'transfer-receipt-key'
-        || record.kind === 'transfer-redemption-receipt'
-      ));
+      const records = terminalBackupRecords();
 
       await persistence.createDatabase({
         authorityId: SOURCE_METADATA.authorityId,
@@ -1904,6 +1924,16 @@ describe('PostgresEnvironmentRestorePersistence', () => {
         restoreEpoch,
         signal,
       });
+      const project = {
+        authorityGeneration: 6, backupId: 'backup-active-generation', checkpointSha256: 'b'.repeat(64),
+        expiresAt: EXPIRES_AT, placementGeneration: 7, projectId: PROJECT_ID,
+      };
+      const activeRecords = minimumBackupRecords().filter(record => [
+        'project', 'member', 'principal-binding', 'repository-placement', 'schema-catalog',
+        'server-compatibility', 'authority-volume-pair', 'cloud-event-cursor', 'cloud-event',
+      ].includes(record.kind)).map(record => record.kind === 'project'
+        ? { ...record, value: { ...record.value, authorityGeneration: 6 } } : record);
+      if (active) await persistence.importProject({ operationId, project, records: activeRecords, restoreEpoch, signal });
       await persistence.importTerminalProject({
         operationId,
         projectId: PROJECT_ID,
@@ -1911,14 +1941,35 @@ describe('PostgresEnvironmentRestorePersistence', () => {
         restoreEpoch,
         signal,
       });
+      const repository = Object.freeze({
+        artifactKey: 'repository-bundle-one',
+        bundleByteCount: 1024,
+        bundleSha256: 'd'.repeat(64),
+        objectFormat: 'sha1' as const,
+        operationId,
+        placementGeneration: 8,
+        projectId: PROJECT_ID,
+        publicationMarkerSha256: 'e'.repeat(64),
+        refs: Object.freeze([
+          Object.freeze({ name: 'refs/heads/main', oid: MAIN_OID }),
+          Object.freeze({
+            name: 'refs/heads/members/member-manager',
+            oid: MAIN_OID,
+          }),
+        ]),
+        repositoryStorageKey: 'restored-repository-one',
+        status: 'inactive' as const,
+        storageNodeId: 'restore-node',
+        validationMarkerSha256: 'f'.repeat(64),
+      });
       await persistence.publishAuthority({
         catalog: Object.freeze({
           ...SOURCE_METADATA,
           createdAt: CREATED_AT,
-          projects: Object.freeze([]),
+          projects: Object.freeze(active ? [project] : []),
         }),
         operationId,
-        repositories: Object.freeze([]),
+        repositories: Object.freeze(active ? [repository] : []),
         restoreEpoch,
         signal,
       });
@@ -1930,6 +1981,9 @@ describe('PostgresEnvironmentRestorePersistence', () => {
         signal,
       });
 
+      if (active) await persistence.verifyRestoredProject({
+        operationId, project, records: activeRecords, repository, restoreEpoch, signal,
+      });
       const continuity = await persistence.readRestoredTerminalContinuity(
         PROJECT_ID,
         signal,
@@ -1940,6 +1994,8 @@ describe('PostgresEnvironmentRestorePersistence', () => {
       const client = new Client({ connectionString: database.migrationUrl });
       try {
         await client.connect();
+        await client.query('BEGIN');
+        await client.query("SELECT set_config('claudian_cloud.project_id', $1, true)", [PROJECT_ID]);
         const projects = await client.query(
           'SELECT project_id FROM claudian_cloud.projects WHERE project_id = $1',
           [PROJECT_ID],
@@ -1950,7 +2006,8 @@ describe('PostgresEnvironmentRestorePersistence', () => {
             WHERE project_id = $1`,
           [PROJECT_ID],
         );
-        assert.deepEqual(projects.rows, []);
+        await client.query('COMMIT');
+        assert.deepEqual(projects.rows, active ? [{ project_id: PROJECT_ID }] : []);
         assert.deepEqual(terminal.rows, [{ project_id: PROJECT_ID }]);
       } finally {
         await client.end();

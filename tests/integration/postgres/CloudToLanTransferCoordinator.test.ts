@@ -57,7 +57,7 @@ function coordination(database: PostgresTestDatabase): PostgresCoordination {
   });
 }
 
-async function seed(database: PostgresTestDatabase): Promise<void> {
+async function seed(database: PostgresTestDatabase, authorityGeneration = 4): Promise<void> {
   const client = new Client({ connectionString: database.migrationUrl });
   try {
     await client.connect();
@@ -71,9 +71,9 @@ async function seed(database: PostgresTestDatabase): Promise<void> {
          project_id, project_name, manager_set_generation, expected_main_oid,
          service_state, authority_generation, authority_state_revision,
          created_at, activated_at
-       ) VALUES ($1, 'Cloud to LAN Real', 1, repeat('a', 40), 'active', 4, 1,
+       ) VALUES ($1, 'Cloud to LAN Real', 1, repeat('a', 40), 'active', $3, 1,
                  $2::timestamptz, $2::timestamptz)`,
-      [PROJECT_ID, T0],
+      [PROJECT_ID, T0, authorityGeneration],
     );
     for (const [memberId, role] of [
       [MANAGER_ID, 'manager'],
@@ -176,7 +176,8 @@ function custody(claims: Map<string, string>): CloudToLanClaimCustodyPort {
 }
 
 describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
-  it('commits protected custody, one-way relinquishment, and deletion handoff', async () => {
+  for (const memberChange of ['none', 'leave', 'remove'] as const) {
+  it(`retains completed handoff custody across return and ${memberChange}`, async () => {
     await withPostgresTestDatabase(async database => {
       await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
       await seed(database);
@@ -225,6 +226,7 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
         },
         targetTrust: {
           verifyAcceptance: input => Promise.resolve(Object.freeze({
+          authorityFingerprint: 'f'.repeat(64),
             principalId: input.principalId,
             projectId: input.request.projectId,
             receiptKeyId: 'receipt-key-target-real',
@@ -360,7 +362,7 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
               read: () => Promise.resolve({
                 authorityId: 'authority-real',
                 authorityVolumeIdentity: 'volume-real',
-                coordinationSchemaVersion: 11,
+                coordinationSchemaVersion: 12,
                 repositoryFormatVersion: 1,
                 restoreEpoch: 1,
                 serverBuild: 'cloud-build-real',
@@ -489,7 +491,67 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
             scheduledAt: thirdDeletionAt,
             updatedAt: thirdDeletionAt,
           }), 'advanced');
+          assert.equal(await scope.portability.getProjectReturnAuthority(), undefined);
+          await scope.portability.advanceLifecycleJournal({
+            operationId: 'delete-transfer-real', expectedPhase: 'coordination-removed',
+            expectedState: 'active', nextPhase: 'tombstoned', nextState: 'active',
+            scheduledAt: thirdDeletionAt, updatedAt: thirdDeletionAt,
+          });
+          const fence = await scope.portability.getProjectTombstone(begun.transferId);
+          assert.ok(fence);
+          await scope.portability.advanceLifecycleJournal({
+            operationId: 'delete-transfer-real', expectedPhase: 'tombstoned',
+            expectedState: 'active', nextPhase: 'completed', nextState: 'completed',
+            resultSha256: fence.resultSha256,
+            scheduledAt: thirdDeletionAt, updatedAt: thirdDeletionAt,
+          });
+          assert.deepEqual(await scope.portability.getProjectReturnAuthority(), {
+            authorityGeneration: 5, authorityFingerprint: 'f'.repeat(64),
+            hostMemberId: TARGET_ID, principalId: TARGET_PRINCIPAL,
+          });
+          await scope.membership.relinquishCloudMembershipAuthorities({
+            relinquishedAt: thirdDeletionAt,
+            retainedOutgoingTransferId: 'subsequent-outgoing-transfer',
+          });
+          assert.ok(await scope.portability.getProtectedClaimEnvelope(begun.transferId, OFFLINE_ID));
         });
+        if (memberChange !== 'none') {
+          await seed(database, 6);
+          await store.withProjectScope(PROJECT_ID, async scope => {
+            const operationId = `returned-member-${memberChange}`;
+            if (memberChange === 'leave') {
+              assert.equal(await scope.portability.putLifecycleJournal({
+                actorMemberId: OFFLINE_ID,
+                createdAt: completed.updatedAt,
+                direction: undefined,
+                expectedAuthorityGeneration: 6,
+                expectedPersonalRefOid: 'a'.repeat(40),
+                idempotencyKey: operationId,
+                kind: 'leave', operationId, phase: 'prepared', projectId: PROJECT_ID,
+                requestFingerprint: 'a'.repeat(64), scheduledAt: completed.updatedAt,
+              }), 'created');
+              assert.equal((await scope.portability.settleLeaveMembership({
+                expectedManagerSetGeneration: 1, expectedMembershipRevision: 1n,
+                expectedOfferRevision: null, leftAt: completed.updatedAt,
+                managerResponsibilityOfferId: null, memberId: OFFLINE_ID, operationId,
+              })).status, 'settled');
+            } else {
+              assert.equal((await scope.membership.prepareRemoval({
+                actorMemberId: MANAGER_ID, expectedManagerSetGeneration: 1,
+                expectedPersonalRefOid: 'a'.repeat(40), expectedTargetMembershipRevision: 1,
+                idempotencyKey: operationId, operationId,
+                personalRef: `refs/heads/members/${OFFLINE_ID}`, placementGeneration: 7,
+                preparedAt: completed.updatedAt, projectId: PROJECT_ID,
+                repositoryStorageKey: 'repository_cloud_to_lan_real',
+                requestFingerprint: 'a'.repeat(64), storageNodeId: 'local', targetMemberId: OFFLINE_ID,
+              })).status, 'created');
+              assert.equal((await scope.membership.settleRemoval({
+                operationId, removedAt: completed.updatedAt,
+              })).status, 'settled');
+            }
+            assert.ok(await scope.portability.getProtectedClaimEnvelope(begun.transferId, OFFLINE_ID));
+          });
+        }
         assert.equal((await coordinator.getStatus({
           principalId: OFFLINE_PRINCIPAL,
           request: { projectId: PROJECT_ID, transferId: begun.transferId },
@@ -536,6 +598,7 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
             OFFLINE_ID,
           ),
         ), undefined);
+        if (memberChange !== 'none') return;
         const terminalReferences: unknown[] = [];
         await new ActiveClaimCustodyKeyReferenceGate({
           coordination: store,
@@ -543,7 +606,7 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
             read: () => Promise.resolve({
               authorityId: 'authority-real',
               authorityVolumeIdentity: 'volume-real',
-              coordinationSchemaVersion: 11,
+              coordinationSchemaVersion: 12,
               repositoryFormatVersion: 1,
               restoreEpoch: 1,
               serverBuild: 'cloud-build-real',
@@ -578,6 +641,8 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
       }
     });
   });
+
+  }
 
   it('compacts accepted-target cancellation proof into exact terminal replay before backup', async () => {
     await withPostgresTestDatabase(async database => {
@@ -628,6 +693,7 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
         },
         targetTrust: {
           verifyAcceptance: input => Promise.resolve(Object.freeze({
+          authorityFingerprint: 'f'.repeat(64),
             principalId: input.principalId,
             projectId: input.request.projectId,
             receiptKeyId: 'receipt-key-target-real',
@@ -741,7 +807,7 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
             metadata: {
               authorityId: 'authority-real',
               authorityVolumeIdentity: 'volume-real',
-              coordinationSchemaVersion: 11,
+              coordinationSchemaVersion: 12,
               maximumServerBuild: 'cloud-build-real',
               minimumServerBuild: 'cloud-build-real',
               repositoryFormatVersion: 1,
@@ -796,7 +862,7 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
             metadata: {
               authorityId: 'authority-real',
               authorityVolumeIdentity: 'volume-real',
-              coordinationSchemaVersion: 11,
+              coordinationSchemaVersion: 12,
               maximumServerBuild: 'cloud-build-real',
               minimumServerBuild: 'cloud-build-real',
               repositoryFormatVersion: 1,

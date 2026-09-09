@@ -241,7 +241,6 @@ export class EnvironmentBackupCommand {
             !isCollabProjectId(projectId)
             || (previous !== undefined && previous >= projectId)
           ) return fail('state-conflict');
-          if (seen.has(projectId)) return fail('state-conflict');
           terminalProjects.push(projectId);
           previous = projectId;
         }
@@ -259,6 +258,11 @@ export class EnvironmentBackupCommand {
       for (const projectId of terminalProjects) {
         active(input.signal);
         const records = await this.#projects.readTerminalRecords(projectId);
+        const current = entries.find(project => project.projectId === projectId);
+        if (current !== undefined && records.some(record => record.kind === 'tombstone' && (
+          record.value.terminalOperationKind === 'retire'
+          || record.value.authorityGeneration >= current.authorityGeneration
+        ))) return fail('state-conflict');
         await this.#terminalRecords.verify(records, 'terminal');
         const artifact = createTerminalProjectContinuityArtifact(
           projectId,
@@ -290,8 +294,8 @@ export class EnvironmentBackupCommand {
       return Object.freeze({
         catalogId: publication.catalog.catalogId,
         catalogSha256: publication.catalog.catalogSha256,
-        projectCount: publication.catalog.projects.length
-          + publication.catalog.terminalProjects.length,
+        projectCount: new Set([...publication.catalog.projects, ...publication.catalog.terminalProjects]
+          .map(project => project.projectId)).size,
         state: 'published' as const,
       });
     } catch (error: unknown) {

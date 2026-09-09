@@ -553,6 +553,7 @@ class Harness {
     };
     this.targetTrust = {
       verifyAcceptance: async input => Object.freeze({
+        authorityFingerprint: 'f'.repeat(64),
         principalId: input.principalId,
         projectId: input.request.projectId,
         receiptKeyId: 'receipt-key-target',

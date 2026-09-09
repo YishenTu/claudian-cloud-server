@@ -137,10 +137,7 @@ export class ActiveClaimCustodyKeyReferenceGate {
           limit: 100,
         });
         for (const projectId of page.projectIds) {
-          if (!verifiedProjects.has(projectId)) {
-            await this.#verifyTerminalProject(projectId, signal);
-            verifiedProjects.add(projectId);
-          }
+          await this.#verifyTerminalProject(projectId, signal);
         }
         after = page.nextCursor;
       } while (after !== undefined);

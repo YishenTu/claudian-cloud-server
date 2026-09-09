@@ -103,6 +103,7 @@ describe('ProductionAuthorityTransferCryptography', () => {
       proof: sourceProof,
     });
     assert.deepEqual({ ...verifiedSource }, {
+      authorityFingerprint: new X509Certificate(caCertificatePem).fingerprint256.replaceAll(':', '').toLowerCase(),
       checkpointManifestSha256: sourcePayload.checkpointManifestSha256,
       projectId: sourcePayload.projectId,
       sourceAuthorityGeneration: sourcePayload.sourceAuthorityGeneration,
@@ -148,6 +149,7 @@ describe('ProductionAuthorityTransferCryptography', () => {
       targetUrl: TARGET_URL,
     });
     assert.equal(verifiedTarget.receiptPublicKey, targetPublicKey);
+    assert.equal(verifiedTarget.authorityFingerprint, verifiedSource.authorityFingerprint);
     await trust.verifyStaged({
       request: {
         checkpointSha256: '2'.repeat(64),

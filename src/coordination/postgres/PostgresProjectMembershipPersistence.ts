@@ -835,8 +835,14 @@ export class PostgresProjectMembershipPersistence
       [this.#projectId, journal.targetMemberId, input.removedAt],
     );
     await this.#query(
-      `DELETE FROM claudian_cloud.source_protected_claim_envelopes
-        WHERE project_id = $1 AND member_id = $2`,
+      `DELETE FROM claudian_cloud.source_protected_claim_envelopes AS envelope
+        WHERE envelope.project_id = $1 AND envelope.member_id = $2
+          AND NOT EXISTS (
+            SELECT 1 FROM claudian_cloud.project_tombstones AS tombstone
+             WHERE tombstone.project_id = envelope.project_id
+               AND tombstone.terminal_operation_id = envelope.transfer_id
+               AND tombstone.terminal_operation_kind = 'authority-transfer'
+          )`,
       [this.#projectId, journal.targetMemberId],
     );
     await this.#query(
@@ -1489,9 +1495,15 @@ export class PostgresProjectMembershipPersistence
       [this.#projectId, input.relinquishedAt],
     );
     const sourceEnvelopes = await this.#query<{ readonly project_id: string }>(
-      `DELETE FROM claudian_cloud.source_protected_claim_envelopes
-        WHERE project_id = $1 AND transfer_id <> $2
-      RETURNING project_id`,
+      `DELETE FROM claudian_cloud.source_protected_claim_envelopes AS envelope
+        WHERE envelope.project_id = $1 AND envelope.transfer_id <> $2
+          AND NOT EXISTS (
+            SELECT 1 FROM claudian_cloud.project_tombstones AS tombstone
+             WHERE tombstone.project_id = envelope.project_id
+               AND tombstone.terminal_operation_id = envelope.transfer_id
+               AND tombstone.terminal_operation_kind = 'authority-transfer'
+          )
+      RETURNING envelope.project_id`,
       [this.#projectId, input.retainedOutgoingTransferId],
     );
     const sourceClaims = await this.#query<{ readonly project_id: string }>(

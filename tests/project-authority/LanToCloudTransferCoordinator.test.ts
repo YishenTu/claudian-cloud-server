@@ -85,6 +85,12 @@ class MemoryPortability {
   journal: ProjectLifecycleJournalRecord | undefined;
   recovery: AuthorityTransferRecoveryRecord | undefined;
   tombstoned = false;
+  handedOff = false;
+  returnAuthority: { authorityFingerprint: string; authorityGeneration: number; hostMemberId: string; principalId: string } | undefined;
+
+  getProjectReturnAuthority() {
+    return Promise.resolve(this.returnAuthority);
+  }
   staged = false;
 
   stageLanToCloudProject(
@@ -314,14 +320,14 @@ class MemoryPortability {
   }
 
   getProjectTombstone(): Promise<ProjectTombstoneInput | undefined> {
-    return Promise.resolve(this.tombstoned ? Object.freeze({
+    return Promise.resolve(this.tombstoned || this.handedOff ? Object.freeze({
       authorityGeneration: 1,
       projectId: PROJECT_ID,
       resultSha256: sha256('retired'),
       retiredAt: CREATED_AT,
       terminalExpiresAt: EXPIRES_AT,
       terminalOperationId: 'retire-operation',
-      terminalOperationKind: 'retire',
+      terminalOperationKind: this.handedOff ? 'authority-transfer' as const : 'retire' as const,
     }) : undefined);
   }
 
@@ -813,6 +819,7 @@ function fixture(includeOfflineMember = true): Fixture {
   let sourceProofBarrier: Promise<void> | undefined;
   let verifySourceProofCalls = 0;
   const sourceProof: VerifiedLanToCloudSourceProof = Object.freeze({
+    authorityFingerprint: 'f'.repeat(64),
     checkpointManifestSha256: validated.manifest.manifestSha256,
     projectId: PROJECT_ID,
     sourceAuthorityGeneration: 1,
@@ -1839,6 +1846,44 @@ describe('LanToCloudTransferCoordinator', () => {
     }), 'state-conflict');
     assert.equal(test.coordination.portability.journal, undefined);
     assert.equal(test.staging.prepareCalls, 0);
+  });
+
+  it('admits a returning Project only from its completed handoff generation and Host', async () => {
+    for (const authority of [
+      undefined,
+      { authorityFingerprint: 'f'.repeat(64), authorityGeneration: 2, hostMemberId: HOST_MEMBER_ID, principalId: HOST_PRINCIPAL_ID },
+      { authorityFingerprint: 'f'.repeat(64), authorityGeneration: 1, hostMemberId: 'another-host', principalId: HOST_PRINCIPAL_ID },
+      { authorityFingerprint: 'f'.repeat(64), authorityGeneration: 1, hostMemberId: HOST_MEMBER_ID, principalId: 'another:principal' },
+      { authorityFingerprint: 'e'.repeat(64), authorityGeneration: 1, hostMemberId: HOST_MEMBER_ID, principalId: HOST_PRINCIPAL_ID },
+      { authorityFingerprint: 'f'.repeat(64), authorityGeneration: 1, hostMemberId: HOST_MEMBER_ID, principalId: HOST_PRINCIPAL_ID },
+    ]) {
+      const test = fixture();
+      test.coordination.portability.handedOff = true;
+      test.coordination.portability.returnAuthority = authority;
+      const begin = test.coordinator.begin({
+        principalId: HOST_PRINCIPAL_ID,
+        request: {
+          checkpointManifestSha256: test.checkpoint.manifest.manifestSha256,
+          expectedSourceAuthorityGeneration: 1,
+          idempotencyKey: 'intent-begin',
+          projectId: PROJECT_ID,
+          sourceHostMemberId: HOST_MEMBER_ID,
+          sourceProof: 'source-proof',
+          targetUrl: TARGET_URL,
+          transferId: TRANSFER_ID,
+        },
+      });
+      if (authority?.authorityGeneration === 1
+        && authority.hostMemberId === HOST_MEMBER_ID
+        && authority.principalId === HOST_PRINCIPAL_ID
+        && authority.authorityFingerprint === 'f'.repeat(64)) {
+        assert.equal((await begin).phase, 'source-quiesced');
+        assert.equal(test.staging.prepareCalls, 1);
+      } else {
+        await assertCode(begin, 'state-conflict');
+        assert.equal(test.staging.prepareCalls, 0);
+      }
+    }
   });
 
   it('rejects a new transfer for a tombstoned target Project', async () => {

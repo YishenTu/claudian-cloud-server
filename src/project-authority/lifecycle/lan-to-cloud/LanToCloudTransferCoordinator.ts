@@ -106,6 +106,7 @@ export interface LanToCloudTransferCoordination {
 }
 
 export interface VerifiedLanToCloudSourceProof {
+  readonly authorityFingerprint: string;
   readonly checkpointManifestSha256: string;
   readonly projectId: CollabProjectId;
   readonly sourceAuthorityGeneration: number;
@@ -887,8 +888,19 @@ implements ProjectLifecycleRecoveryOwner {
             scope.getProject(),
             scope.portability.getProjectTombstone(),
           ]);
-          if (project !== undefined || tombstone !== undefined) {
-            return fail('state-conflict');
+          if (project !== undefined) return fail('state-conflict');
+          if (tombstone !== undefined) {
+            if (tombstone.terminalOperationKind !== 'authority-transfer') {
+              return fail('state-conflict');
+            }
+            const authority = await scope.portability.getProjectReturnAuthority();
+            if (
+              authority === undefined
+              || authority.authorityGeneration !== request.expectedSourceAuthorityGeneration
+              || authority.hostMemberId !== request.sourceHostMemberId
+              || authority.principalId !== input.principalId
+              || authority.authorityFingerprint !== verified.authorityFingerprint
+            ) return fail('state-conflict');
           }
           await scope.portability.putLifecycleJournal({
             actorMemberId: request.sourceHostMemberId,

@@ -1438,13 +1438,21 @@ CREATE TABLE claudian_cloud.leave_former_principal_replays (
 );
 
 CREATE TABLE claudian_cloud.project_tombstones (
-  project_id varchar(64) PRIMARY KEY,
+  project_id varchar(64) NOT NULL,
   authority_generation bigint NOT NULL,
   terminal_operation_kind text NOT NULL,
   terminal_operation_id varchar(128) NOT NULL,
   result_sha256 char(64) NOT NULL,
   retired_at timestamptz NOT NULL,
   terminal_expires_at timestamptz NOT NULL,
+  return_host_member_id varchar(64),
+  return_principal_id text,
+  return_authority_fingerprint char(64) CHECK (return_authority_fingerprint ~ '^[0-9a-f]{64}$'),
+  PRIMARY KEY (project_id, terminal_operation_id),
+  UNIQUE (project_id, authority_generation),
+  CONSTRAINT project_tombstones_return_authority
+    CHECK ((return_host_member_id IS NULL) = (return_principal_id IS NULL)
+      AND (terminal_operation_kind = 'authority-transfer' OR return_principal_id IS NULL)),
   CONSTRAINT project_tombstones_project_id
     CHECK (project_id ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$'),
   CONSTRAINT project_tombstones_generation
@@ -1557,10 +1565,6 @@ CREATE TABLE claudian_cloud.project_backup_catalog (
 CREATE TABLE claudian_cloud.project_terminal_continuity_catalog (
   project_id varchar(64) PRIMARY KEY,
   retired_at timestamptz NOT NULL,
-  CONSTRAINT project_terminal_continuity_catalog_tombstone
-    FOREIGN KEY (project_id)
-    REFERENCES claudian_cloud.project_tombstones(project_id)
-    ON DELETE CASCADE,
   CONSTRAINT project_terminal_continuity_catalog_project_id
     CHECK (project_id ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
 );
@@ -2278,7 +2282,7 @@ CREATE UNIQUE INDEX leave_former_principal_replays_exact_intent
     intent_id
   );
 
-CREATE UNIQUE INDEX project_deletion_one_per_project
+CREATE INDEX project_deletion_by_project
   ON claudian_cloud.project_deletion_intents(project_id);
 
 CREATE UNIQUE INDEX cloud_project_join_journals_nonterminal
@@ -2422,11 +2426,7 @@ BEGIN
    WHERE project_id = requested_project_id;
   DELETE FROM claudian_cloud.transfer_redemption_receipts
    WHERE project_id = requested_project_id
-     AND (
-       requested_terminal_operation_kind <> 'authority-transfer'
-       OR transfer_id <> requested_terminal_operation_id
-       OR acknowledged_at IS NULL
-     );
+     AND acknowledged_at IS NULL;
   DELETE FROM claudian_cloud.transfer_claim_batch_receipts
    WHERE project_id = requested_project_id;
   DELETE FROM claudian_cloud.transferred_membership_claims
@@ -2451,10 +2451,14 @@ BEGIN
           AND receipt.transfer_id = receipt_key.transfer_id
           AND receipt.receipt_key_id = receipt_key.receipt_key_id
      );
-  DELETE FROM claudian_cloud.project_terminal_responders
-   WHERE project_id = requested_project_id
-     AND (operation_kind, operation_id)
-         <> (requested_terminal_operation_kind, requested_terminal_operation_id);
+  DELETE FROM claudian_cloud.project_terminal_responders AS responder
+   WHERE responder.project_id = requested_project_id
+     AND NOT EXISTS (
+       SELECT 1 FROM claudian_cloud.project_tombstones AS tombstone
+        WHERE tombstone.project_id = responder.project_id
+          AND tombstone.terminal_operation_id = responder.operation_id
+          AND tombstone.terminal_operation_kind = responder.operation_kind
+     );
   DELETE FROM claudian_cloud.recovery_candidates
    WHERE project_id = requested_project_id
      AND (kind <> 'delete' OR operation_id <> requested_operation_id);
@@ -2462,6 +2466,19 @@ BEGIN
    WHERE journal.project_id = requested_project_id
      AND journal.operation_id <> requested_operation_id
      AND journal.operation_id <> requested_terminal_operation_id
+     AND NOT EXISTS (
+       SELECT 1 FROM claudian_cloud.project_tombstones AS tombstone
+        WHERE tombstone.project_id = journal.project_id
+          AND (tombstone.terminal_operation_id = journal.operation_id
+                    OR (journal.kind = 'delete'
+                      AND journal.expected_authority_generation = tombstone.authority_generation
+                      AND journal.request_fingerprint = tombstone.result_sha256))
+     )
+     AND NOT EXISTS (
+       SELECT 1 FROM claudian_cloud.project_deletion_intents AS intent
+        WHERE intent.project_id = journal.project_id
+          AND intent.operation_id = journal.operation_id
+     )
      AND NOT EXISTS (
        SELECT 1
          FROM claudian_cloud.source_protected_claim_envelopes AS envelope

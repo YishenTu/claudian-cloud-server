@@ -407,6 +407,13 @@ export interface TerminalResponderCatalog {
   ): Promise<TerminalResponderCatalogPage>;
 }
 
+export interface ProjectReturnAuthorityRecord {
+  readonly authorityFingerprint: string;
+  readonly authorityGeneration: number;
+  readonly hostMemberId: CollabMemberId;
+  readonly principalId: string;
+}
+
 export interface ProjectTombstoneInput {
   readonly authorityGeneration: number;
   readonly projectId: CollabProjectId;
@@ -502,7 +509,8 @@ export interface PortabilityLifecyclePersistenceReader {
   getNonterminalLifecycleJournal(): Promise<
     ProjectLifecycleJournalRecord | undefined
   >;
-  getProjectTombstone(): Promise<ProjectTombstoneInput | undefined>;
+  getProjectTombstone(operationId?: string): Promise<ProjectTombstoneInput | undefined>;
+  getProjectReturnAuthority(): Promise<ProjectReturnAuthorityRecord | undefined>;
   getProtectedClaimEnvelope(
     transferId: string,
     memberId: CollabMemberId,
@@ -603,6 +611,7 @@ export interface PortabilityLifecyclePersistence
   ): Promise<PersistencePutResult>;
   putProjectTombstone(
     input: ProjectTombstoneInput,
+    authorityFingerprint?: string,
   ): Promise<PersistencePutResult>;
   putProtectedClaimEnvelope(
     input: ProtectedClaimEnvelopeInput,

@@ -520,11 +520,23 @@ function validateTombstone(
   projectId: CollabProjectId,
 ): void {
   const value = exactValue(item.value, [
-    'authorityGeneration', 'projectId', 'retiredAt', 'terminalExpiresAt',
+    'authorityGeneration', 'projectId', 'resultSha256', 'retiredAt', 'terminalExpiresAt',
+    'terminalOperationId', 'terminalOperationKind', 'returnHostMemberId', 'returnPrincipalId', 'returnAuthorityFingerprint',
   ]);
   if (
     value.projectId !== projectId
-    || item.recordId !== projectId
+    || item.recordId !== value.terminalOperationId
+    || !isCollabOpaqueId(value.terminalOperationId)
+    || (value.terminalOperationKind !== 'retire' && value.terminalOperationKind !== 'authority-transfer')
+    || typeof value.resultSha256 !== 'string' || !SHA256_PATTERN.test(value.resultSha256)
+    || (value.returnHostMemberId === null) !== (value.returnPrincipalId === null)
+    || (value.returnHostMemberId !== null && !isCollabMemberId(value.returnHostMemberId))
+    || (value.returnPrincipalId !== null && (
+      typeof value.returnPrincipalId !== 'string' || !PRINCIPAL_PATTERN.test(value.returnPrincipalId)
+    ))
+    || !nullableSha256(value.returnAuthorityFingerprint)
+    || (value.returnAuthorityFingerprint !== null && value.returnPrincipalId === null)
+    || (value.terminalOperationKind === 'retire' && value.returnPrincipalId !== null)
     || !positiveInteger(value.authorityGeneration)
     || !timestamp(value.retiredAt)
     || !timestamp(value.terminalExpiresAt)
@@ -559,7 +571,7 @@ function canonicalRecords(
   const seen = new Set<string>();
   let priorKind = -1;
   let priorRecordId = '';
-  let tombstones = 0;
+  const tombstoneGenerations = new Set<number>();
   const records = values.map(value => {
     const valueProjectId = plain(value)
       && plain(value.value)
@@ -592,7 +604,11 @@ function canonicalRecords(
     seen.add(`${value.kind}\0${value.recordId}`);
     priorKind = kindIndex;
     priorRecordId = value.recordId;
-    if (value.kind === 'tombstone') tombstones += 1;
+    if (value.kind === 'tombstone') {
+      const generation = value.value.authorityGeneration as number;
+      if (tombstoneGenerations.has(generation)) return fail('tombstone');
+      tombstoneGenerations.add(generation);
+    }
     if (value.kind === 'protected-claim-envelope') {
       const associatedData = value.value.associatedData;
       if (
@@ -612,7 +628,13 @@ function canonicalRecords(
     }
     return Object.freeze(value) as unknown as TerminalProjectContinuityRecord;
   });
-  if (tombstones !== 1) return fail('tombstone');
+  if (tombstoneGenerations.size === 0) return fail('tombstone');
+  const tombstones = records.filter((record): record is Extract<
+    TerminalProjectContinuityRecord, { readonly kind: 'tombstone' }
+  > => record.kind === 'tombstone');
+  const latestGeneration = Math.max(...tombstoneGenerations);
+  if (tombstones.some(record => record.value.terminalOperationKind === 'retire'
+    && record.value.authorityGeneration !== latestGeneration)) return fail('tombstone');
   const lifecycleTransfers = new Set(records.flatMap(record => (
     record.kind === 'lifecycle-journal'
       && record.value.operationKind === 'authority-transfer'
@@ -639,8 +661,23 @@ function canonicalRecords(
     TerminalProjectContinuityRecord,
     { readonly kind: 'terminal-responder' }
   > => record.kind === 'terminal-responder');
-  if (responders.length > 1) return fail('links');
   for (const responder of responders) {
+    const tombstone = tombstones.find(record => (
+      record.value.terminalOperationId === responder.value.operationId
+    ));
+    const response = JSON.parse(responder.value.responseJson) as Record<string, unknown>;
+    if (!tombstone
+      || tombstone.value.terminalOperationKind !== (
+        responder.value.operation === 'retireProject' ? 'retire' : 'authority-transfer'
+      )
+      || tombstone.value.resultSha256 !== sha256(responder.value.responseJson)
+      || tombstone.value.terminalExpiresAt !== responder.value.expiresAt
+      || (responder.value.operation === 'getProjectAuthorityTransfer'
+        && (!plain(response.targetAuthority)
+          || response.targetAuthority.generation !== tombstone.value.authorityGeneration))
+      || (responder.value.operation === 'retireProject'
+        && response.retiredAt !== tombstone.value.retiredAt)
+    ) return fail('links');
     const principals = records.filter((record): record is Extract<
       TerminalProjectContinuityRecord,
       { readonly kind: 'terminal-principal' }
@@ -725,13 +762,13 @@ function decode(value: unknown): TerminalProjectContinuityArtifact {
     || !isCollabProjectId(value.projectId)
     || !Array.isArray(value.records)
     || value.records.length === 0
-    || value.schemaVersion !== 1
+    || value.schemaVersion !== 2
   ) return fail('document');
   const records = canonicalRecords(value.projectId, value.records);
   const document = Object.freeze({
     projectId: value.projectId,
     records,
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
   });
   const json = JSON.stringify(document);
   if (Buffer.byteLength(json, 'utf8') > COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxCoordinationBytes) {
@@ -749,7 +786,7 @@ export function createTerminalProjectContinuityArtifact(
   projectId: CollabProjectId,
   records: readonly TerminalProjectContinuityRecord[],
 ): TerminalProjectContinuityArtifact {
-  return decode({ projectId, records, schemaVersion: 1 });
+  return decode({ projectId, records, schemaVersion: 2 });
 }
 
 export function decodeTerminalProjectContinuityArtifact(

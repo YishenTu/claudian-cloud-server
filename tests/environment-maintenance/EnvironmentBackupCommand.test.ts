@@ -32,7 +32,7 @@ describe('EnvironmentBackupCommand', () => {
       metadata: {
         authorityId: 'authority-a',
         authorityVolumeIdentity: 'volume-a',
-        coordinationSchemaVersion: 11,
+        coordinationSchemaVersion: 12,
         repositoryFormatVersion: 1,
         restoreEpoch: 1,
         serverBuild: 'development',
@@ -127,15 +127,21 @@ describe('EnvironmentBackupCommand', () => {
     ]);
   });
 
-  it('publishes retained continuity for a terminal-only Project', async () => {
+  for (const hasActive of [false, true]) it(`publishes retained continuity alongside active state: ${String(hasActive)}`, async () => {
     const projectId = '11111111-1111-4111-8111-111111111111';
     const records = Object.freeze([Object.freeze({
       kind: 'tombstone' as const,
-      recordId: projectId,
+      recordId: 'handoff-one',
       revision: 1,
       value: Object.freeze({
         authorityGeneration: 2,
         projectId,
+        resultSha256: 'a'.repeat(64),
+        terminalOperationId: 'handoff-one',
+        terminalOperationKind: 'authority-transfer' as const,
+        returnHostMemberId: null,
+        returnPrincipalId: null,
+        returnAuthorityFingerprint: null,
         retiredAt: '2026-08-28T00:00:00.000Z',
         terminalExpiresAt: '2026-09-28T00:00:00.000Z',
       }),
@@ -144,7 +150,11 @@ describe('EnvironmentBackupCommand', () => {
     let terminalVerified = false;
     let catalogJson = '';
     const command = new EnvironmentBackupCommand({
-      backup: { create: () => assert.fail('unexpected active backup') },
+      backup: { create: input => Promise.resolve({
+        checkpointSha256: 'b'.repeat(64), createdAt: '2026-08-29T00:00:00.000Z',
+        expiresAt: input.expiresAt, operationId: input.operationId,
+        profile: 'backup' as const, projectId, state: 'published' as const,
+      }) },
       catalog: {
         publish: value => {
           catalogJson = value.json;
@@ -166,12 +176,12 @@ describe('EnvironmentBackupCommand', () => {
         serverBuild: 'development',
       },
       projects: {
-        list: () => Promise.resolve({ nextCursor: undefined, projectIds: [] }),
+        list: () => Promise.resolve({ nextCursor: undefined, projectIds: hasActive ? [projectId] : [] }),
         listTerminal: () => Promise.resolve({
           nextCursor: undefined,
           projectIds: [projectId],
         }),
-        readFacts: () => assert.fail('unexpected facts'),
+        readFacts: () => Promise.resolve({ authorityGeneration: 3, placementGeneration: 1 }),
         readTerminalRecords: () => Promise.resolve(records as never),
       },
       recovery: { recoverAll: () => Promise.resolve() },
@@ -200,7 +210,7 @@ describe('EnvironmentBackupCommand', () => {
     assert.equal(terminalPublished, true);
     assert.equal(terminalVerified, true);
     assert.equal(result.projectCount, 1);
-    assert.deepEqual(document.projects, []);
+    assert.equal(document.projects.length, hasActive ? 1 : 0);
     assert.equal(document.terminalProjects.length, 1);
     const [terminalProject] = document.terminalProjects;
     assert.ok(terminalProject !== undefined);
@@ -340,7 +350,15 @@ describe('EnvironmentBackupCommand', () => {
           authorityGeneration: 1,
           placementGeneration: 1,
         }),
-        readTerminalRecords: () => assert.fail('unexpected terminal read'),
+        readTerminalRecords: () => Promise.resolve([{
+          kind: 'tombstone', recordId: 'retire-after-backup', revision: 1,
+          value: {
+            projectId, authorityGeneration: 1, terminalOperationKind: 'retire',
+            terminalOperationId: 'retire-after-backup', resultSha256: 'a'.repeat(64),
+            returnHostMemberId: null, returnPrincipalId: null, returnAuthorityFingerprint: null,
+            retiredAt: '2026-08-29T01:00:00.000Z', terminalExpiresAt: '2026-09-29T01:00:00.000Z',
+          },
+        }]),
       },
       recovery: { recoverAll: () => Promise.resolve() },
       terminalRecords: { verify: () => assert.fail('unexpected terminal verify') },

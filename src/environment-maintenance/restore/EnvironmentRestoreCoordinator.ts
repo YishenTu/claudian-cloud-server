@@ -531,7 +531,6 @@ function validateCatalog(
       || terminal.artifactByteCount
         > COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxCoordinationBytes
       || !SHA256_PATTERN.test(terminal.artifactSha256)
-      || projectIds.has(terminal.projectId)
       || (priorProjectId !== undefined && priorProjectId >= terminal.projectId)
     ) fail('invalid-backup');
     projectIds.add(terminal.projectId);
@@ -1049,7 +1048,7 @@ export class EnvironmentRestoreCoordinator {
         catalogSha256: completed.catalogSha256,
         completedAt: completed.updatedAt,
         operationId: completed.operationId,
-        projectCount: completed.projects.length + completed.terminalProjects.length,
+        projectCount: new Set([...completed.projects, ...completed.terminalProjects].map(project => project.projectId)).size,
         restoreEpoch: completed.restoreEpoch,
         state: 'completed' as const,
       });
@@ -1325,7 +1324,7 @@ export class EnvironmentRestoreCoordinator {
       catalogSha256: journal.catalogSha256,
       completedAt: journal.updatedAt,
       operationId: journal.operationId,
-      projectCount: journal.projects.length + journal.terminalProjects.length,
+      projectCount: new Set([...journal.projects, ...journal.terminalProjects].map(project => project.projectId)).size,
       restoreEpoch: journal.restoreEpoch,
       state: 'completed',
     });

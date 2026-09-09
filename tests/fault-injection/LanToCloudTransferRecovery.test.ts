@@ -399,6 +399,7 @@ function sourceTrust(transfer: TransferFixture): LanToCloudSourceTrustPort {
   return {
     verifyRelinquishmentProof: () => Promise.resolve(),
     verifySourceProof: () => Promise.resolve(Object.freeze({
+      authorityFingerprint: 'f'.repeat(64),
       checkpointManifestSha256: transfer.checkpoint.manifest.manifestSha256,
       projectId: transfer.projectId,
       sourceAuthorityGeneration: 1,
@@ -840,7 +841,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
               metadata: {
                 authorityId: 'authority-real',
                 authorityVolumeIdentity: 'volume-real',
-                coordinationSchemaVersion: 11,
+                coordinationSchemaVersion: 12,
                 maximumServerBuild: 'cloud-build-real',
                 minimumServerBuild: 'cloud-build-real',
                 repositoryFormatVersion: 1,
@@ -1057,7 +1058,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
                 metadata: {
                   authorityId: 'authority-real',
                   authorityVolumeIdentity: 'volume-real',
-                  coordinationSchemaVersion: 11,
+                  coordinationSchemaVersion: 12,
                   maximumServerBuild: 'cloud-build-real',
                   minimumServerBuild: 'cloud-build-real',
                   repositoryFormatVersion: 1,
@@ -1131,7 +1132,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
                 metadata: {
                   authorityId: 'authority-real',
                   authorityVolumeIdentity: 'volume-real',
-                  coordinationSchemaVersion: 11,
+                  coordinationSchemaVersion: 12,
                   maximumServerBuild: 'cloud-build-real',
                   minimumServerBuild: 'cloud-build-real',
                   repositoryFormatVersion: 1,

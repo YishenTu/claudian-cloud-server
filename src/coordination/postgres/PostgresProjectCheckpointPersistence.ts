@@ -203,6 +203,13 @@ function recordId(kind: string, identity: string): string {
   return `${kind}:${createHash('sha256').update(identity).digest('hex')}`;
 }
 
+function terminalTransferFilter(column: string, terminal: boolean): string {
+  return `${terminal ? '' : 'NOT '}EXISTS (
+    SELECT 1 FROM claudian_cloud.project_tombstones AS continuity
+     WHERE continuity.project_id = $1 AND continuity.terminal_operation_id = ${column}
+  )`;
+}
+
 class BoundedCheckpointRecords {
   readonly #maximumBytes: number;
   readonly #records: ProjectCheckpointRecord[] = [];
@@ -343,11 +350,11 @@ implements ProjectCheckpointPersistence {
     readonly maximumCoordinationBytes: number;
   }>): Promise<readonly TerminalProjectContinuityRecord[]> {
     const records = new BoundedCheckpointRecords(input.maximumCoordinationBytes);
-    await this.#readLifecycle(records, undefined);
-    await this.#readTransferReceiptKeys(records, undefined);
-    await this.#readTransferRedemptionReceipts(records, undefined);
-    await this.#readTerminalResponders(records);
-    await this.#readProtectedEnvelopes(records);
+    await this.#readLifecycle(records, undefined, true);
+    await this.#readTransferReceiptKeys(records, undefined, true);
+    await this.#readTransferRedemptionReceipts(records, undefined, true);
+    await this.#readTerminalResponders(records, true);
+    await this.#readProtectedEnvelopes(records, true);
     await this.#readTombstone(records);
     return records.terminal();
   }
@@ -816,7 +823,6 @@ implements ProjectCheckpointPersistence {
     await this.#readManagerResponsibilityOffers(records);
     await this.#readSecretReplayTombstones(records);
     await this.#readProtectedEnvelopes(records);
-    await this.#readTombstone(records);
 
     records.push(
       Object.freeze({
@@ -1262,26 +1268,38 @@ implements ProjectCheckpointPersistence {
   }
 
   async #readTombstone(records: BoundedCheckpointRecords): Promise<void> {
-    const tombstones = await this.#query<{
+    for await (const row of this.#queryRows<{
       readonly authority_generation: string;
       readonly retired_at: Date;
       readonly terminal_expires_at: Date;
+      readonly terminal_operation_id: string;
+      readonly terminal_operation_kind: 'authority-transfer' | 'retire';
+      readonly result_sha256: string;
+      readonly return_host_member_id: string | null;
+      readonly return_principal_id: string | null;
+      readonly return_authority_fingerprint: string | null;
     }>(
-      `SELECT authority_generation, retired_at, terminal_expires_at
+      `SELECT authority_generation, retired_at, terminal_expires_at,
+              terminal_operation_id, terminal_operation_kind, result_sha256,
+              return_host_member_id, return_principal_id, return_authority_fingerprint
          FROM claudian_cloud.project_tombstones
-        WHERE project_id = $1`,
-      [this.#projectId],
-    );
-    const tombstone = tombstones[0];
-    if (tombstone !== undefined) records.push(Object.freeze({
+        WHERE project_id = $1 ORDER BY terminal_operation_id`,
+      [this.#projectId], records,
+    )) records.push(Object.freeze({
       kind: 'tombstone',
-      recordId: this.#projectId,
+      recordId: row.terminal_operation_id,
       revision: 1,
       value: Object.freeze({
-        authorityGeneration: safeInteger(tombstone.authority_generation),
+        authorityGeneration: safeInteger(row.authority_generation),
         projectId: this.#projectId,
-        retiredAt: iso(tombstone.retired_at),
-        terminalExpiresAt: iso(tombstone.terminal_expires_at),
+        resultSha256: row.result_sha256,
+        retiredAt: iso(row.retired_at),
+        terminalExpiresAt: iso(row.terminal_expires_at),
+        terminalOperationId: row.terminal_operation_id,
+        terminalOperationKind: row.terminal_operation_kind,
+        returnHostMemberId: row.return_host_member_id,
+        returnPrincipalId: row.return_principal_id,
+        returnAuthorityFingerprint: row.return_authority_fingerprint,
       }),
     }));
   }
@@ -1289,6 +1307,7 @@ implements ProjectCheckpointPersistence {
   async #readLifecycle(
     records: BoundedCheckpointRecords,
     excludedOperationId: string | undefined,
+    terminal = false,
   ): Promise<void> {
     for await (const row of this.#queryRows<{
       readonly actor_member_id: string | null;
@@ -1350,6 +1369,14 @@ implements ProjectCheckpointPersistence {
           AND transfer.transfer_id = lifecycle.operation_id
         WHERE lifecycle.project_id = $1
           AND ($2::text IS NULL OR lifecycle.operation_id <> $2)
+          AND (${terminalTransferFilter('lifecycle.operation_id', true)}
+            OR EXISTS (
+              SELECT 1 FROM claudian_cloud.project_tombstones AS continuity
+               WHERE continuity.project_id = lifecycle.project_id
+                 AND lifecycle.kind = 'delete'
+                 AND lifecycle.expected_authority_generation = continuity.authority_generation
+                 AND lifecycle.request_fingerprint = continuity.result_sha256
+            )) = ${terminal ? 'true' : 'false'}
         ORDER BY lifecycle.operation_id`,
       [this.#projectId, excludedOperationId ?? null],
       records,
@@ -1870,6 +1897,7 @@ implements ProjectCheckpointPersistence {
   async #readTransferReceiptKeys(
     records: BoundedCheckpointRecords,
     excludedOperationId: string | undefined,
+    terminal = false,
   ): Promise<void> {
     for await (const row of this.#queryRows<{
       readonly created_at: Date;
@@ -1883,6 +1911,7 @@ implements ProjectCheckpointPersistence {
          FROM claudian_cloud.transfer_receipt_keys
         WHERE project_id = $1
           AND ($2::text IS NULL OR transfer_id <> $2)
+          AND ${terminalTransferFilter('transfer_receipt_keys.transfer_id', terminal)}
         ORDER BY transfer_id, receipt_key_id`,
       [this.#projectId, excludedOperationId ?? null],
       records,
@@ -1928,6 +1957,7 @@ implements ProjectCheckpointPersistence {
   async #readTransferRedemptionReceipts(
     records: BoundedCheckpointRecords,
     excludedOperationId: string | undefined,
+    terminal = false,
   ): Promise<void> {
     for await (const row of this.#queryRows<{
       readonly acknowledged_at: Date | null;
@@ -1939,6 +1969,7 @@ implements ProjectCheckpointPersistence {
          FROM claudian_cloud.transfer_redemption_receipts
         WHERE project_id = $1
           AND ($2::text IS NULL OR transfer_id <> $2)
+          AND ${terminalTransferFilter('transfer_redemption_receipts.transfer_id', terminal)}
         ORDER BY transfer_id, member_id`,
       [this.#projectId, excludedOperationId ?? null],
       records,
@@ -1958,6 +1989,7 @@ implements ProjectCheckpointPersistence {
 
   async #readTerminalResponders(
     records: BoundedCheckpointRecords,
+    terminal = false,
   ): Promise<void> {
     for await (const responder of this.#queryRows<{
       readonly expires_at: Date;
@@ -1971,6 +2003,7 @@ implements ProjectCheckpointPersistence {
               replay_request_sha256, response_json
          FROM claudian_cloud.project_terminal_responders
         WHERE project_id = $1
+          AND ${terminalTransferFilter('project_terminal_responders.operation_id', terminal)}
         ORDER BY operation_kind, operation_id`,
       [this.#projectId],
       records,
@@ -2129,6 +2162,7 @@ implements ProjectCheckpointPersistence {
 
   async #readProtectedEnvelopes(
     records: BoundedCheckpointRecords,
+    terminal = false,
   ): Promise<void> {
     for await (const row of this.#queryRows<{
       readonly associated_data_sha256: string;
@@ -2154,6 +2188,7 @@ implements ProjectCheckpointPersistence {
               key_version, member_id, nonce, receipt_key_id, tag, transfer_id
          FROM claudian_cloud.source_protected_claim_envelopes
         WHERE project_id = $1
+          AND ${terminalTransferFilter('source_protected_claim_envelopes.transfer_id', terminal)}
         ORDER BY transfer_id, member_id`,
       [this.#projectId],
       records,

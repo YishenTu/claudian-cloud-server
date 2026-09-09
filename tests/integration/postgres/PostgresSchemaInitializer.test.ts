@@ -12,7 +12,7 @@ import {
   withPostgresTestDatabase,
 } from '../../helpers/PostgresTestDatabase.js';
 
-const CURRENT_CHECKSUM = '836255d673eecde0c6fae6df35edff9f1528cfcdccd37b81c8dadb72fdc922a7';
+const CURRENT_CHECKSUM = 'fb19a46a46b4d6ae644cb05d6b2df9d2c21afe0353cb4fc107231d469ee65c94';
 
 async function execute(connectionString: string, sql: string): Promise<void> {
   const client = new Client({ connectionString });
@@ -81,7 +81,7 @@ async function verifyCurrentSchema(database: PostgresTestDatabase): Promise<void
     await client.connect();
     const metadata = await client.query<{ readonly singleton: boolean; readonly version: number; readonly checksum: string; readonly transaction: string }>('SELECT singleton, version, checksum, xmin::text AS transaction FROM claudian_cloud.schema_metadata');
     const transaction = metadata.rows[0]?.transaction;
-    assert.deepEqual(metadata.rows, [{ singleton: true, version: 11, checksum: CURRENT_CHECKSUM, transaction }]);
+    assert.deepEqual(metadata.rows, [{ singleton: true, version: 12, checksum: CURRENT_CHECKSUM, transaction }]);
     await migrator.preflight();
     await migrator.apply();
     assert.deepEqual((await client.query('SELECT xmin::text AS transaction FROM claudian_cloud.schema_metadata')).rows, [{ transaction }]);
@@ -177,16 +177,16 @@ async function verifyCurrentSchema(database: PostgresTestDatabase): Promise<void
     for (const update of [
       "SET checksum = repeat('0', 64)",
       'SET version = 10',
-      'SET version = 12',
+      'SET version = 13',
     ]) {
       await client.query(`UPDATE claudian_cloud.schema_metadata ${update}`);
       await expectMigrationError(migrator, 'schema-incompatible');
       await assert.rejects(migrator.preflight(), { code: 'schema-incompatible' });
-      await client.query('UPDATE claudian_cloud.schema_metadata SET version = 11, checksum = $1', [CURRENT_CHECKSUM]);
+      await client.query('UPDATE claudian_cloud.schema_metadata SET version = 12, checksum = $1', [CURRENT_CHECKSUM]);
     }
     await client.query('DELETE FROM claudian_cloud.schema_metadata');
     await expectMigrationError(migrator, 'schema-incompatible');
-    await client.query('INSERT INTO claudian_cloud.schema_metadata VALUES (true, 11, $1)', [CURRENT_CHECKSUM]);
+    await client.query('INSERT INTO claudian_cloud.schema_metadata VALUES (true, 12, $1)', [CURRENT_CHECKSUM]);
   } finally {
     await client.end();
   }
@@ -926,7 +926,7 @@ describe('PostgresSchemaInitializer', () => {
       try {
         await client.connect();
         const result = await client.query('SELECT singleton, version FROM claudian_cloud.schema_metadata');
-        assert.deepEqual(result.rows, [{ singleton: true, version: 11 }]);
+        assert.deepEqual(result.rows, [{ singleton: true, version: 12 }]);
       } finally {
         await client.end();
       }
@@ -963,9 +963,9 @@ describe('PostgresSchemaInitializer', () => {
       } finally {
         await admin.end();
       }
-      assert.deepEqual(await initializer.preflight(), { currentVersion: 0, targetVersion: 11 });
+      assert.deepEqual(await initializer.preflight(), { currentVersion: 0, targetVersion: 12 });
       await Promise.all([initializer.apply(), initializer.apply()]);
-      assert.deepEqual(await initializer.preflight(), { currentVersion: 11, targetVersion: 11 });
+      assert.deepEqual(await initializer.preflight(), { currentVersion: 12, targetVersion: 12 });
     });
   });
 

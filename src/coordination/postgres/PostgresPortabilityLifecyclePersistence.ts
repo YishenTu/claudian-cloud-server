@@ -55,6 +55,7 @@ import type {
   ProjectPrincipalBindingInput,
   ProjectPrincipalBindingRecord,
   ProjectTombstoneInput,
+  ProjectReturnAuthorityRecord,
   ProtectedClaimEnvelopeInput,
   ProtectedClaimScrubResult,
   PutProjectLifecycleJournalInput,
@@ -1899,8 +1900,14 @@ implements PortabilityLifecyclePersistence {
       [this.#projectId, requestedMemberId, leftAt],
     );
     await this.#query(
-      `DELETE FROM claudian_cloud.source_protected_claim_envelopes
-        WHERE project_id = $1 AND member_id = $2`,
+      `DELETE FROM claudian_cloud.source_protected_claim_envelopes AS envelope
+        WHERE envelope.project_id = $1 AND envelope.member_id = $2
+          AND NOT EXISTS (
+            SELECT 1 FROM claudian_cloud.project_tombstones AS tombstone
+             WHERE tombstone.project_id = envelope.project_id
+               AND tombstone.terminal_operation_id = envelope.transfer_id
+               AND tombstone.terminal_operation_kind = 'authority-transfer'
+          )`,
       [this.#projectId, requestedMemberId],
     );
     await this.#query(
@@ -2456,7 +2463,7 @@ implements PortabilityLifecyclePersistence {
       await this.getTerminalResponder(input.operationKind, operationId)
       !== undefined
     ) stateConflict();
-    const tombstone = await this.getProjectTombstone();
+    const tombstone = await this.getProjectTombstone(operationId);
     if (tombstone === undefined && input.operationKind === 'authority-transfer') {
       const journal = await this.getLifecycleJournal(operationId);
       if (
@@ -3568,31 +3575,55 @@ implements PortabilityLifecyclePersistence {
 
   async putProjectTombstone(
     input: ProjectTombstoneInput,
+    authorityFingerprint?: string,
   ): Promise<PersistencePutResult> {
     const canonical = this.#canonicalTombstone(input);
-    const rows = await this.#query<{ readonly project_id: string }>(
+    if (authorityFingerprint !== undefined) {
+      sha256(authorityFingerprint);
+      if (input.terminalOperationKind !== 'authority-transfer') invalidRecord();
+    }
+    const existing = await this.getProjectTombstone(input.terminalOperationId);
+    if (existing !== undefined) {
+      if (!isDeepStrictEqual(existing, canonical)) stateConflict();
+      const pins = await this.#query<{ readonly return_authority_fingerprint: string | null }>(
+        `SELECT return_authority_fingerprint FROM claudian_cloud.project_tombstones
+          WHERE project_id = $1 AND terminal_operation_id = $2`,
+        [this.#projectId, input.terminalOperationId],
+      );
+      if (pins[0]?.return_authority_fingerprint !== (authorityFingerprint ?? null)) stateConflict();
+      return 'replayed';
+    }
+    const latest = await this.getProjectTombstone();
+    if (latest !== undefined && (
+      latest.terminalOperationKind === 'retire'
+      || latest.authorityGeneration >= canonical.authorityGeneration
+    )) stateConflict();
+    const responder = canonical.terminalOperationKind === 'authority-transfer'
+      ? await this.getTerminalResponder('authority-transfer', canonical.terminalOperationId)
+      : undefined;
+    const host = responder?.eligiblePrincipals.find(principal => (
+      principal.memberId === responder.replayAuthorization?.memberId
+    ));
+    if (canonical.terminalOperationKind === 'authority-transfer' && (
+      host === undefined || responder?.responseSha256 !== canonical.resultSha256
+    )) stateConflict();
+    await this.#query(
       `INSERT INTO claudian_cloud.project_tombstones (
          project_id, authority_generation, terminal_operation_kind,
-         terminal_operation_id, result_sha256, retired_at, terminal_expires_at
-       ) VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz)
-       ON CONFLICT (project_id) DO NOTHING
-       RETURNING project_id`,
+         terminal_operation_id, result_sha256, retired_at, terminal_expires_at,
+         return_host_member_id, return_principal_id, return_authority_fingerprint
+       ) VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz, $8, $9, $10)`,
       [
-        this.#projectId,
-        canonical.authorityGeneration,
-        canonical.terminalOperationKind,
-        canonical.terminalOperationId,
-        canonical.resultSha256,
-        canonical.retiredAt,
-        canonical.terminalExpiresAt,
+        this.#projectId, canonical.authorityGeneration, canonical.terminalOperationKind,
+        canonical.terminalOperationId, canonical.resultSha256, canonical.retiredAt,
+        canonical.terminalExpiresAt, host?.memberId ?? null, host?.principalId ?? null, authorityFingerprint ?? null,
       ],
     );
-    const stored = await this.getProjectTombstone();
-    if (stored === undefined || !isDeepStrictEqual(stored, canonical)) stateConflict();
-    return rows.length === 1 ? 'created' : 'replayed';
+    return 'created';
   }
 
-  async getProjectTombstone(): Promise<ProjectTombstoneInput | undefined> {
+  async getProjectTombstone(operationId?: string): Promise<ProjectTombstoneInput | undefined> {
+    if (operationId !== undefined) opaqueId(operationId);
     const rows = await this.#query<{
       readonly authority_generation: string;
       readonly project_id: string;
@@ -3606,8 +3637,9 @@ implements PortabilityLifecyclePersistence {
               terminal_operation_id, result_sha256, retired_at,
               terminal_expires_at
          FROM claudian_cloud.project_tombstones
-        WHERE project_id = $1`,
-      [this.#projectId],
+        WHERE project_id = $1 AND ($2::text IS NULL OR terminal_operation_id = $2)
+        ORDER BY authority_generation DESC LIMIT 1`,
+      [this.#projectId, operationId ?? null],
     );
     const row = rows[0];
     return row === undefined ? undefined : this.#canonicalTombstone({
@@ -3621,12 +3653,45 @@ implements PortabilityLifecyclePersistence {
     });
   }
 
+  async getProjectReturnAuthority(): Promise<ProjectReturnAuthorityRecord | undefined> {
+    const tombstone = await this.getProjectTombstone();
+    if (tombstone?.terminalOperationKind !== 'authority-transfer') return undefined;
+    const rows = await this.#query<{
+      readonly return_host_member_id: string;
+      readonly return_principal_id: string;
+      readonly return_authority_fingerprint: string;
+    }>(
+      `SELECT tombstone.return_host_member_id, tombstone.return_principal_id,
+              tombstone.return_authority_fingerprint
+         FROM claudian_cloud.project_tombstones AS tombstone
+         JOIN claudian_cloud.project_lifecycle_journals AS journal
+           ON journal.project_id = tombstone.project_id
+          AND journal.expected_authority_generation = tombstone.authority_generation
+          AND journal.request_fingerprint = tombstone.result_sha256
+          AND journal.result_sha256 = tombstone.result_sha256
+        WHERE tombstone.project_id = $1 AND tombstone.terminal_operation_id = $2
+          AND tombstone.return_host_member_id IS NOT NULL
+          AND tombstone.return_principal_id IS NOT NULL
+          AND tombstone.return_authority_fingerprint IS NOT NULL
+          AND journal.kind = 'delete' AND journal.phase = 'completed'
+          AND journal.state = 'completed'`,
+      [this.#projectId, tombstone.terminalOperationId],
+    );
+    const row = rows[0];
+    return row === undefined ? undefined : Object.freeze({
+      authorityGeneration: tombstone.authorityGeneration,
+      authorityFingerprint: sha256(row.return_authority_fingerprint),
+      hostMemberId: memberId(row.return_host_member_id),
+      principalId: principalId(row.return_principal_id),
+    });
+  }
+
   async putDeletionIntent(
     input: ProjectDeletionIntentInput,
   ): Promise<PersistencePutResult> {
     const canonical = this.#canonicalDeletionIntent(input);
     const journal = await this.getLifecycleJournal(canonical.operationId);
-    const tombstone = await this.getProjectTombstone();
+    const tombstone = await this.getProjectTombstone(canonical.terminalOperationId);
     const terminalResponder = await this.getTerminalResponder(
       canonical.terminalOperationKind,
       canonical.terminalOperationId,
@@ -3649,9 +3714,11 @@ implements PortabilityLifecyclePersistence {
       )
     ) stateConflict();
     const active = await this.#query<{ readonly operation_id: string }>(
-      `SELECT operation_id
-         FROM claudian_cloud.project_deletion_intents
-        WHERE project_id = $1`,
+      `SELECT intent.operation_id
+         FROM claudian_cloud.project_deletion_intents AS intent
+         JOIN claudian_cloud.project_lifecycle_journals AS journal
+           ON journal.project_id = intent.project_id AND journal.operation_id = intent.operation_id
+        WHERE intent.project_id = $1 AND journal.state <> 'completed'`,
       [this.#projectId],
     );
     if (active[0] !== undefined && active[0].operation_id !== input.operationId) {
@@ -3741,7 +3808,8 @@ implements PortabilityLifecyclePersistence {
     const scheduledAt = timestamp(input.scheduledAt);
     const updatedAt = timestamp(input.updatedAt);
     const intent = await this.getDeletionIntent(operationId);
-    const tombstone = await this.getProjectTombstone();
+    const tombstone = intent === undefined ? undefined
+      : await this.getProjectTombstone(intent.terminalOperationId);
     if (
       intent === undefined
       || tombstone === undefined
@@ -4300,6 +4368,19 @@ implements PortabilityLifecyclePersistence {
              AND journal.operation_id <> $2
              AND journal.operation_id <> $4
              AND NOT EXISTS (
+               SELECT 1 FROM claudian_cloud.project_tombstones AS tombstone
+                WHERE tombstone.project_id = journal.project_id
+                  AND (tombstone.terminal_operation_id = journal.operation_id
+                    OR (journal.kind = 'delete'
+                      AND journal.expected_authority_generation = tombstone.authority_generation
+                      AND journal.request_fingerprint = tombstone.result_sha256))
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM claudian_cloud.project_deletion_intents AS intent
+                WHERE intent.project_id = journal.project_id
+                  AND intent.operation_id = journal.operation_id
+             )
+             AND NOT EXISTS (
                SELECT 1
                  FROM claudian_cloud.source_protected_claim_envelopes AS envelope
                 WHERE envelope.project_id = journal.project_id
@@ -4325,15 +4406,16 @@ implements PortabilityLifecyclePersistence {
          (SELECT count(*)::text
             FROM claudian_cloud.transfer_redemption_receipts AS receipt
            WHERE receipt.project_id = $1
-             AND (
-               $3 <> 'authority-transfer'
-               OR receipt.transfer_id <> $4
-               OR receipt.acknowledged_at IS NULL
-             )) AS bad_receipt_count,
+             AND receipt.acknowledged_at IS NULL) AS bad_receipt_count,
          (SELECT count(*)::text
-            FROM claudian_cloud.project_terminal_responders
-           WHERE project_id = $1
-             AND (operation_kind, operation_id) <> ($3, $4))
+            FROM claudian_cloud.project_terminal_responders AS responder
+           WHERE responder.project_id = $1
+             AND NOT EXISTS (
+               SELECT 1 FROM claudian_cloud.project_tombstones AS tombstone
+                WHERE tombstone.project_id = responder.project_id
+                  AND tombstone.terminal_operation_id = responder.operation_id
+                  AND tombstone.terminal_operation_kind = responder.operation_kind
+             ))
            AS bad_responder_count,
          (SELECT count(*)::text FROM claudian_cloud.recovery_candidates
            WHERE project_id = $1 AND kind = 'delete' AND operation_id = $2)
