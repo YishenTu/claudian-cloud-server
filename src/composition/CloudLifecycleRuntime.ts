@@ -1,8 +1,7 @@
 import type { ProjectLifecycleRecoveryPort } from '../project-authority/lifecycle/ProjectLifecycleRecoveryDispatcher.js';
 import type { CloudLifecycleControl } from '../server/control/ProjectLifecycleRoutes.js';
 import type { AuthorityTransferArtifactAuthority } from '../server/transfer/AuthorityTransferArtifactRoutes.js';
-import type { TerminalResponderExpiryReconciler } from './TerminalResponderExpiryReconciler.js';
-import type { ProjectLifecycleRecoveryReconciler } from './ProjectLifecycleRecoveryReconciler.js';
+import type { PeriodicReconciliation } from './PeriodicReconciliation.js';
 
 /**
  * A complete lifecycle runtime is the composition gate for both lifecycle
@@ -30,11 +29,7 @@ export interface ComposedCloudLifecycleRuntimeOptions {
   readonly closeOrder: readonly CloudLifecycleCloseOwner[];
   readonly control: CompleteCloudLifecycleControl;
   readonly expiry: Pick<
-    TerminalResponderExpiryReconciler,
-    'close' | 'reconcileAll' | 'start'
-  >;
-  readonly recoveryReconciler: Pick<
-    ProjectLifecycleRecoveryReconciler,
+    PeriodicReconciliation,
     'close' | 'reconcileAll' | 'start'
   >;
   readonly recovery: ProjectLifecycleRecoveryPort & CloudLifecycleCloseOwner;
@@ -46,7 +41,6 @@ export class ComposedCloudLifecycleRuntime implements CloudLifecycleRuntime {
   readonly recovery: ProjectLifecycleRecoveryPort;
   readonly #closeOrder: readonly CloudLifecycleCloseOwner[];
   readonly #expiry: ComposedCloudLifecycleRuntimeOptions['expiry'];
-  readonly #recoveryReconciler: ComposedCloudLifecycleRuntimeOptions['recoveryReconciler'];
   readonly #recoveryOwner: ComposedCloudLifecycleRuntimeOptions['recovery'];
   #closePromise: Promise<void> | undefined;
 
@@ -56,18 +50,15 @@ export class ComposedCloudLifecycleRuntime implements CloudLifecycleRuntime {
     this.recovery = options.recovery;
     this.#closeOrder = Object.freeze([...options.closeOrder]);
     this.#expiry = options.expiry;
-    this.#recoveryReconciler = options.recoveryReconciler;
     this.#recoveryOwner = options.recovery;
   }
 
   async reconcileAll(): Promise<void> {
-    await this.#recoveryReconciler.reconcileAll();
     await this.#expiry.reconcileAll();
   }
 
   start(): void {
     this.#expiry.start();
-    this.#recoveryReconciler.start();
   }
 
   close(timeoutMs: number): Promise<void> {
@@ -83,7 +74,6 @@ export class ComposedCloudLifecycleRuntime implements CloudLifecycleRuntime {
     let failed = false;
     for (const owner of [
       this.#expiry,
-      this.#recoveryReconciler,
       this.#recoveryOwner,
       ...this.#closeOrder,
     ]) {

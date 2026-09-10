@@ -1,3 +1,5 @@
+import { SafeLogger } from '../../src/observability/SafeLogger.js';
+import { ProjectRecoveryCoordinator } from '../../src/project-authority/recovery/ProjectRecoveryCoordinator.js';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { describe, it } from 'node:test';
@@ -91,6 +93,7 @@ describe('production Cloud lifecycle runtime', () => {
       } as never,
       importer: {} as never,
       keyring: keyring(),
+      logger: new SafeLogger({ now: () => new Date(0), write: () => undefined }),
       leave: {} as never,
       removal: {} as never,
       repository: {} as never,
@@ -154,16 +157,32 @@ describe('production Cloud lifecycle runtime', () => {
         } as never,
         importer: {} as never,
         keyring: keyring(),
+      logger: new SafeLogger({ now: () => new Date(0), write: () => undefined }),
         leave: {} as never,
         removal: {} as never,
         repository: {} as never,
       });
 
-      await assert.rejects(runtime.reconcileAll(), error => {
+      const recovery = new ProjectRecoveryCoordinator({
+        accept: { recoverProject: () => Promise.resolve() },
+        activation: { recoverProject: () => Promise.resolve() },
+        catalog: { listRecoveryCandidates: () => Promise.resolve({
+          candidates: [{ kind, operationId: record.operationId,
+            projectId: record.projectId, scheduledAt: record.scheduledAt }],
+          nextCursor: undefined,
+        }) },
+        isolation: { acquireProjectLease: () => Promise.reject(new Error('unexpected')) },
+        lifecycle: runtime.recovery,
+      });
+      await assert.rejects(recovery.recoverAll(), error => {
         assert.ok(error instanceof ProjectRecoveryError);
         assert.equal(error.code, 'dependency-failed');
         return true;
       });
+      assert.deepEqual(await recovery.recoverAvailable(), {
+        settled: 0, isolated: 0, waiting: 0, offline: 1,
+      });
+      recovery.close();
       await runtime.close(1_000);
     }
   });

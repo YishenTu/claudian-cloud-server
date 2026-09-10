@@ -7,6 +7,7 @@ import {
 import type {
   RecoveryCandidate,
   RecoveryCandidateCatalog,
+  RecoveryCandidateCursor,
   RecoveryCandidateKind,
   UnknownRecoveryCandidate,
 } from '../../coordination/DevelopmentBootstrapPersistence.js';
@@ -26,7 +27,15 @@ import {
 } from '../lifecycle/ProjectActivationCoordinator.js';
 import type {
   ProjectLifecycleRecoveryPort,
+  ProjectLifecycleRecoveryOutcome,
 } from '../lifecycle/ProjectLifecycleRecoveryDispatcher.js';
+
+export interface ProjectRecoveryPass {
+  readonly settled: number;
+  readonly isolated: number;
+  readonly waiting: number;
+  readonly offline: number;
+}
 
 export interface ProjectRecoveryCoordinatorOptions {
   readonly accept: ProjectRecoveryPort;
@@ -72,6 +81,19 @@ function canonicalTimestamp(value: unknown): value is string {
 
 const RECOVERY_KIND_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 
+function candidateCursor(candidate: RecoveryCandidate): RecoveryCandidateCursor | undefined {
+  const cursor = {
+    kind: candidate.kind === 'unknown' ? candidate.unrecognizedKind : candidate.kind,
+    operationId: candidate.operationId,
+    projectId: candidate.projectId,
+    scheduledAt: candidate.scheduledAt,
+  };
+  if (!RECOVERY_KIND_PATTERN.test(cursor.kind)
+    || !isCollabOpaqueId(cursor.operationId) || !isCollabProjectId(cursor.projectId)
+    || !canonicalTimestamp(cursor.scheduledAt)) return undefined;
+  return Object.freeze(cursor);
+}
+
 export class ProjectRecoveryCoordinator implements ProjectRecoveryPort {
   readonly #accept: ProjectRecoveryPort;
   readonly #activation: ProjectRecoveryPort;
@@ -83,6 +105,7 @@ export class ProjectRecoveryCoordinator implements ProjectRecoveryPort {
   readonly #membership: ProjectRecoveryPort | undefined;
   readonly #removal: ProjectRecoveryPort | undefined;
   #closed = false;
+  #servingAfter: RecoveryCandidateCursor | undefined;
 
   constructor(options: ProjectRecoveryCoordinatorOptions) {
     this.#accept = options.accept;
@@ -122,7 +145,16 @@ export class ProjectRecoveryCoordinator implements ProjectRecoveryPort {
   }
 
   async recoverAll(): Promise<void> {
-    let after;
+    await this.#recoverCatalog(false);
+  }
+
+  recoverAvailable(): Promise<ProjectRecoveryPass> {
+    return this.#recoverCatalog(true);
+  }
+
+  async #recoverCatalog(serving: boolean): Promise<ProjectRecoveryPass> {
+    const pass = { settled: 0, isolated: 0, waiting: 0, offline: 0 };
+    let after = serving ? this.#servingAfter : undefined;
     for (;;) {
       this.#assertOpen();
       const page = await this.#catalog.listRecoveryCandidates(
@@ -130,13 +162,32 @@ export class ProjectRecoveryCoordinator implements ProjectRecoveryPort {
       );
       for (const candidate of page.candidates) {
         this.#assertOpen();
+        const cursor = candidateCursor(candidate);
         try {
-          await this.#recoverCandidate(candidate);
+          const outcome = await this.#recoverCandidate(candidate);
+          switch (outcome) {
+            case 'settled': pass.settled += 1; break;
+            case 'waiting-for-external-proof': pass.waiting += 1; break;
+            case 'offline-maintenance-required': {
+              if (!serving) throw new ProjectRecoveryError('dependency-failed');
+              pass.offline += 1;
+              break;
+            }
+          }
         } catch (error: unknown) {
-          if (!isIsolatedRecovery(error)) throw error;
+          if (!isIsolatedRecovery(error)) {
+            // A failed pass still rejects. Rotate its next serving attempt so
+            // one persistent failure cannot monopolize the catalog prefix.
+            if (serving && cursor !== undefined) this.#servingAfter = cursor;
+            throw error;
+          }
+          pass.isolated += 1;
         }
       }
-      if (page.nextCursor === undefined) return;
+      if (page.nextCursor === undefined) {
+        if (serving) this.#servingAfter = undefined;
+        return Object.freeze(pass);
+      }
       after = page.nextCursor;
     }
   }
@@ -173,17 +224,19 @@ export class ProjectRecoveryCoordinator implements ProjectRecoveryPort {
     return unsupportedRecoveryKind(kind);
   }
 
-  #recoverCandidate(candidate: RecoveryCandidate): Promise<void> {
+  async #recoverCandidate(candidate: RecoveryCandidate): Promise<ProjectLifecycleRecoveryOutcome> {
     switch (candidate.kind) {
       case 'accept':
       case 'activation':
       case 'create-project':
       case 'join-project':
       case 'remove-member':
-        return this.#owner(candidate.kind).recoverProject(candidate.projectId);
+        await this.#owner(candidate.kind).recoverProject(candidate.projectId);
+        return 'settled';
       case 'leave':
         if (this.#leave !== undefined) {
-          return this.#leave.recoverProject(candidate.projectId);
+          await this.#leave.recoverProject(candidate.projectId);
+          return 'settled';
         }
         if (this.#lifecycle === undefined) return unsupportedRecoveryKind(
           candidate.kind,
@@ -199,7 +252,8 @@ export class ProjectRecoveryCoordinator implements ProjectRecoveryPort {
         );
         return this.#lifecycle.recoverCandidate(candidate);
       case 'unknown':
-        return this.#isolateUnknownCandidate(candidate);
+        await this.#isolateUnknownCandidate(candidate);
+        return 'settled';
       default: {
         const forwardCandidate = candidate as unknown as {
           readonly kind: string;
@@ -207,13 +261,14 @@ export class ProjectRecoveryCoordinator implements ProjectRecoveryPort {
           readonly projectId: string;
           readonly scheduledAt: string;
         };
-        return this.#isolateUnknownCandidate(Object.freeze({
+        await this.#isolateUnknownCandidate(Object.freeze({
           kind: 'unknown',
           operationId: forwardCandidate.operationId,
           projectId: forwardCandidate.projectId,
           scheduledAt: forwardCandidate.scheduledAt,
           unrecognizedKind: forwardCandidate.kind,
         }));
+        return 'settled';
       }
     }
   }

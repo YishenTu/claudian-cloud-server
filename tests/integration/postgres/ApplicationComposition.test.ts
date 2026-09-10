@@ -38,7 +38,8 @@ import {
 
 import { createApplication } from '../../../src/composition/createApplication.js';
 import { ComposedCloudLifecycleRuntime } from '../../../src/composition/CloudLifecycleRuntime.js';
-import { TerminalResponderExpiryReconciler } from '../../../src/composition/TerminalResponderExpiryReconciler.js';
+import { TerminalResponderExpiryReconciler } from '../../../src/project-authority/lifecycle/retire/TerminalResponderExpiryReconciler.js';
+import { PeriodicReconciliation } from '../../../src/composition/PeriodicReconciliation.js';
 import { decodeClaimCustodyKeyring } from '../../../src/config/ClaimCustodyKeyringConfig.js';
 import type { ServerConfig } from '../../../src/config/ServerConfig.js';
 import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
@@ -434,7 +435,7 @@ describe('application composition', { concurrency: false }, () => {
         },
         reconcileAll: () => Promise.resolve(),
         recovery: {
-          recoverCandidate: () => Promise.resolve(),
+          recoverCandidate: () => Promise.resolve('settled'),
           recoverProject: () => Promise.resolve(),
         },
         start: () => { lifecycleStarted = true; },
@@ -931,7 +932,7 @@ while :; do sleep 1; done`,
           return Promise.resolve();
         },
         recovery: {
-          recoverCandidate: () => Promise.resolve(),
+          recoverCandidate: () => Promise.resolve('settled'),
           recoverProject: () => Promise.resolve(),
         },
         start: () => lifecycle.push('start'),
@@ -1652,7 +1653,7 @@ while :; do sleep 1; done`,
       release = resolve;
     });
     const closed: string[] = [];
-    const expiry = new TerminalResponderExpiryReconciler({
+    const terminalExpiry = new TerminalResponderExpiryReconciler({
       catalog: {
         listTerminalResponders: async () => {
           entered();
@@ -1661,7 +1662,11 @@ while :; do sleep 1; done`,
         },
       },
       expiry: { expire: () => Promise.resolve('replayed') },
+    });
+    const expiry = new PeriodicReconciliation({
       intervalMs: 60_000,
+      run: signal => terminalExpiry.reconcileAll(signal),
+      onBackgroundFailure: () => assert.fail('unexpected-background-failure'),
     });
     const lifecycle = new ComposedCloudLifecycleRuntime({
       artifacts: {
@@ -1674,14 +1679,9 @@ while :; do sleep 1; done`,
         getRetirementTerminal: () => Promise.resolve(null),
       },
       expiry,
-      recoveryReconciler: {
-        close: () => Promise.resolve(),
-        reconcileAll: () => Promise.resolve(),
-        start: () => undefined,
-      },
       recovery: {
         close: () => { closed.push('recovery'); },
-        recoverCandidate: () => Promise.resolve(),
+        recoverCandidate: () => Promise.resolve('settled'),
         recoverProject: () => Promise.resolve(),
       },
     });

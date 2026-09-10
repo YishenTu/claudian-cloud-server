@@ -4,10 +4,8 @@ import { describe, it } from 'node:test';
 import { DevelopmentBootstrapExpiryReconciler } from '../../src/onboarding/development/DevelopmentBootstrapExpiryReconciler.js';
 
 describe('DevelopmentBootstrapExpiryReconciler', () => {
-  it('continues reconciling expired attempts while the application is running', async () => {
+  it('reconciles due attempts through their settlement owner', async () => {
     const expirations: Array<{ attemptId: string; projectId: string }> = [];
-    const scheduled: Array<{ delayMs: number; operation: () => void }> = [];
-    const cancellations: Array<() => void> = [];
     const reconciler = new DevelopmentBootstrapExpiryReconciler({
       catalog: {
         listExpiredDevelopmentBootstrapAttempts(options) {
@@ -23,12 +21,6 @@ describe('DevelopmentBootstrapExpiryReconciler', () => {
         },
       },
       clock: () => new Date('2026-08-22T00:00:00.000Z'),
-      schedule: (operation, delayMs) => {
-        const cancellation = () => undefined;
-        scheduled.push({ delayMs, operation });
-        cancellations.push(cancellation);
-        return cancellation;
-      },
       settlement: {
         activate: () => Promise.resolve(),
         cancel: () => Promise.resolve(),
@@ -40,18 +32,11 @@ describe('DevelopmentBootstrapExpiryReconciler', () => {
       },
     });
 
-    reconciler.start();
-    assert.equal(scheduled.length, 1);
-    assert.equal(scheduled[0]?.delayMs, 60_000);
-
-    scheduled[0].operation();
-    await new Promise(resolve => setImmediate(resolve));
+    await reconciler.reconcileAll();
 
     assert.deepEqual(expirations, [{
       attemptId: 'attempt-expired',
       projectId: 'project-expired',
     }]);
-    assert.equal(scheduled.length, 2);
-    await reconciler.close();
   });
 });

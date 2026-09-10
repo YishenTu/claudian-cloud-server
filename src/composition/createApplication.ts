@@ -79,6 +79,7 @@ import {
   AuthorityVolumePairError,
   AuthorityVolumePairVerifier,
 } from './AuthorityVolumePairVerifier.js';
+import { PeriodicReconciliation } from './PeriodicReconciliation.js';
 import type { CloudLifecycleRuntime } from './CloudLifecycleRuntime.js';
 import { createProductionCloudLifecycleRuntime } from './ProductionCloudLifecycleRuntime.js';
 
@@ -185,7 +186,7 @@ class CloudApplication implements Application {
   readonly #invitationAuthority: ProjectInvitationAuthority | undefined;
   readonly #membershipAdministrationAuthority: ProjectMembershipAdministrationAuthority;
   readonly #memberRemovalCoordinator: ProjectMemberRemovalCoordinator;
-  readonly #membershipExpiryReconciler: ProjectMembershipExpiryReconciler;
+  readonly #membershipExpiryReconciler: PeriodicReconciliation;
   readonly #leaveCoordinator: LeaveCoordinator;
   readonly #transferredMembershipClaimAuthority: TransferredMembershipClaimAuthority | undefined;
   readonly #membershipWriteAdmission: ProjectWriteAdmission;
@@ -196,7 +197,7 @@ class CloudApplication implements Application {
   readonly #bootstrapUploadAdmission: BootstrapUploadAdmission;
   readonly #bootstrapRepositoryIntegrity: BootstrapRepositoryIntegrityVerifier;
   readonly #bundleImporter: GitBundleImporter;
-  readonly #bootstrapExpiryReconciler: DevelopmentBootstrapExpiryReconciler;
+  readonly #bootstrapExpiryReconciler: PeriodicReconciliation;
   readonly #httpServer: HttpServer;
   readonly #logger: SafeLogger;
   readonly #lifecycle: CloudLifecycleRuntime | undefined;
@@ -212,6 +213,7 @@ class CloudApplication implements Application {
   readonly #repositoryPublication: RepositoryPublication;
   readonly #membershipRepositoryMaintenance: RepositoryCheckpointAuthority;
   readonly #recoveryCoordinator: ProjectRecoveryCoordinator;
+  readonly #recoveryReconciliation: PeriodicReconciliation;
   readonly #resourceAdmission: ResourceAdmission;
   readonly #startupController = new AbortController();
   #address: HttpServerAddress | undefined;
@@ -374,6 +376,7 @@ class CloudApplication implements Application {
             coordination: this.#coordination,
             importer: this.#bundleImporter,
             keyring: options.keyring,
+            logger: options.logger,
             leave: this.#leaveCoordinator,
             removal: this.#memberRemovalCoordinator,
             repository: this.#membershipRepositoryMaintenance,
@@ -391,6 +394,20 @@ class CloudApplication implements Application {
       ...(this.#lifecycle === undefined
         ? {}
         : { lifecycle: this.#lifecycle.recovery }),
+    });
+    this.#recoveryReconciliation = new PeriodicReconciliation({
+      intervalMs: 60_000,
+      run: async () => {
+        const pass = await this.#recoveryCoordinator.recoverAvailable();
+        if (pass.isolated > 0 || pass.offline > 0) {
+          this.#logger.warn('server.recovery-incomplete', {
+            isolated: pass.isolated, offline: pass.offline, waiting: pass.waiting,
+          });
+        }
+      },
+      onBackgroundFailure: () => this.#logger.error('server.reconciliation-failed', {
+        reason: 'project-recovery-failed',
+      }),
     });
     this.#membershipWriteAdmission = new ProjectWriteAdmission({
       coordination: this.#coordination,
@@ -464,12 +481,26 @@ class CloudApplication implements Application {
           keyring: options.keyring,
         }),
       });
-    this.#bootstrapExpiryReconciler = new DevelopmentBootstrapExpiryReconciler({
+    const bootstrapExpiry = new DevelopmentBootstrapExpiryReconciler({
       catalog: this.#coordination,
       settlement: this.#activationCoordinator,
     });
-    this.#membershipExpiryReconciler = new ProjectMembershipExpiryReconciler({
+    const membershipExpiry = new ProjectMembershipExpiryReconciler({
       coordination: this.#coordination,
+    });
+    this.#bootstrapExpiryReconciler = new PeriodicReconciliation({
+      intervalMs: 60_000,
+      run: signal => bootstrapExpiry.reconcileAll(signal),
+      onBackgroundFailure: () => this.#logger.error('server.reconciliation-failed', {
+        reason: 'bootstrap-expiry-failed',
+      }),
+    });
+    this.#membershipExpiryReconciler = new PeriodicReconciliation({
+      intervalMs: 60_000,
+      run: signal => membershipExpiry.reconcileAll(signal),
+      onBackgroundFailure: () => this.#logger.error('server.reconciliation-failed', {
+        reason: 'membership-expiry-failed',
+      }),
     });
     const bootstrapProfile = new DevelopmentBootstrapProfile({
       attemptTtlMs: options.config.developmentBootstrap.attemptTtlMs,
@@ -707,6 +738,7 @@ class CloudApplication implements Application {
       this.#bootstrapExpiryReconciler.start();
       this.#membershipExpiryReconciler.start();
       this.#lifecycle?.start();
+      this.#recoveryReconciliation.start();
       this.#logger.info('server.listening', { port: address.port });
       return address;
     } catch (error: unknown) {
@@ -767,6 +799,7 @@ class CloudApplication implements Application {
     const results: boolean[] = [];
 
     const httpClose = this.#httpServer.close(Math.max(1, deadline - Date.now()));
+    const recoveryClose = this.#recoveryReconciliation.close();
     this.#recoveryCoordinator.close();
     const lifecycleClose = this.#lifecycle?.close(
       Math.max(1, deadline - Date.now()),
@@ -798,6 +831,7 @@ class CloudApplication implements Application {
     results.push(await settleBefore(ticketClose, deadline));
     results.push(await settleBefore(httpClose, deadline));
     results.push(await settleBefore(lifecycleClose, deadline));
+    results.push(await settleBefore(recoveryClose, deadline));
     results.push(await settleBefore(this.#bootstrapExpiryReconciler.close(), deadline));
     results.push(await settleBefore(this.#membershipExpiryReconciler.close(), deadline));
     results.push(await settleBefore(this.#activationCoordinator.close(), deadline));

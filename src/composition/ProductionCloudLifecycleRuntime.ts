@@ -39,13 +39,15 @@ import {
   ComposedCloudLifecycleRuntime,
   type CloudLifecycleRuntime,
 } from './CloudLifecycleRuntime.js';
-import { TerminalResponderExpiryReconciler } from './TerminalResponderExpiryReconciler.js';
-import { ProjectLifecycleRecoveryReconciler } from './ProjectLifecycleRecoveryReconciler.js';
+import { TerminalResponderExpiryReconciler } from '../project-authority/lifecycle/retire/TerminalResponderExpiryReconciler.js';
+import type { SafeLogger } from '../observability/SafeLogger.js';
+import { PeriodicReconciliation } from './PeriodicReconciliation.js';
 
 export interface ProductionCloudLifecycleRuntimeOptions {
   readonly config: ServerConfig;
   readonly coordination: PostgresCoordination;
   readonly keyring: ClaimCustodyKeyringConfig;
+  readonly logger: SafeLogger;
   readonly leave: LeaveCoordinator;
   readonly importer: GitBundleImporter;
   readonly removal: ProjectMemberRemovalCoordinator;
@@ -69,9 +71,7 @@ function checkpointAdmission(config: ServerConfig): CheckpointStreamAdmission {
 }
 
 const unavailableOnlineMaintenanceOwner: ProjectLifecycleRecoveryOwner = Object.freeze({
-  recover: () => Promise.reject(
-    new Error('production-cloud-lifecycle-runtime.offline-maintenance-required'),
-  ),
+  recover: () => Promise.resolve('offline-maintenance-required' as const),
 });
 
 /** Constructs every online lifecycle owner around the serving process's stores. */
@@ -155,15 +155,16 @@ export function createProductionCloudLifecycleRuntime(
       retire,
     },
   });
-  const expiry = new TerminalResponderExpiryReconciler({
+  const terminalExpiry = new TerminalResponderExpiryReconciler({
     catalog: options.coordination,
     expiry: new TerminalResponderExpiry({ coordination: options.coordination }),
-    intervalMs: 60_000,
   });
-  const recoveryReconciler = new ProjectLifecycleRecoveryReconciler({
-    catalog: options.coordination,
+  const expiry = new PeriodicReconciliation({
     intervalMs: 60_000,
-    recovery,
+    run: signal => terminalExpiry.reconcileAll(signal),
+    onBackgroundFailure: () => options.logger.error('server.reconciliation-failed', {
+      reason: 'terminal-expiry-failed',
+    }),
   });
   const control = new CloudLifecycleControlAdapter({
     cloudToLan,
@@ -189,6 +190,5 @@ export function createProductionCloudLifecycleRuntime(
     control,
     expiry,
     recovery,
-    recoveryReconciler,
   });
 }

@@ -1,4 +1,6 @@
 export type SafeLogEvent =
+  | 'server.reconciliation-failed'
+  | 'server.recovery-incomplete'
   | 'server.listening'
   | 'server.shutdown-failed'
   | 'server.starting'
@@ -21,6 +23,9 @@ const TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 const CONTEXT_RULES: Readonly<Record<string, ContextRule>> = Object.freeze({
   durationMs: 'number',
+  isolated: 'integer',
+  offline: 'integer',
+  waiting: 'integer',
   port: 'integer',
   protocolVersion: 'integer',
   reason: 'token',

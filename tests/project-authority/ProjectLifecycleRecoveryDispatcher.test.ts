@@ -1,3 +1,4 @@
+import { EnvironmentProjectRecovery } from '../../src/environment-maintenance/recovery/EnvironmentProjectRecovery.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
@@ -224,7 +225,7 @@ describe('ProjectLifecycleRecoveryDispatcher', () => {
       scheduledAt: CREATED_AT,
     });
     try {
-      await dispatcher.recoverAvailable({
+      await new EnvironmentProjectRecovery(dispatcher).recoverAvailable({
         listRecoveryCandidates: options => Promise.resolve(options?.after === undefined ? {
           candidates: (['accept', 'activation', 'create-project', 'join-project'] as const)
             .map(kind => ({ ...cursor, kind })),
@@ -252,7 +253,7 @@ describe('ProjectLifecycleRecoveryDispatcher', () => {
         owners: owners({ recover: () => Promise.reject(new Error('unexpected-recovery')) }),
       });
       try {
-        await expectRecoveryError(dispatcher.recoverAll({
+        await expectRecoveryError(new EnvironmentProjectRecovery(dispatcher).recoverAll({
           listRecoveryCandidates: () => Promise.resolve({
             candidates: [{
               kind,
@@ -276,7 +277,7 @@ describe('ProjectLifecycleRecoveryDispatcher', () => {
       owners: owners({ recover: () => Promise.reject(new Error('unexpected-recovery')) }),
     });
     try {
-      await expectRecoveryError(dispatcher.recoverAvailable({
+      await expectRecoveryError(new EnvironmentProjectRecovery(dispatcher).recoverAvailable({
         listRecoveryCandidates: () => Promise.resolve({
           candidates: [{
             kind: 'unknown',
@@ -311,7 +312,7 @@ describe('ProjectLifecycleRecoveryDispatcher', () => {
       }),
     });
 
-    await dispatcher.recoverAll({
+    await new EnvironmentProjectRecovery(dispatcher).recoverAll({
       listRecoveryCandidates: () => Promise.resolve({
         candidates: [{
           kind: record.kind,
@@ -345,7 +346,7 @@ describe('ProjectLifecycleRecoveryDispatcher', () => {
       }),
     });
 
-    await expectRecoveryError(dispatcher.recoverAll({
+    await expectRecoveryError(new EnvironmentProjectRecovery(dispatcher).recoverAll({
       listRecoveryCandidates: () => Promise.resolve({
         candidates: [{
           kind: record.kind,
@@ -377,7 +378,7 @@ describe('ProjectLifecycleRecoveryDispatcher', () => {
       }),
     });
 
-    await dispatcher.recoverAvailable({
+    await new EnvironmentProjectRecovery(dispatcher).recoverAvailable({
       listRecoveryCandidates: () => Promise.resolve({
         candidates: [{
           kind: record.kind,
@@ -592,6 +593,144 @@ describe('ProjectLifecycleRecoveryDispatcher', () => {
     dispatcher.close();
   });
 
+  it('reports an unclassified failure and resumes the next serving pass after it', async () => {
+    const attempted: string[] = [];
+    const candidates = ['project-a', 'project-b'].map(projectId => ({
+      kind: 'accept' as const, operationId: `accept-${projectId}`, projectId,
+      scheduledAt: CREATED_AT,
+    }));
+    const coordinator = new ProjectRecoveryCoordinator({
+      accept: { recoverProject: projectId => {
+        attempted.push(projectId);
+        return projectId === 'project-a'
+          ? Promise.reject(new Error('private-dependent-failure')) : Promise.resolve();
+      } },
+      activation: { recoverProject: () => Promise.resolve() },
+      catalog: { listRecoveryCandidates: options => Promise.resolve({
+        candidates: options?.after?.projectId === 'project-a' ? candidates.slice(1) : candidates,
+        nextCursor: undefined,
+      }) },
+      isolation: { acquireProjectLease: () => Promise.reject(new Error('unexpected')) },
+    });
+    await assert.rejects(coordinator.recoverAvailable(), /private-dependent-failure/u);
+    assert.deepEqual(attempted, ['project-a']);
+    assert.deepEqual(await coordinator.recoverAvailable(), {
+      settled: 1, isolated: 0, waiting: 0, offline: 0,
+    });
+    await assert.rejects(coordinator.recoverAvailable(), /private-dependent-failure/u);
+    await coordinator.recoverAvailable();
+    assert.deepEqual(attempted, ['project-a', 'project-b', 'project-a', 'project-b']);
+    await assert.rejects(coordinator.recoverAll(), /private-dependent-failure/u);
+    coordinator.close();
+  });
+
+  it('preserves a raw unknown-kind cursor across catalog failure without affecting startup', async () => {
+    const expectedCursor = {
+      kind: 'future-lifecycle', operationId: 'future-operation',
+      projectId: 'project-a', scheduledAt: CREATED_AT,
+    };
+    let catalogUnavailable = false;
+    let recovered = false;
+    const coordinator = new ProjectRecoveryCoordinator({
+      accept: { recoverProject: () => { recovered = true; return Promise.resolve(); } },
+      activation: { recoverProject: () => Promise.resolve() },
+      catalog: { listRecoveryCandidates: options => {
+        if (options?.after !== undefined) assert.deepEqual(options.after, expectedCursor);
+        if (catalogUnavailable) return Promise.reject(new Error('catalog-unavailable'));
+        return Promise.resolve({
+          candidates: options?.after === undefined ? [{
+            ...expectedCursor, kind: 'unknown' as const, unrecognizedKind: 'future-lifecycle',
+          }] : [{
+            kind: 'accept' as const, operationId: 'later-operation',
+            projectId: 'project-b', scheduledAt: CREATED_AT,
+          }],
+          nextCursor: undefined,
+        });
+      } },
+      isolation: { acquireProjectLease: () => Promise.reject(new Error('isolation-unavailable')) },
+    });
+    await expectRecoveryError(coordinator.recoverAvailable(), 'dependency-failed');
+    catalogUnavailable = true;
+    await assert.rejects(coordinator.recoverAvailable(), /catalog-unavailable/u);
+    catalogUnavailable = false;
+    await expectRecoveryError(coordinator.recoverAll(), 'dependency-failed');
+    await coordinator.recoverAvailable();
+    assert.equal(recovered, true);
+    await expectRecoveryError(coordinator.recoverAvailable(), 'dependency-failed');
+    coordinator.close();
+  });
+
+  it('continues serving recovery past fenced and offline Projects with explicit outcomes', async () => {
+    const blocked = new MemoryLifecycleCoordination({
+      ...journal('retire'), state: 'recovery-required',
+    });
+    const offline = new MemoryLifecycleCoordination({
+      ...journal('backup'), projectId: 'project-b',
+    });
+    const healthy = new MemoryLifecycleCoordination({
+      ...journal('retire'), projectId: 'project-c',
+    });
+    const stores = new Map([
+      ['project-a', blocked], ['project-b', offline], ['project-c', healthy],
+    ]);
+    const catalog = {
+      listRecoveryCandidates: () => Promise.resolve({
+        candidates: [...stores.values()].flatMap(store => {
+          const current = store.current;
+          return current?.state === 'completed' || current === undefined ? [] : [{
+            kind: current.kind,
+            operationId: current.operationId,
+            projectId: current.projectId,
+            scheduledAt: current.scheduledAt,
+          }];
+        }),
+        nextCursor: undefined,
+      }),
+    };
+    const isolation = {
+      acquireProjectLease: (projectId: CollabProjectId) => {
+        const store = stores.get(projectId);
+        assert.ok(store);
+        return store.acquireProjectLease(projectId);
+      },
+    };
+    const unused: ProjectLifecycleRecoveryOwner = {
+      recover: () => Promise.reject(new Error('unexpected-owner')),
+    };
+    const dispatcher = new ProjectLifecycleRecoveryDispatcher({
+      coordination: isolation,
+      owners: {
+        authorityTransfer: unused,
+        backup: { recover: () => Promise.resolve('offline-maintenance-required') },
+        deletion: unused, export: unused, leave: unused,
+        retire: { recover: input => {
+          const store = stores.get(input.journal.projectId);
+          assert.ok(store);
+          store.current = { ...input.journal, state: 'completed' };
+          return Promise.resolve('settled');
+        } },
+      },
+    });
+    const coordinator = new ProjectRecoveryCoordinator({
+      accept: { recoverProject: () => Promise.resolve() },
+      activation: { recoverProject: () => Promise.resolve() },
+      catalog, isolation, lifecycle: dispatcher,
+    });
+    assert.deepEqual(await coordinator.recoverAvailable(), {
+      settled: 1, isolated: 1, waiting: 0, offline: 1,
+    });
+    assert.equal(healthy.current?.state, 'completed');
+    assert.equal(blocked.current?.state, 'recovery-required');
+    assert.equal(offline.current?.state, 'active');
+    assert.deepEqual(await coordinator.recoverAvailable(), {
+      settled: 0, isolated: 1, waiting: 0, offline: 1,
+    });
+    await expectRecoveryError(coordinator.recoverAll(), 'dependency-failed');
+    await expectRecoveryError(dispatcher.recoverProject('project-b'), 'recovery-required');
+    coordinator.close();
+    dispatcher.close();
+  });
+
   it('routes catalog lifecycle candidates without teaching the mixed dispatcher phases', async () => {
     const candidates = [
       {
@@ -648,7 +787,7 @@ describe('ProjectLifecycleRecoveryDispatcher', () => {
       lifecycle: {
         recoverCandidate: candidate => {
           calls.push(`lifecycle:${candidate.kind}:${candidate.operationId}`);
-          return Promise.resolve();
+          return Promise.resolve('settled');
         },
         recoverProject: () => Promise.resolve(),
       },

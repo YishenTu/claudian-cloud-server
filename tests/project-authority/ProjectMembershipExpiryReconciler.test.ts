@@ -4,10 +4,9 @@ import { describe, it } from 'node:test';
 import { ProjectMembershipExpiryReconciler } from '../../src/project-authority/membership/ProjectMembershipExpiryReconciler.js';
 
 describe('ProjectMembershipExpiryReconciler', () => {
-  it('reconciles every active Project through its write lane and drains on close', async () => {
+  it('reconciles every active Project through its write lane', async () => {
     const reconciled: Array<{ now: string; projectId: string }> = [];
     const closed: string[] = [];
-    const scheduled: Array<{ delayMs: number; operation: () => void }> = [];
     const reconciler = new ProjectMembershipExpiryReconciler({
       clock: () => new Date('2026-08-30T00:00:00.000Z'),
       coordination: {
@@ -37,17 +36,9 @@ describe('ProjectMembershipExpiryReconciler', () => {
               },
         ),
       },
-      schedule: (operation, delayMs) => {
-        scheduled.push({ delayMs, operation });
-        return () => undefined;
-      },
     });
 
-    reconciler.start();
-    assert.equal(scheduled[0]?.delayMs, 60_000);
-    scheduled[0].operation();
-    await new Promise(resolve => setImmediate(resolve));
-    await reconciler.close();
+    await reconciler.reconcileAll();
 
     assert.deepEqual(reconciled, [
       { now: '2026-08-30T00:00:00.000Z', projectId: 'project-a' },

@@ -1,3 +1,4 @@
+import { EnvironmentProjectRecovery } from '../../src/environment-maintenance/recovery/EnvironmentProjectRecovery.js';
 import assert from 'node:assert/strict';
 import { mkdtemp, open, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -219,6 +220,131 @@ async function within<Result>(
 }
 
 describe('Project lifecycle cross-store recovery', () => {
+  it('recovers a later Project after restart while an earlier journal remains isolated', async context => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
+      const root = await mkdtemp(join(tmpdir(), 'claudian-isolated-recovery-'));
+      context.after(() => rm(root, { recursive: true, force: true }));
+      const repository = new DurableRepositoryEffect(root);
+      for (const projectId of ['project-isolated-a', 'project-isolated-b']) {
+        await seedProject(database, projectId);
+      }
+      const firstStore = coordination(database);
+      try {
+        for (const suffix of ['a', 'b']) {
+          await firstStore.withProjectScope(`project-isolated-${suffix}`, async scope => {
+            await scope.portability.putLifecycleJournal({
+              actorMemberId: undefined, createdAt: T0, direction: undefined,
+              expectedAuthorityGeneration: 1, idempotencyKey: `intent-isolated-${suffix}`,
+              kind: 'backup', operationId: `backup-isolated-${suffix}`, phase: 'prepared',
+              projectId: `project-isolated-${suffix}`, requestFingerprint: suffix.repeat(64),
+              scheduledAt: T0,
+            });
+            if (suffix === 'a') await scope.portability.advanceLifecycleJournal({
+              expectedPhase: 'prepared', expectedState: 'active', nextPhase: 'prepared',
+              nextState: 'recovery-required', operationId: 'backup-isolated-a',
+              recoveryFromPhase: 'prepared', scheduledAt: T0, updatedAt: T1,
+            });
+          });
+        }
+      } finally {
+        await firstStore.close();
+      }
+      const restartedStore = coordination(database);
+      const lifecycle = new ProjectLifecycleRecoveryDispatcher({
+        coordination: restartedStore,
+        owners: owners(new VerticalOwner(new FaultController(), repository)),
+      });
+      const coordinator = new ProjectRecoveryCoordinator({
+        accept: { recoverProject: () => Promise.resolve() },
+        activation: { recoverProject: () => Promise.resolve() },
+        catalog: restartedStore, isolation: restartedStore, lifecycle,
+      });
+      try {
+        assert.deepEqual(await coordinator.recoverAvailable(), {
+          settled: 1, isolated: 1, waiting: 0, offline: 0,
+        });
+        await repository.assertApplied('backup-isolated-b');
+        await restartedStore.withProjectScope('project-isolated-a', async scope => {
+          assert.equal((await scope.portability.getLifecycleJournal('backup-isolated-a'))?.state,
+            'recovery-required');
+        });
+        assert.deepEqual(await coordinator.recoverAvailable(), {
+          settled: 0, isolated: 1, waiting: 0, offline: 0,
+        });
+        await assert.rejects(new EnvironmentProjectRecovery(lifecycle).recoverAll(restartedStore),
+          error => error instanceof ProjectRecoveryError && error.code === 'recovery-required');
+      } finally {
+        coordinator.close();
+        lifecycle.close();
+        await restartedStore.close();
+      }
+    });
+  });
+
+  it('rotates failed serving passes across equal-time candidates and retries after an empty suffix', async context => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
+      const root = await mkdtemp(join(tmpdir(), 'claudian-rotating-recovery-'));
+      context.after(() => rm(root, { recursive: true, force: true }));
+      const repository = new DurableRepositoryEffect(root);
+      const store = coordination(database);
+      const effect = new VerticalOwner(new FaultController(), repository);
+      const attempted: string[] = [];
+      const lifecycle = new ProjectLifecycleRecoveryDispatcher({
+        coordination: store,
+        owners: owners({ recover: input => {
+          attempted.push(input.journal.projectId);
+          return input.journal.projectId === 'project-rotation-b' ? effect.recover(input)
+            : Promise.reject(new Error('injected-unclassified-failure'));
+        } }),
+      });
+      const coordinator = new ProjectRecoveryCoordinator({
+        accept: { recoverProject: () => Promise.resolve() },
+        activation: { recoverProject: () => Promise.resolve() },
+        catalog: store, isolation: store, lifecycle,
+      });
+      try {
+        for (const suffix of ['a', 'b', 'c']) {
+          const projectId = `project-rotation-${suffix}`;
+          await seedProject(database, projectId);
+          await store.withProjectScope(projectId, scope => scope.portability.putLifecycleJournal({
+            actorMemberId: undefined, createdAt: T0, direction: undefined,
+            expectedAuthorityGeneration: 1, idempotencyKey: `intent-rotation-${suffix}`,
+            kind: 'backup', operationId: `backup-rotation-${suffix}`, phase: 'prepared',
+            projectId, requestFingerprint: suffix.repeat(64), scheduledAt: T0,
+          }));
+        }
+        const fails = (promise: Promise<unknown>) => assert.rejects(promise,
+          error => error instanceof ProjectRecoveryError && error.code === 'dependency-failed');
+        await fails(coordinator.recoverAvailable());
+        await fails(coordinator.recoverAvailable());
+        await repository.assertApplied('backup-rotation-b');
+        assert.deepEqual(await coordinator.recoverAvailable(), {
+          settled: 0, isolated: 0, waiting: 0, offline: 0,
+        });
+        await fails(coordinator.recoverAvailable());
+        assert.deepEqual(attempted, [
+          'project-rotation-a', 'project-rotation-b', 'project-rotation-c', 'project-rotation-a',
+        ]);
+        await fails(coordinator.recoverAll());
+        await fails(new EnvironmentProjectRecovery(lifecycle).recoverAll(store));
+        assert.deepEqual(attempted.slice(-2), ['project-rotation-a', 'project-rotation-a']);
+        for (const suffix of ['a', 'c']) {
+          await store.withProjectScope(`project-rotation-${suffix}`, async scope => {
+            const retained = await scope.portability.getLifecycleJournal(`backup-rotation-${suffix}`);
+            assert.equal(retained?.state, 'active');
+            assert.equal(retained.phase, 'prepared');
+          });
+        }
+      } finally {
+        coordinator.close();
+        lifecycle.close();
+        await store.close();
+      }
+    });
+  });
+
   it('recovers past a full page of ordinary candidates after a lifecycle fault and restart', async context => {
     await withPostgresTestDatabase(async database => {
       await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
@@ -265,7 +391,7 @@ describe('Project lifecycle cross-store recovery', () => {
           requestFingerprint: 'b'.repeat(64),
           scheduledAt: T0,
         }));
-        await assert.rejects(first.recoverAvailable(firstStore), error => (
+        await assert.rejects(new EnvironmentProjectRecovery(first).recoverAvailable(firstStore), error => (
           error instanceof ProjectRecoveryError && error.code === 'dependency-failed'
         ));
         await repository.assertApplied(operationId);
@@ -279,8 +405,8 @@ describe('Project lifecycle cross-store recovery', () => {
         owners: owners(new VerticalOwner(new FaultController(), repository)),
       });
       try {
-        await restarted.recoverAvailable(restartedStore);
-        await restarted.recoverAvailable(restartedStore);
+        await new EnvironmentProjectRecovery(restarted).recoverAvailable(restartedStore);
+        await new EnvironmentProjectRecovery(restarted).recoverAvailable(restartedStore);
         const settled = await restartedStore.withProjectScope(projectId, scope => (
           scope.portability.getLifecycleJournal(operationId)
         ));
@@ -432,7 +558,7 @@ describe('Project lifecycle cross-store recovery', () => {
       const firstEntered = new Promise<void>(resolve => {
         markFirstEntered = resolve;
       });
-      let firstRecovery: Promise<void> | undefined;
+      let firstRecovery: ReturnType<ProjectLifecycleRecoveryDispatcher['recoverCandidate']> | undefined;
       const repository = new DurableRepositoryEffect(repositoryRoot);
       const owner: ProjectLifecycleRecoveryOwner = {
         recover: async input => {

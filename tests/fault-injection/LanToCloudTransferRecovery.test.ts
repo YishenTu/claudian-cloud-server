@@ -1,3 +1,4 @@
+import { EnvironmentProjectRecovery } from '../../src/environment-maintenance/recovery/EnvironmentProjectRecovery.js';
 import { DeletionCoordinator } from '../../src/project-authority/lifecycle/delete/DeletionCoordinator.js';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
@@ -644,7 +645,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
             dispatcher.close();
             await authorityTransfer.close();
           },
-          recoverAll: () => dispatcher.recoverAll(coordination),
+          recoverAll: () => new EnvironmentProjectRecovery(dispatcher).recoverAll(coordination),
         });
       };
       try {

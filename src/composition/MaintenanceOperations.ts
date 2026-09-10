@@ -1,3 +1,4 @@
+import { EnvironmentProjectRecovery } from '../environment-maintenance/recovery/EnvironmentProjectRecovery.js';
 import { dirname } from 'node:path';
 
 import type { CollabProjectId } from '@claudian-collab/protocol';
@@ -376,7 +377,7 @@ class Operations implements MaintenanceOperations {
             coordination: runtime.coordination,
           }),
           recovery: {
-            recoverAll: () => owners.dispatcher.recoverAll(runtime.coordination),
+            recoverAll: () => new EnvironmentProjectRecovery(owners.dispatcher).recoverAll(runtime.coordination),
           },
           terminalRecords: keyReferenceVerifier(keyring),
         }).run({ catalogId: input.operationId, signal });
@@ -445,7 +446,7 @@ class Operations implements MaintenanceOperations {
         keyring,
       );
       try {
-        await owners.dispatcher.recoverAvailable(runtime.coordination);
+        await new EnvironmentProjectRecovery(owners.dispatcher).recoverAvailable(runtime.coordination);
       } finally {
         await owners.close();
       }
