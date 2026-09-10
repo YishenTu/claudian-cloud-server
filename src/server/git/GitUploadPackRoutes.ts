@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { finished } from 'node:stream/promises';
+import { createGunzip } from 'node:zlib';
 
 import {
   matchCollabCloudRoute,
@@ -54,6 +56,7 @@ function authorityStatus(error: ProjectReadAuthorityError): number {
     case 'recovery-required':
     case 'state-conflict': return 409;
     case 'cancelled': return 408;
+    case 'busy':
     case 'closed':
     case 'dependency-failed': return 503;
     case 'project-too-large': return 413;
@@ -110,6 +113,40 @@ async function readRequestBody(
     throw new GitSmartHttpRouteFailure(400);
   }
   return Buffer.concat(chunks);
+}
+
+async function decodeGzipBody(
+  body: Buffer,
+  maximumBytes: number,
+  signal: AbortSignal,
+): Promise<Buffer> {
+  const decoder = createGunzip();
+  const settled = finished(decoder, { cleanup: true }).catch(() => undefined);
+  const abort = (): void => { decoder.destroy(new GitSmartHttpRouteFailure(408)); };
+  signal.addEventListener('abort', abort, { once: true });
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  try {
+    if (signal.aborted) abort();
+    else decoder.end(body);
+    for await (const raw of decoder) {
+      const chunk: unknown = raw;
+      if (!Buffer.isBuffer(chunk)) throw new GitSmartHttpRouteFailure(400);
+      bytes += chunk.length;
+      if (bytes > maximumBytes) throw new GitSmartHttpRouteFailure(413);
+      chunks.push(chunk);
+    }
+    if (signal.aborted) throw new GitSmartHttpRouteFailure(408);
+    return Buffer.concat(chunks, bytes);
+  } catch (error: unknown) {
+    if (signal.aborted) throw new GitSmartHttpRouteFailure(408);
+    if (error instanceof GitSmartHttpRouteFailure) throw error;
+    throw new GitSmartHttpRouteFailure(400);
+  } finally {
+    signal.removeEventListener('abort', abort);
+    decoder.destroy();
+    await settled;
+  }
 }
 
 export class GitUploadPackRoutes {
@@ -210,17 +247,21 @@ export class GitUploadPackRoutes {
       ) {
         throw new GitSmartHttpRouteFailure(415);
       }
+      const encoding = encodings[0]?.toLowerCase() ?? 'identity';
       if (
         encodings.length > 1
-        || (encodings[0] !== undefined && encodings[0] !== 'identity')
+        || (encoding !== 'identity' && encoding !== 'gzip')
       ) {
         throw new GitSmartHttpRouteFailure(415);
       }
-      const body = await readRequestBody(
+      const received = await readRequestBody(
         request,
         this.#maximumRequestBytes,
         controller.signal,
       );
+      const body = encoding === 'gzip'
+        ? await decodeGzipBody(received, this.#maximumRequestBytes, controller.signal)
+        : received;
       const startResponse = (): void => {
         if (response.headersSent) return;
         response.writeHead(200, {
@@ -257,7 +298,11 @@ export class GitUploadPackRoutes {
       response.end();
     } finally {
       clearTimeout(timeout);
-      if (controller.signal.aborted && !request.complete) request.destroy();
+      if (!request.complete) {
+        if (!response.headersSent) response.setHeader('connection', 'close');
+        if (controller.signal.aborted) request.destroy();
+        else response.once('finish', () => request.destroy());
+      }
       request.off('aborted', abort);
       request.off('error', abort);
       response.off('close', onResponseClose);

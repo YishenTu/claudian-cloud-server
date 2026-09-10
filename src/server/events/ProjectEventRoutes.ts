@@ -1,5 +1,6 @@
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import {
   COLLAB_CLOUD_BINDING_LIMITS,
@@ -75,6 +76,7 @@ function authorityStatus(error: ProjectReadAuthorityError): 404 | 409 | 413 | 50
     case 'state-conflict': return 409;
     case 'project-too-large': return 413;
     case 'cancelled':
+    case 'busy':
     case 'closed':
     case 'dependency-failed': return 503;
   }
@@ -296,6 +298,7 @@ export class ProjectEventRoutes {
     let cursor = initialSequence;
     let missedHeartbeats = 0;
     let wakeVersion = 0;
+    let capacityRetryMs = 100;
     let wakeResolver: (() => void) | undefined;
     const abort = (): void => {
       controller.abort();
@@ -359,15 +362,23 @@ export class ProjectEventRoutes {
           || socket.readyState !== WebSocket.OPEN
         ) return;
         const observedWakeVersion = wakeVersion;
-        const result = await this.#pollProjectEvents(
-          projectId,
-          () => this.#authority.getProjectEvents(
-            principal,
+        let result: ProjectEventReadResult;
+        try {
+          result = await this.#pollProjectEvents(
             projectId,
-            cursor,
-            { signal: controller.signal },
-          ),
-        );
+            () => this.#authority.getProjectEvents(
+              principal, projectId, cursor, { signal: controller.signal },
+            ),
+          );
+          capacityRetryMs = 100;
+        } catch (error: unknown) {
+          if (!(error instanceof ProjectReadAuthorityError) || error.code !== 'busy') throw error;
+          await delay(capacityRetryMs + Math.floor(Math.random() * 100), undefined, {
+            signal: controller.signal,
+          });
+          capacityRetryMs = Math.min(capacityRetryMs * 2, 1_000);
+          continue;
+        }
         if (result.kind === 'snapshot-required') {
           await this.#send(socket, {
             kind: 'snapshot.required',

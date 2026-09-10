@@ -54,19 +54,14 @@ export interface ProductionCloudLifecycleRuntimeOptions {
 
 function checkpointAdmission(config: ServerConfig): CheckpointStreamAdmission {
   return new CheckpointStreamAdmission({
+    ...config.checkpointAdmission,
     capacityTimeoutMs: config.gitAdmission.queueTimeoutMs,
     freeSpaceFloorBytes: config.developmentBootstrap.stagingFreeSpaceFloorBytes,
-    maxConcurrentStreams: 2,
-    maxConcurrentStreamsPerProject: 1,
-    maxStagingAttempts: 2,
-    maxStagingAttemptsPerProject: 1,
     maximumCoordinationBytes:
       COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxCoordinationBytes,
     maximumManifestBytes: COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxManifestBytes,
     maximumRepositoryBundleBytes:
       COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxRepositoryBundleBytes,
-    queueMax: 2,
-    queueMaxPerProject: 1,
     queueTimeoutMs: config.gitAdmission.queueTimeoutMs,
     stagingReservationBytes: COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxStagingBytes,
     stagingRoot: config.developmentBootstrap.stagingRoot,

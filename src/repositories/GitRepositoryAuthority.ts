@@ -43,6 +43,10 @@ import type {
   ProjectMembershipRepositoryReservation,
 } from '../project-authority/membership/ProjectMembershipRepository.js';
 import {
+  ProjectReadAuthorityError,
+  type ProjectReadSession,
+} from '../project-authority/reads/ProjectReadAuthority.js';
+import {
   GitReceivePackPolicy,
   GitReceivePackPolicyError,
   type GitReceivePackPolicyOptions,
@@ -273,6 +277,25 @@ function assertExactRefs(
       return actualOid === undefined
         || (expectedRef.oid !== undefined && actualOid !== expectedRef.oid);
     })
+  ) {
+    throw new GitRepositoryError('repository-corrupt');
+  }
+}
+
+function assertProjectionRefs(
+  output: Buffer,
+  expectedRefs: readonly ExpectedRepositoryRef[],
+): void {
+  const [bare, mainOid, ...names] = output.toString('utf8').split('\n').filter(Boolean);
+  const actual = new Set(names);
+  if (
+    bare !== 'true'
+    || !isCollabGitOid(mainOid)
+    || expectedRefs.find(ref => ref.name === COLLAB_MAIN_REF)?.oid !== mainOid
+    || names.length !== expectedRefs.length
+    || actual.size !== names.length
+    || new Set(expectedRefs.map(ref => ref.name)).size !== expectedRefs.length
+    || expectedRefs.some(ref => !actual.has(ref.name))
   ) {
     throw new GitRepositoryError('repository-corrupt');
   }
@@ -538,6 +561,8 @@ class AcceptTreePolicyParser {
 
 export class GitRepositoryAuthority
 implements ProjectAcceptRepository, ProjectMembershipRepository {
+  readonly #readControllers = new Set<AbortController>();
+  readonly #readSessions = new Set<Promise<void>>();
   readonly #acceptReservations = new WeakMap<
     ProjectAcceptRepositoryReservation,
     AcceptReservationState
@@ -595,6 +620,7 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
   close(): Promise<void> {
     if (this.#closePromise === undefined) {
       this.#closed = true;
+      for (const controller of this.#readControllers) controller.abort();
       this.#receivePolicy?.close();
       for (const state of this.#activeReceiveReservations) {
         state.active = false;
@@ -614,6 +640,7 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
       this.#activeMembershipRefReservations.clear();
       this.#closePromise = Promise.allSettled([
         this.#supervisor.close(),
+        ...this.#readSessions,
         this.#receiveAdmission?.close() ?? Promise.resolve(),
       ]).then(() => undefined);
     }
@@ -729,6 +756,89 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
     );
   }
 
+  withReadSession<T>(
+    projectId: CollabProjectId,
+    operation: (session: ProjectReadSession) => Promise<T>,
+    options: Readonly<{ readonly signal?: AbortSignal }> = {},
+  ): Promise<T> {
+    if (this.#closed) return Promise.reject(new ProjectReadAuthorityError('closed'));
+    const controller = new AbortController();
+    const signal = options.signal === undefined
+      ? controller.signal
+      : AbortSignal.any([controller.signal, options.signal]);
+    this.#readControllers.add(controller);
+    const running = this.#withReadSession(projectId, operation, signal)
+      .finally(() => {
+        controller.abort();
+        this.#readControllers.delete(controller);
+      });
+    const tracked = running.then(() => undefined, () => undefined);
+    this.#readSessions.add(tracked);
+    void tracked.finally(() => this.#readSessions.delete(tracked));
+    return running;
+  }
+
+  async #withReadSession<T>(
+    projectId: CollabProjectId,
+    operation: (session: ProjectReadSession) => Promise<T>,
+    signal: AbortSignal,
+  ): Promise<T> {
+    let permit: GitChildPermit;
+    try {
+      permit = await this.#resourceAdmission.acquireGitChild({
+        classification: 'read', projectId, signal,
+      });
+    } catch (error: unknown) {
+      const code = error instanceof ResourceAdmissionError
+        ? error.code
+        : 'invalid-project';
+      throw new ProjectReadAuthorityError(code === 'invalid-project' ? 'dependency-failed' : code);
+    }
+    let active = true;
+    let pending: Promise<unknown> | undefined;
+    const run = async <U>(placement: RepositoryPlacementLease, work: () => Promise<U>): Promise<U> => {
+      this.#assertOpen();
+      if (!active) throw new GitRepositoryError('closed');
+      assertNotAborted(signal);
+      if (placement.projectId !== projectId) throw new GitRepositoryError('placement-rejected');
+      if (pending !== undefined) throw new GitRepositoryError('busy');
+      const running = Promise.resolve().then(work);
+      pending = running;
+      try {
+        return await running;
+      } finally {
+        pending = undefined;
+      }
+    };
+    const boundSignal = (other: AbortSignal | undefined): AbortSignal => (
+      other === undefined || other === signal ? signal : AbortSignal.any([signal, other])
+    );
+    const session = Object.freeze({
+      advertiseUploadPack: (placement, options) => run(placement, () => this.#advertiseUploadPack(
+        placement, { ...options, signal: boundSignal(options.signal) }, true,
+      )),
+      runUploadPack: (placement, options) => run(placement, () => this.#uploadPack(
+        placement, { ...options, signal: boundSignal(options.signal) }, true,
+      )),
+      verifyProjectRead: input => run(input.placement, () => this.#verifyProjectRead(
+        { ...input, signal: boundSignal(input.signal) }, true, true,
+      )),
+      verifyProjectProjectionRead: input => run(input.placement, () => this.#verifyProjectRead(
+        { ...input, signal: boundSignal(input.signal) }, false, true,
+      )),
+    } satisfies ProjectReadSession);
+    try {
+      this.#assertOpen();
+      assertNotAborted(signal);
+      return await operation(session);
+    } finally {
+      active = false;
+      // A callback cannot release its permit ahead of an unawaited Git operation.
+      await pending?.catch(() => undefined);
+      permit.release();
+    }
+  }
+
   async verifyIntegrity(
     placement: RepositoryPlacementLease,
     options: VerifyRepositoryIntegrityOptions = {},
@@ -740,6 +850,7 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
     placement: RepositoryPlacementLease,
     options: VerifyRepositoryIntegrityOptions,
     verifyObjects: boolean,
+    admitted = false,
   ): Promise<RepositoryIntegrityResult> {
     if (this.#closed) throw new GitRepositoryError('closed');
     let placementSnapshot: RepositoryPlacementLease;
@@ -753,7 +864,7 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
     }
     let permit;
     try {
-      permit = await this.#resourceAdmission.acquireGitChild({
+      permit = admitted ? undefined : await this.#resourceAdmission.acquireGitChild({
         classification: 'read',
         projectId: placementSnapshot.projectId,
         ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -779,15 +890,31 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
         throw new GitRepositoryError('repository-unavailable');
       }
       try {
-        await this.#supervisor.verifyBareRepository(
-          resolved.repositoryPath,
-          options.signal,
-        );
+        // Projection reads need exact ref names and only the protected main OID.
+        // Read those facts and bare shape in one bounded Git process.
+        const projectionRefs = !verifyObjects && options.requiredRefs === undefined
+          && options.expectedRefs?.every(ref => ref.name === COLLAB_MAIN_REF || ref.oid === undefined)
+          ? options.expectedRefs : undefined;
+        if (projectionRefs !== undefined) {
+          const output = await this.#supervisor.runCommand({
+            arguments: ['rev-parse', '--is-bare-repository', COLLAB_MAIN_REF, '--symbolic', '--all'],
+            captureOutput: true,
+            cwd: resolved.repositoryPath,
+            failureCode: 'repository-corrupt',
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+          });
+          assertProjectionRefs(output, projectionRefs);
+        } else {
+          await this.#supervisor.verifyBareRepository(
+            resolved.repositoryPath,
+            options.signal,
+          );
+        }
         resolved = await this.#pathPolicy.resolveExisting(placementSnapshot);
         await this.#pathPolicy.revalidate(placementSnapshot);
         if (
-          options.expectedRefs !== undefined
-          || options.requiredRefs !== undefined
+          projectionRefs === undefined
+          && (options.expectedRefs !== undefined || options.requiredRefs !== undefined)
         ) {
           const refs = await this.#supervisor.runCommand({
             arguments: [
@@ -823,7 +950,7 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
       }
       return Object.freeze({ status: 'valid' as const });
     } finally {
-      permit.release();
+      permit?.release();
     }
   }
 
@@ -838,6 +965,7 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
   async #verifyProjectRead(
     options: VerifyProjectReadOptions,
     verifyObjects: boolean,
+    admitted = false,
   ): Promise<void> {
     if (!options.expectedRefs.some(ref => (
       ref.name === COLLAB_MAIN_REF && ref.oid === options.expectedMainOid
@@ -847,7 +975,7 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
     await this.#verifyRepositoryIntegrity(options.placement, {
       expectedRefs: options.expectedRefs,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
-    }, verifyObjects);
+    }, verifyObjects, admitted);
   }
 
   inspectRequest(
@@ -1547,6 +1675,14 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
     placement: RepositoryPlacementLease,
     options: GitUploadPackAdvertisementOptions,
   ): Promise<Buffer> {
+    return this.#advertiseUploadPack(placement, options, false);
+  }
+
+  #advertiseUploadPack(
+    placement: RepositoryPlacementLease,
+    options: GitUploadPackAdvertisementOptions,
+    admitted: boolean,
+  ): Promise<Buffer> {
     return this.#runUploadPackOperation(
       placement,
       options.expectedRefs,
@@ -1560,12 +1696,21 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
         ...(options.gitProtocol === undefined ? {} : { gitProtocol: options.gitProtocol }),
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       }),
+      admitted,
     );
   }
 
   runUploadPack(
     placement: RepositoryPlacementLease,
     options: GitUploadPackOptions,
+  ): Promise<void> {
+    return this.#uploadPack(placement, options, false);
+  }
+
+  #uploadPack(
+    placement: RepositoryPlacementLease,
+    options: GitUploadPackOptions,
+    admitted: boolean,
   ): Promise<void> {
     if (
       !Number.isSafeInteger(options.maximumResponseBytes)
@@ -1590,6 +1735,7 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
         ...(options.signal === undefined ? {} : { signal: options.signal }),
         stdoutMaxBytes: options.maximumResponseBytes,
       }),
+      admitted,
     );
   }
 
@@ -1599,6 +1745,7 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
     revalidateAuthority: () => Promise<void>,
     signal: AbortSignal | undefined,
     operation: (repositoryPath: string) => Promise<T>,
+    admitted: boolean,
   ): Promise<T> {
     if (this.#closed) throw new GitRepositoryError('closed');
     let placementSnapshot: RepositoryPlacementLease;
@@ -1612,7 +1759,7 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
     }
     let permit;
     try {
-      permit = await this.#resourceAdmission.acquireGitChild({
+      permit = admitted ? undefined : await this.#resourceAdmission.acquireGitChild({
         classification: 'read',
         projectId: placementSnapshot.projectId,
         ...(signal === undefined ? {} : { signal }),
@@ -1659,7 +1806,7 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
         throw error;
       }
     } finally {
-      permit.release();
+      permit?.release();
     }
   }
 

@@ -13,6 +13,7 @@ import {
   ProjectReadAuthorityError,
   type ProjectReadAuthorityCoordination,
   type ProjectReadRepository,
+  type ProjectReadSession,
 } from '../../src/project-authority/reads/ProjectReadAuthority.js';
 import { createDevelopmentPrincipal } from '../../src/request-context/RequestPrincipal.js';
 import { createRepositoryPlacementLease } from '../../src/repositories/RepositoryPlacement.js';
@@ -161,6 +162,13 @@ class MemoryCoordination implements ProjectReadAuthorityCoordination {
 class MemoryRepository implements ProjectReadRepository {
   readonly checks: string[] = [];
   readonly expectedRefChecks: string[][] = [];
+  withReadSession<T>(
+    _projectId: CollabProjectId,
+    operation: (session: ProjectReadSession) => Promise<T>,
+  ): Promise<T> {
+    return operation(this);
+  }
+
   mainOid = MAIN_OID;
   onUploadAdmitted: (() => void) | undefined;
   onVerify: (() => void) | undefined;

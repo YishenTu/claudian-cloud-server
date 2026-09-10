@@ -29,6 +29,10 @@ import {
   type RepositoryPlacementLease,
   type RepositoryPlacementValidator,
 } from '../../../src/repositories/RepositoryPlacement.js';
+import {
+  ProjectReadAuthorityError,
+  type ProjectReadSession,
+} from '../../../src/project-authority/reads/ProjectReadAuthority.js';
 import { ResourceAdmission } from '../../../src/resource-admission/ResourceAdmission.js';
 
 const execFileAsync = promisify(execFile);
@@ -80,13 +84,13 @@ function repositoryPath(
   );
 }
 
-function admission(): ResourceAdmission {
+function admission(queueTimeoutMs = 100): ResourceAdmission {
   return new ResourceAdmission({
     maxChildren: 3,
     maxChildrenPerProject: 1,
     queueMax: 2,
     queueMaxPerProject: 1,
-    queueTimeoutMs: 100,
+    queueTimeoutMs,
   });
 }
 
@@ -121,7 +125,7 @@ async function writeExecutable(
     executable,
     `#!/bin/sh
 set -u
-if [ "\${1-}" = "rev-parse" ]; then
+if [ "\${1-}" = "rev-parse" ] && [ "$#" -eq 2 ]; then
   printf 'true\\n'
   exit 0
 fi
@@ -207,6 +211,7 @@ async function createFakeAuthority(options: {
   readonly executableBody: (marker: string) => string;
   readonly operationTimeoutMs?: number;
   readonly outputMaxBytes?: number;
+  readonly queueTimeoutMs?: number;
 }) {
   const root = await mkdtemp(join(tmpdir(), 'claudian-fake-git-'));
   const marker = join(root, 'process.marker');
@@ -217,7 +222,7 @@ async function createFakeAuthority(options: {
   );
   const repository = placement('repository');
   await mkdir(repositoryPath(root, repository), { recursive: true });
-  const resourceAdmission = admission();
+  const resourceAdmission = admission(options.queueTimeoutMs);
   const authority = new GitRepositoryAuthority({
     gitExecutable: executable,
     operationTimeoutMs: options.operationTimeoutMs ?? 2_000,
@@ -243,6 +248,130 @@ async function closeFakeAuthority(fixture: Awaited<ReturnType<typeof createFakeA
 }
 
 describe('GitRepositoryAuthority', () => {
+  it('scopes read capacity and retains it until an unawaited real Git operation settles', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'claudian-read-session-'));
+    const accepted = placement('read_session');
+    const bare = repositoryPath(root, accepted);
+    const resourceAdmission = admission();
+    const repository = new GitRepositoryAuthority({
+      gitExecutable: GIT_EXECUTABLE, operationTimeoutMs: 2_000, outputMaxBytes: 4096,
+      placementValidator: new CurrentPlacementValidator(), repositoryRoot: root,
+      resourceAdmission, storageNodeId: 'node-a',
+    });
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    let escaped: ProjectReadSession | undefined;
+    let child: Promise<Buffer> | undefined;
+    const options = { expectedRefs: [], revalidateAuthority: () => Promise.resolve() };
+    try {
+      await execFileAsync(GIT_EXECUTABLE, ['init', '--bare', bare]);
+      let settled = false;
+      const session = repository.withReadSession(accepted.projectId, async reader => {
+        escaped = reader;
+        await expectGitError(reader.advertiseUploadPack(
+          placement('other', 'project-b'), options,
+        ), 'placement-rejected');
+        child = reader.advertiseUploadPack(accepted, {
+          ...options, revalidateAuthority: async () => { entered(); await barrier; },
+        });
+        await started;
+        await expectGitError(reader.advertiseUploadPack(accepted, options), 'busy');
+      }).then(() => { settled = true; });
+      await started;
+      let competitorEntered = false;
+      const competitor = resourceAdmission.acquireGitChild({
+        classification: 'read', projectId: accepted.projectId,
+      }).then(permit => { competitorEntered = true; permit.release(); });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(settled, false);
+      assert.equal(competitorEntered, false);
+      release();
+      await session;
+      await child;
+      await competitor;
+      assert.equal(competitorEntered, true);
+      assert.ok(escaped !== undefined);
+      await expectGitError(escaped.advertiseUploadPack(accepted, options), 'closed');
+    } finally {
+      release();
+      await repository.close();
+      await resourceAdmission.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('cancels queued read sessions on repository shutdown without releasing another owner permit', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'claudian-read-session-close-'));
+    const resourceAdmission = admission();
+    const repository = new GitRepositoryAuthority({
+      gitExecutable: GIT_EXECUTABLE, operationTimeoutMs: 2_000, outputMaxBytes: 4096,
+      placementValidator: new CurrentPlacementValidator(), repositoryRoot: root,
+      resourceAdmission, storageNodeId: 'node-a',
+    });
+    const external = await resourceAdmission.acquireGitChild({ classification: 'read', projectId: 'project-a' });
+    let entered = false;
+    try {
+      const queued = repository.withReadSession('project-a', async () => {
+        await Promise.resolve();
+        entered = true;
+      });
+      const rejected = assert.rejects(queued, error => (
+        error instanceof ProjectReadAuthorityError && error.code === 'cancelled'
+      ));
+      await settleWithin(repository.close());
+      await rejected;
+      assert.equal(entered, false);
+      let released = false;
+      const closing = resourceAdmission.close().then(() => { released = true; });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(released, false);
+      external.release();
+      await closing;
+    } finally {
+      external.release();
+      await repository.close();
+      await resourceAdmission.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reaps an active read-session child before handing its Project permit to another request', async () => {
+    const fixture = await createFakeAuthority({
+      queueTimeoutMs: 2_000,
+      executableBody: marker => `printf '%s' "$$" > '${marker}'
+trap '' TERM
+while :; do sleep 1; done`,
+    });
+    const controller = new AbortController();
+    try {
+      const running = fixture.authority.withReadSession(fixture.repository.projectId, session => (
+        session.verifyProjectProjectionRead({
+          expectedMainOid: 'a'.repeat(40),
+          expectedRefs: [{ name: COLLAB_MAIN_REF, oid: 'a'.repeat(40) }],
+          placement: fixture.repository,
+        })
+      ), { signal: controller.signal });
+      const cancelled = expectGitError(running, 'cancelled');
+      await waitForFile(fixture.marker);
+      const next = fixture.resourceAdmission.acquireGitChild({
+        classification: 'read', projectId: fixture.repository.projectId,
+      }).then(async permit => {
+        try {
+          await assertProcessGone(fixture.marker);
+        } finally {
+          permit.release();
+        }
+      });
+      controller.abort();
+      await Promise.all([cancelled, next]);
+    } finally {
+      controller.abort();
+      await closeFakeAuthority(fixture);
+    }
+  });
+
   it('creates and deletes only the exact persisted Member personal ref', async () => {
     const root = await mkdtemp(join(tmpdir(), 'claudian-membership-ref-'));
     const work = join(root, 'work');
@@ -416,8 +545,15 @@ describe('GitRepositoryAuthority', () => {
     const accepted = placement('mixed_case_refs');
     const bare = repositoryPath(root, accepted);
     const resourceAdmission = admission();
+    const launches = join(root, 'launches');
+    const executable = join(root, 'counted-git');
+    await writeFile(executable, `#!/bin/sh
+printf x >> '${launches}'
+exec '${GIT_EXECUTABLE}' "$@"
+`);
+    await chmod(executable, 0o755);
     const authority = new GitRepositoryAuthority({
-      gitExecutable: GIT_EXECUTABLE,
+      gitExecutable: executable,
       operationTimeoutMs: 2_000,
       outputMaxBytes: 64 * 1024,
       placementValidator: new CurrentPlacementValidator(),
@@ -461,10 +597,59 @@ describe('GitRepositoryAuthority', () => {
         placement: accepted,
       });
       await authority.verifyProjectProjectionRead({
-        expectedRefs,
+        expectedRefs, expectedMainOid: oid, placement: accepted,
+      });
+      await expectGitError(authority.verifyProjectProjectionRead({
+        expectedRefs: expectedRefs.map(ref => (
+          ref.name === 'refs/heads/members/member-a' ? { ...ref, oid: 'f'.repeat(40) } : ref
+        )),
+        expectedMainOid: oid,
+        placement: accepted,
+      }), 'repository-corrupt');
+      const projectionRefs = expectedRefs.map(ref => (
+        ref.name === COLLAB_MAIN_REF ? ref : { name: ref.name }
+      ));
+      await writeFile(launches, '');
+      await authority.verifyProjectProjectionRead({
+        expectedRefs: projectionRefs,
         expectedMainOid: oid,
         placement: accepted,
       });
+      assert.equal((await readFile(launches, 'utf8')).length, 1);
+      await execFileAsync(GIT_EXECUTABLE, [
+        'symbolic-ref', 'refs/heads/members/Member-B', COLLAB_MAIN_REF,
+      ], { cwd: bare });
+      await authority.verifyProjectProjectionRead({
+        expectedRefs: projectionRefs, expectedMainOid: oid, placement: accepted,
+      });
+      await execFileAsync(GIT_EXECUTABLE, [
+        'update-ref', '--no-deref', 'refs/heads/members/Member-B', oid,
+      ], { cwd: bare });
+      await execFileAsync(GIT_EXECUTABLE, [
+        'update-ref', '-d', 'refs/heads/members/member-a',
+      ], { cwd: bare });
+      await execFileAsync(GIT_EXECUTABLE, [
+        'update-ref', 'refs/heads/members/member-a\u00a0', oid,
+      ], { cwd: bare });
+      await expectGitError(authority.verifyProjectProjectionRead({
+        expectedRefs: projectionRefs, expectedMainOid: oid, placement: accepted,
+      }), 'repository-corrupt');
+      await execFileAsync(GIT_EXECUTABLE, [
+        'update-ref', '-d', 'refs/heads/members/member-a\u00a0',
+      ], { cwd: bare });
+      await execFileAsync(GIT_EXECUTABLE, [
+        'update-ref', 'refs/heads/members/member-a', oid,
+      ], { cwd: bare });
+      await execFileAsync(GIT_EXECUTABLE, ['config', 'core.bare', 'false'], { cwd: bare });
+      await expectGitError(authority.verifyProjectProjectionRead({
+        expectedRefs: projectionRefs, expectedMainOid: oid, placement: accepted,
+      }), 'repository-corrupt');
+      await execFileAsync(GIT_EXECUTABLE, ['config', 'core.bare', 'true'], { cwd: bare });
+      await execFileAsync(GIT_EXECUTABLE, ['update-ref', '-d', 'refs/heads/members/Member-B'], { cwd: bare });
+      await expectGitError(authority.verifyProjectProjectionRead({
+        expectedRefs: projectionRefs, expectedMainOid: oid, placement: accepted,
+      }), 'repository-corrupt');
+      await execFileAsync(GIT_EXECUTABLE, ['update-ref', 'refs/heads/members/Member-B', oid], { cwd: bare });
       await expectGitError(
         authority.verifyProjectRead({
           expectedRefs: expectedRefs.map(ref => (
@@ -477,7 +662,7 @@ describe('GitRepositoryAuthority', () => {
       );
       await expectGitError(
         authority.verifyProjectProjectionRead({
-          expectedRefs: expectedRefs.map(ref => (
+          expectedRefs: projectionRefs.map(ref => (
             ref.name === COLLAB_MAIN_REF ? { ...ref, oid: 'f'.repeat(40) } : ref
           )),
           expectedMainOid: 'f'.repeat(40),
@@ -501,7 +686,7 @@ describe('GitRepositoryAuthority', () => {
       );
       await expectGitError(
         authority.verifyProjectProjectionRead({
-          expectedRefs,
+          expectedRefs: projectionRefs,
           expectedMainOid: oid,
           placement: accepted,
         }),

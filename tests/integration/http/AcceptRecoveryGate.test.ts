@@ -69,6 +69,14 @@ function config(
   const maxBundleBytes = 16 * 1_024 * 1_024;
   const maxRepositoryBytes = 64 * 1_024 * 1_024;
   return Object.freeze({
+    checkpointAdmission: {
+      maxConcurrentStreams: 2,
+      maxConcurrentStreamsPerProject: 1,
+      maxStagingAttempts: 2,
+      maxStagingAttemptsPerProject: 1,
+      queueMax: 2,
+      queueMaxPerProject: 1,
+    },
     developmentBootstrap: Object.freeze({
       attemptTtlMs: COLLAB_CLOUD_BINDING_LIMITS.bootstrapAttemptTtlMs,
       maxBundleBytes,

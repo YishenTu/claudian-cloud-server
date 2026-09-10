@@ -32,6 +32,7 @@ import {
 
 export type ProjectReadAuthorityErrorCode =
   | 'authorization-denied'
+  | 'busy'
   | 'cancelled'
   | 'closed'
   | 'dependency-failed'
@@ -78,7 +79,7 @@ export interface ProjectReadRef {
   readonly oid?: CollabGitOid;
 }
 
-export interface ProjectReadRepository {
+export interface ProjectReadSession {
   advertiseUploadPack(
     placement: RepositoryPlacementLease,
     options: ProjectUploadPackAdvertisementOptions & Readonly<{
@@ -95,6 +96,14 @@ export interface ProjectReadRepository {
   ): Promise<void>;
   verifyProjectRead(input: VerifyProjectReadInput): Promise<void>;
   verifyProjectProjectionRead(input: VerifyProjectReadInput): Promise<void>;
+}
+
+export interface ProjectReadRepository extends ProjectReadSession {
+  withReadSession<T>(
+    projectId: CollabProjectId,
+    operation: (session: ProjectReadSession) => Promise<T>,
+    options?: Readonly<{ readonly signal?: AbortSignal }>,
+  ): Promise<T>;
 }
 
 export interface ProjectReadAuthorityOptions {
@@ -252,7 +261,7 @@ export class ProjectReadAuthority {
       principal,
       projectId,
       signal,
-      facts => this.#repository.advertiseUploadPack(
+      (facts, repository) => repository.advertiseUploadPack(
         facts.placement,
         {
           expectedRefs: facts.expectedRefs,
@@ -278,7 +287,7 @@ export class ProjectReadAuthority {
       principal,
       projectId,
       signal,
-      facts => this.#repository.runUploadPack(facts.placement, {
+      (facts, repository) => repository.runUploadPack(facts.placement, {
         ...options,
         expectedRefs: facts.expectedRefs,
         revalidateAuthority: () => this.#revalidateAdmission(
@@ -388,6 +397,7 @@ export class ProjectReadAuthority {
   }
 
   async #verifyRepository(
+    repository: ProjectReadSession,
     facts: AdmissionFacts,
     signal: AbortSignal | undefined,
     kind: 'content' | 'projection' = 'content',
@@ -400,8 +410,8 @@ export class ProjectReadAuthority {
         placement: facts.placement,
         ...(signal === undefined ? {} : { signal }),
       };
-      if (kind === 'projection') await this.#repository.verifyProjectProjectionRead(input);
-      else await this.#repository.verifyProjectRead(input);
+      if (kind === 'projection') await repository.verifyProjectProjectionRead(input);
+      else await repository.verifyProjectRead(input);
     } catch (error: unknown) {
       if (error instanceof ProjectReadAuthorityError) throw error;
       if (signal?.aborted === true) fail('cancelled');
@@ -414,42 +424,44 @@ export class ProjectReadAuthority {
     projectId: CollabProjectId,
     signal: AbortSignal | undefined,
   ): Promise<CollabCloudProjectSnapshot> {
-    const initial = await this.#readSnapshotFacts(principal, projectId, signal);
-    await this.#verifyRepository(initial, signal, 'projection');
-    const current = await this.#readSnapshotFacts(principal, projectId, signal);
-    if (!sameSnapshotFacts(initial, current)) return fail('state-conflict');
-    await this.#verifyRepository(current, signal, 'projection');
-    const members = Object.freeze(current.members.map(snapshotMember));
-    const currentMember = members.find(member => member.id === current.memberId);
-    if (currentMember === undefined) return fail('state-conflict');
-    let snapshot: CollabCloudProjectSnapshot;
-    try {
-      snapshot = decodeCollabCloudProjectSnapshot({
-        currentMember,
-        eventSequence: current.eventSequence,
-        members,
-        openRequests: current.collaboration.openRequests,
-        openTicketCount: current.collaboration.openTicketCount,
-        project: {
-          authorityGeneration: current.project.authorityGeneration,
-          createdAt: current.project.createdAt,
-          expectedMainOid: current.project.expectedMainOid,
-          id: current.project.projectId,
-          mainRef: COLLAB_MAIN_REF,
-          name: current.project.projectName,
-        },
-        ticketHighlights: current.collaboration.ticketHighlights,
-      });
-    } catch {
-      return fail('dependency-failed');
-    }
-    if (
-      Buffer.byteLength(JSON.stringify(snapshot))
-      > COLLAB_CLOUD_BINDING_LIMITS.maxCloudSnapshotUtf8Bytes
-    ) {
-      return fail('project-too-large');
-    }
-    return snapshot;
+    return this.#repository.withReadSession(projectId, async repository => {
+      const initial = await this.#readSnapshotFacts(principal, projectId, signal);
+      await this.#verifyRepository(repository, initial, signal, 'projection');
+      const current = await this.#readSnapshotFacts(principal, projectId, signal);
+      if (!sameSnapshotFacts(initial, current)) return fail('state-conflict');
+      await this.#verifyRepository(repository, current, signal, 'projection');
+      const members = Object.freeze(current.members.map(snapshotMember));
+      const currentMember = members.find(member => member.id === current.memberId);
+      if (currentMember === undefined) return fail('state-conflict');
+      let snapshot: CollabCloudProjectSnapshot;
+      try {
+        snapshot = decodeCollabCloudProjectSnapshot({
+          currentMember,
+          eventSequence: current.eventSequence,
+          members,
+          openRequests: current.collaboration.openRequests,
+          openTicketCount: current.collaboration.openTicketCount,
+          project: {
+            authorityGeneration: current.project.authorityGeneration,
+            createdAt: current.project.createdAt,
+            expectedMainOid: current.project.expectedMainOid,
+            id: current.project.projectId,
+            mainRef: COLLAB_MAIN_REF,
+            name: current.project.projectName,
+          },
+          ticketHighlights: current.collaboration.ticketHighlights,
+        });
+      } catch {
+        return fail('dependency-failed');
+      }
+      if (
+        Buffer.byteLength(JSON.stringify(snapshot))
+        > COLLAB_CLOUD_BINDING_LIMITS.maxCloudSnapshotUtf8Bytes
+      ) {
+        return fail('project-too-large');
+      }
+      return snapshot;
+    }, signal === undefined ? {} : { signal });
   }
 
   async #getProjectEvents(
@@ -461,70 +473,74 @@ export class ProjectReadAuthority {
     if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
       return fail('state-conflict');
     }
-    const initial = await this.#readAdmission(principal, projectId, signal);
-    await this.#verifyRepository(initial, signal, 'projection');
-    const observed = await this.#coordination.withProjectReadScope(
-      projectId,
-      async scope => {
-        const current = await this.#admit(scope, principal, projectId);
-        if (!sameAdmission(initial, current)) return fail('state-conflict');
-        return Object.freeze({
-          current,
-          result: await scope.readProjectEvents({
-            afterSequence,
-            limit: COLLAB_CLOUD_BINDING_LIMITS.maxEventReplay,
-          }),
-        });
-      },
-      signal === undefined ? {} : { signal },
-    );
-    await this.#verifyRepository(observed.current, signal, 'projection');
-    const { result } = observed;
-    const needsSnapshot = afterSequence > result.latestSequence
-      || afterSequence + 1 < result.retainedFromSequence
-      || result.latestSequence - afterSequence
-        > COLLAB_CLOUD_BINDING_LIMITS.maxEventReplay;
-    if (needsSnapshot) {
-      return Object.freeze({
-        kind: 'snapshot-required' as const,
-        latestSequence: result.latestSequence,
-      });
-    }
-    let expected = afterSequence + 1;
-    for (const event of result.events) {
-      if (event.sequence !== expected) {
+    return this.#repository.withReadSession(projectId, async repository => {
+      const initial = await this.#readAdmission(principal, projectId, signal);
+      await this.#verifyRepository(repository, initial, signal, 'projection');
+      const observed = await this.#coordination.withProjectReadScope(
+        projectId,
+        async scope => {
+          const current = await this.#admit(scope, principal, projectId);
+          if (!sameAdmission(initial, current)) return fail('state-conflict');
+          return Object.freeze({
+            current,
+            result: await scope.readProjectEvents({
+              afterSequence,
+              limit: COLLAB_CLOUD_BINDING_LIMITS.maxEventReplay,
+            }),
+          });
+        },
+        signal === undefined ? {} : { signal },
+      );
+      await this.#verifyRepository(repository, observed.current, signal, 'projection');
+      const { result } = observed;
+      const needsSnapshot = afterSequence > result.latestSequence
+        || afterSequence + 1 < result.retainedFromSequence
+        || result.latestSequence - afterSequence
+          > COLLAB_CLOUD_BINDING_LIMITS.maxEventReplay;
+      if (needsSnapshot) {
         return Object.freeze({
           kind: 'snapshot-required' as const,
           latestSequence: result.latestSequence,
         });
       }
-      expected += 1;
-    }
-    if (expected - 1 !== result.latestSequence) {
+      let expected = afterSequence + 1;
+      for (const event of result.events) {
+        if (event.sequence !== expected) {
+          return Object.freeze({
+            kind: 'snapshot-required' as const,
+            latestSequence: result.latestSequence,
+          });
+        }
+        expected += 1;
+      }
+      if (expected - 1 !== result.latestSequence) {
+        return Object.freeze({
+          kind: 'snapshot-required' as const,
+          latestSequence: result.latestSequence,
+        });
+      }
       return Object.freeze({
-        kind: 'snapshot-required' as const,
+        events: result.events,
+        kind: 'events' as const,
         latestSequence: result.latestSequence,
       });
-    }
-    return Object.freeze({
-      events: result.events,
-      kind: 'events' as const,
-      latestSequence: result.latestSequence,
-    });
+    }, signal === undefined ? {} : { signal });
   }
 
   async #runUploadPackOperation<T>(
     principal: RequestPrincipal,
     projectId: CollabProjectId,
     signal: AbortSignal | undefined,
-    operation: (facts: AdmissionFacts) => Promise<T>,
+    operation: (facts: AdmissionFacts, repository: ProjectReadSession) => Promise<T>,
   ): Promise<T> {
-    const initial = await this.#readAdmission(principal, projectId, signal);
-    await this.#verifyRepository(initial, signal);
-    const current = await this.#readAdmission(principal, projectId, signal);
-    if (!sameAdmission(initial, current)) return fail('state-conflict');
-    await this.#verifyRepository(current, signal);
-    return operation(current);
+    return this.#repository.withReadSession(projectId, async repository => {
+      const initial = await this.#readAdmission(principal, projectId, signal);
+      await this.#verifyRepository(repository, initial, signal);
+      const current = await this.#readAdmission(principal, projectId, signal);
+      if (!sameAdmission(initial, current)) return fail('state-conflict');
+      await this.#verifyRepository(repository, current, signal);
+      return operation(current, repository);
+    }, signal === undefined ? {} : { signal });
   }
 
   async #revalidateAdmission(

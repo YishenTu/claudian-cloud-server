@@ -25,6 +25,15 @@ export interface GitAdmissionConfig {
   readonly queueTimeoutMs: number;
 }
 
+export interface CheckpointAdmissionConfig {
+  readonly maxConcurrentStreams: number;
+  readonly maxConcurrentStreamsPerProject: number;
+  readonly maxStagingAttempts: number;
+  readonly maxStagingAttemptsPerProject: number;
+  readonly queueMax: number;
+  readonly queueMaxPerProject: number;
+}
+
 export interface EventAdmissionConfig {
   readonly maxConnections: number;
   readonly maxConnectionsPerProject: number;
@@ -70,6 +79,7 @@ export interface RepositoryConfig {
 export type PrincipalProfile = 'private-development' | 'vault-credential';
 
 export interface ServerConfig {
+  readonly checkpointAdmission: CheckpointAdmissionConfig;
   readonly developmentBootstrap: DevelopmentBootstrapConfig;
   readonly eventAdmission: EventAdmissionConfig;
   readonly gitAdmission: GitAdmissionConfig;
@@ -87,6 +97,7 @@ const CONFIG_FIELDS = new Set([
   'CLAUDIAN_CLOUD_BIND_HOST',
   'CLAUDIAN_CLOUD_BOOTSTRAP_ATTEMPT_TTL_MS',
   'CLAUDIAN_CLOUD_BOOTSTRAP_MAX_BUNDLE_BYTES',
+  'CLAUDIAN_CLOUD_BOOTSTRAP_MAX_CONCURRENT_UPLOADS',
   'CLAUDIAN_CLOUD_BOOTSTRAP_MAX_REPOSITORY_BYTES',
   'CLAUDIAN_CLOUD_BOOTSTRAP_QUEUE_MAX',
   'CLAUDIAN_CLOUD_BOOTSTRAP_QUEUE_TIMEOUT_MS',
@@ -94,6 +105,12 @@ const CONFIG_FIELDS = new Set([
   'CLAUDIAN_CLOUD_BOOTSTRAP_STAGING_RESERVATION_BYTES',
   'CLAUDIAN_CLOUD_BOOTSTRAP_UPLOAD_DEADLINE_MS',
   'CLAUDIAN_CLOUD_BOOTSTRAP_UPLOAD_IDLE_TIMEOUT_MS',
+  'CLAUDIAN_CLOUD_CHECKPOINT_MAX_CONCURRENT_STREAMS',
+  'CLAUDIAN_CLOUD_CHECKPOINT_MAX_CONCURRENT_STREAMS_PER_PROJECT',
+  'CLAUDIAN_CLOUD_CHECKPOINT_MAX_STAGING_ATTEMPTS',
+  'CLAUDIAN_CLOUD_CHECKPOINT_MAX_STAGING_ATTEMPTS_PER_PROJECT',
+  'CLAUDIAN_CLOUD_CHECKPOINT_QUEUE_MAX',
+  'CLAUDIAN_CLOUD_CHECKPOINT_QUEUE_MAX_PER_PROJECT',
   'CLAUDIAN_CLOUD_GIT_EXECUTABLE',
   'CLAUDIAN_CLOUD_GIT_MAX_CHILDREN',
   'CLAUDIAN_CLOUD_GIT_MAX_CHILDREN_PER_PROJECT',
@@ -254,8 +271,13 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
   const developmentBootstrap = Object.freeze({
     attemptTtlMs,
     maxBundleBytes,
-    maxConcurrentUploads:
+    maxConcurrentUploads: parseInteger(
+      source,
+      'CLAUDIAN_CLOUD_BOOTSTRAP_MAX_CONCURRENT_UPLOADS',
+      1,
+      Number.MAX_SAFE_INTEGER,
       COLLAB_CLOUD_BINDING_LIMITS.defaultMaxConcurrentBootstrapUploads,
+    ),
     maxRepositoryBytes,
     maxUploadsPerAttempt:
       COLLAB_CLOUD_BINDING_LIMITS.maxUploadsPerBootstrapAttempt,
@@ -263,7 +285,7 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
       source,
       'CLAUDIAN_CLOUD_BOOTSTRAP_QUEUE_MAX',
       1,
-      1_024,
+      Number.MAX_SAFE_INTEGER,
       4,
     ),
     queueTimeoutMs: parseInteger(
@@ -290,14 +312,14 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
     source,
     'CLAUDIAN_CLOUD_GIT_MAX_CHILDREN',
     2,
-    64,
-    2,
+    Number.MAX_SAFE_INTEGER,
+    4,
   );
   const maxChildrenPerProject = parseInteger(
     source,
     'CLAUDIAN_CLOUD_GIT_MAX_CHILDREN_PER_PROJECT',
     1,
-    63,
+    Number.MAX_SAFE_INTEGER,
     1,
   );
   invalidWhen(
@@ -308,7 +330,7 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
     source,
     'CLAUDIAN_CLOUD_GIT_MAX_READ_CHILDREN',
     1,
-    63,
+    Number.MAX_SAFE_INTEGER,
     maxChildren - 1,
   );
   invalidWhen(
@@ -319,8 +341,8 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
     source,
     'CLAUDIAN_CLOUD_GIT_MAX_WRITE_CHILDREN',
     1,
-    63,
-    maxChildren - 1,
+    Number.MAX_SAFE_INTEGER,
+    Math.floor(maxChildren / 2),
   );
   invalidWhen(
     maxWriteChildren >= maxChildren,
@@ -331,15 +353,15 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
     source,
     'CLAUDIAN_CLOUD_GIT_QUEUE_MAX',
     2,
-    1_024,
-    6,
+    Number.MAX_SAFE_INTEGER,
+    128,
   );
   const queueMaxPerProject = parseInteger(
     source,
     'CLAUDIAN_CLOUD_GIT_QUEUE_MAX_PER_PROJECT',
     1,
-    1_023,
-    4,
+    Number.MAX_SAFE_INTEGER,
+    Math.min(8, queueMax - 1),
   );
   invalidWhen(
     queueMaxPerProject >= queueMax,
@@ -349,8 +371,8 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
     source,
     'CLAUDIAN_CLOUD_GIT_MAX_QUEUED_READS',
     1,
-    1_023,
-    queueMax - 1,
+    Number.MAX_SAFE_INTEGER,
+    queueMax - Math.ceil(queueMax / 4),
   );
   invalidWhen(
     maxQueuedReads >= queueMax,
@@ -360,8 +382,8 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
     source,
     'CLAUDIAN_CLOUD_GIT_MAX_QUEUED_WRITES',
     1,
-    1_023,
-    queueMax - 1,
+    Number.MAX_SAFE_INTEGER,
+    Math.floor(queueMax / 2),
   );
   invalidWhen(
     maxQueuedWrites >= queueMax,
@@ -390,15 +412,15 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
     source,
     'CLAUDIAN_CLOUD_EVENT_MAX_CONNECTIONS',
     2,
-    10_000,
-    64,
+    Number.MAX_SAFE_INTEGER,
+    512,
   );
   const maxEventConnectionsPerProject = parseInteger(
     source,
     'CLAUDIAN_CLOUD_EVENT_MAX_CONNECTIONS_PER_PROJECT',
     1,
-    9_999,
-    16,
+    Number.MAX_SAFE_INTEGER,
+    64,
   );
   invalidWhen(
     maxEventConnectionsPerProject >= maxEventConnections,
@@ -408,17 +430,76 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
     source,
     'CLAUDIAN_CLOUD_EVENT_MAX_PENDING_AUTHORIZATIONS',
     1,
-    9_999,
-    16,
-  );
-  invalidWhen(
-    maxPendingEventAuthorizations >= maxEventConnections,
-    'CLAUDIAN_CLOUD_EVENT_MAX_PENDING_AUTHORIZATIONS',
+    Number.MAX_SAFE_INTEGER,
+    32,
   );
   const eventAdmission = Object.freeze({
     maxConnections: maxEventConnections,
     maxConnectionsPerProject: maxEventConnectionsPerProject,
     maxPendingAuthorizations: maxPendingEventAuthorizations,
+  });
+
+  const maxConcurrentStreams = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_CHECKPOINT_MAX_CONCURRENT_STREAMS',
+    2,
+    Number.MAX_SAFE_INTEGER,
+    2,
+  );
+  const maxConcurrentStreamsPerProject = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_CHECKPOINT_MAX_CONCURRENT_STREAMS_PER_PROJECT',
+    1,
+    Number.MAX_SAFE_INTEGER,
+    1,
+  );
+  const maxStagingAttempts = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_CHECKPOINT_MAX_STAGING_ATTEMPTS',
+    2,
+    Number.MAX_SAFE_INTEGER,
+    2,
+  );
+  const maxStagingAttemptsPerProject = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_CHECKPOINT_MAX_STAGING_ATTEMPTS_PER_PROJECT',
+    1,
+    Number.MAX_SAFE_INTEGER,
+    1,
+  );
+  const checkpointQueueMax = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_CHECKPOINT_QUEUE_MAX',
+    2,
+    Number.MAX_SAFE_INTEGER,
+    2,
+  );
+  const checkpointQueueMaxPerProject = parseInteger(
+    source,
+    'CLAUDIAN_CLOUD_CHECKPOINT_QUEUE_MAX_PER_PROJECT',
+    1,
+    Number.MAX_SAFE_INTEGER,
+    1,
+  );
+  invalidWhen(
+    maxConcurrentStreamsPerProject >= maxConcurrentStreams,
+    'CLAUDIAN_CLOUD_CHECKPOINT_MAX_CONCURRENT_STREAMS_PER_PROJECT',
+  );
+  invalidWhen(
+    maxStagingAttemptsPerProject >= maxStagingAttempts,
+    'CLAUDIAN_CLOUD_CHECKPOINT_MAX_STAGING_ATTEMPTS_PER_PROJECT',
+  );
+  invalidWhen(
+    checkpointQueueMaxPerProject >= checkpointQueueMax,
+    'CLAUDIAN_CLOUD_CHECKPOINT_QUEUE_MAX_PER_PROJECT',
+  );
+  const checkpointAdmission = Object.freeze({
+    maxConcurrentStreams,
+    maxConcurrentStreamsPerProject,
+    maxStagingAttempts,
+    maxStagingAttemptsPerProject,
+    queueMax: checkpointQueueMax,
+    queueMaxPerProject: checkpointQueueMaxPerProject,
   });
 
   const http = Object.freeze({
@@ -431,14 +512,14 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
       source,
       'CLAUDIAN_CLOUD_POSTGRES_ORDINARY_POOL_MAX',
       1,
-      128,
+      Number.MAX_SAFE_INTEGER,
       8,
     ),
     pinnedPoolMax: parseInteger(
       source,
       'CLAUDIAN_CLOUD_POSTGRES_PINNED_POOL_MAX',
       1,
-      64,
+      Number.MAX_SAFE_INTEGER,
       2,
     ),
     projectLockTimeoutMs: parseInteger(
@@ -452,7 +533,7 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
       source,
       'CLAUDIAN_CLOUD_POSTGRES_RESERVED_POOL_MAX',
       1,
-      16,
+      Number.MAX_SAFE_INTEGER,
       2,
     ),
     url: requirePostgresUrl(source),
@@ -482,6 +563,7 @@ export function decodeServerConfig(source: ConfigSource): ServerConfig {
   });
 
   return Object.freeze({
+    checkpointAdmission,
     developmentBootstrap,
     eventAdmission,
     gitAdmission,

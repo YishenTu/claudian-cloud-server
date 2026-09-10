@@ -57,13 +57,16 @@ curl --fail http://127.0.0.1:9000/readyz
 
 Other server settings are listed in [.env.example](.env.example), which supplies the generated defaults. All names below have the `CLAUDIAN_CLOUD_` prefix.
 
+The defaults target a small self-hosted installation: a 1.5-CPU, 1-GiB application container with separately provisioned PostgreSQL, up to 512 event connections globally and 64 per Project. Each open Project on each device consumes a connection. These are adjustable resource budgets, not a supported-user guarantee; repository sizes and operation rates determine actual capacity.
+
 | Settings | Purpose and defaults |
 | --- | --- |
 | `POSTGRES_URL`, `POSTGRES_*_POOL_MAX`, `PROJECT_LOCK_TIMEOUT_MS` | Runtime database connection; ordinary/pinned/reserved pools of 8/2/2 connections; Project lock timeout of 2 seconds. |
-| `GIT_MAX_*`, `GIT_QUEUE_*` | Git concurrency and queues: 2 active processes globally, 1 per Project; 6 queued globally, 4 per Project; queue timeout of 10 seconds. Separate read/write limits also apply. |
+| `GIT_MAX_*`, `GIT_QUEUE_*` | Git concurrency and queues: 4 active permits globally (up to 3 reads or 2 writes), 1 per Project; 128 queued globally (up to 96 reads or 64 writes), 8 per Project; queue timeout of 10 seconds. A read retains its permit through database admission, live Git validation, and transfer settlement. |
 | `GIT_OPERATION_TIMEOUT_MS`, `GIT_OUTPUT_MAX_BYTES` | Git operation timeout of 5 minutes and captured output limit of 1 MiB. |
-| `EVENT_MAX_*` | 64 event connections globally, 16 per Project, and 16 pending authorizations. |
-| `BOOTSTRAP_*` | Initial repository upload limits: 1 GiB each for the bundle and repository, 2 GiB staging reservation, 1 GiB free-space floor, queue size 4, queue timeout 10 seconds, upload deadline 15 minutes, and idle timeout 30 seconds. Size and upload timeout limits cannot exceed protocol maxima; the attempt lifetime is fixed at 24 hours. |
+| `EVENT_MAX_*` | 512 event connections globally, 64 per Project, and 32 pending authorizations. |
+| `BOOTSTRAP_*` | Initial repository upload limits: 1 GiB each for the bundle and repository, 2 GiB staging reservation, 1 GiB free-space floor, 1 concurrent upload across attempts, queue size 4, queue timeout 10 seconds, upload deadline 15 minutes, and idle timeout 30 seconds. Size and upload timeout limits cannot exceed protocol maxima; the attempt lifetime is fixed at 24 hours. |
+| `CHECKPOINT_*` | Checkpoint admission per staging store in serving and maintenance: 2 concurrent streams, 2 retained staging attempts, and 2 queued transfers; each per-Project limit defaults to 1. Transfers use the Git queue deadline and bootstrap free-space floor. |
 | `STORAGE_NODE_ID`, `REPOSITORY_ROOT`, `STAGING_ROOT`, `GIT_EXECUTABLE` | Storage identity, repository/staging paths, and Git executable. Keep the generated values for the supplied Docker layout; path changes require matching persistent mounts, and repository/staging directories must be distinct siblings. |
 
 Keep `CLAUDIAN_CLOUD_BIND_HOST=127.0.0.1` and `CLAUDIAN_CLOUD_PRINCIPAL_PROFILE=vault-credential` for deployment. Configuration changes require container recreation; a restart alone does not load an edited environment file. The recreation command applies configuration to the same installed image.
@@ -76,6 +79,10 @@ Container settings belong in `release.env` alongside its existing image entry:
 | `CLAUDIAN_DEPLOY_MEMORY` | `1g` memory |
 | `CLAUDIAN_DEPLOY_PIDS` | `256` processes |
 | `CLAUDIAN_CLOUD_POSTGRES_PORT` | `5432` |
+
+Concurrency, connection-pool, and queue counts accept positive safe integers subject to per-Project and read/write isolation constraints. Pending event authorization has its own independent limit. Increase the matching container CPU, memory, and PID budgets and provision PostgreSQL and disk capacity when raising admission limits; a larger queue only allows more waiting work. Each bootstrap or checkpoint attempt retains its disk reservation until its owning work releases it. Protocol payload and artifact limits remain fixed. Explicit environment values override defaults. The combined configuration must satisfy the isolation constraints; inconsistent values are rejected.
+
+A larger host still uses the configured container CPU/memory limits and application admission budgets. Adjust both layers when tuning: container limits in `release.env`, and connection, Git, and database budgets in `/etc/claudian-cloud-server/server.env`. Monitor CPU, memory, queue waits, and operation latency before raising concurrency; more concurrent Git work can increase latency.
 
 Apply server container limits with the same recreation command above. To choose another PostgreSQL port for a fresh installation, set `CLAUDIAN_CLOUD_POSTGRES_PORT` in `release.env` and update the port in both generated URLs (`server.env` and `migration.env`) and `PGPORT` in `bootstrap.env` before starting services. Access authentication, TLS, and forwarding are configured separately in your chosen entry point.
 

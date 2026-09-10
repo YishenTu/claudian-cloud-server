@@ -15,7 +15,7 @@ import {
   ProjectReadAuthorityError,
 } from '../../../src/project-authority/reads/ProjectReadAuthority.js';
 import { createDevelopmentPrincipal } from '../../../src/request-context/RequestPrincipal.js';
-import { ResourceAdmission } from '../../../src/resource-admission/ResourceAdmission.js';
+import { ResourceAdmission, type GitChildPermit } from '../../../src/resource-admission/ResourceAdmission.js';
 import { GitRepositoryAuthority } from '../../../src/repositories/GitRepositoryAuthority.js';
 import {
   type PostgresTestDatabase,
@@ -71,29 +71,58 @@ describe('Project read authority integration', () => {
         storageNodeId: 'node-read',
       });
       let driftAfterRepositoryVerification = false;
+      let saturateContinuation = false;
+      let readScopes = 0;
+      let allReadScopes = 0;
+      let holdCompetitors = true;
+      const competitors: Promise<void>[] = [];
+      const heldCompetitors: GitChildPermit[] = [];
       const authority = new ProjectReadAuthority({
-        coordination: store,
+        coordination: {
+          withProjectReadScope: async (id, operation, options) => {
+            allReadScopes += 1;
+            const result = await store.withProjectReadScope(id, operation, options);
+            if (saturateContinuation && ++readScopes === 2) {
+              for (const otherProject of ['project-b', 'project-c']) {
+                competitors.push(admission.acquireGitChild({
+                  classification: 'read', projectId: otherProject,
+                }).then(permit => {
+                  if (holdCompetitors) heldCompetitors.push(permit);
+                  else permit.release();
+                }, () => undefined));
+              }
+              await new Promise<void>(resolve => setImmediate(resolve));
+            }
+            return result;
+          },
+        },
         repository: {
           advertiseUploadPack: repository.advertiseUploadPack.bind(repository),
           runUploadPack: repository.runUploadPack.bind(repository),
           verifyProjectRead: input => repository.verifyProjectRead(input),
-          verifyProjectProjectionRead: async input => {
-            await repository.verifyProjectProjectionRead(input);
-            if (!driftAfterRepositoryVerification) return;
-            driftAfterRepositoryVerification = false;
-            await seed.query('BEGIN');
-            await seed.query(
-              "SELECT set_config('claudian_cloud.project_id', $1, true)",
-              [projectId],
-            );
-            await seed.query(
-              `UPDATE claudian_cloud.projects
-                  SET authority_generation = 8
-                WHERE project_id = $1`,
-              [projectId],
-            );
-            await seed.query('COMMIT');
-          },
+          verifyProjectProjectionRead: input => repository.verifyProjectProjectionRead(input),
+          withReadSession: (id, operation, options) => repository.withReadSession(id, session => (
+            operation({
+              ...session,
+              verifyProjectProjectionRead: async input => {
+                await session.verifyProjectProjectionRead(input);
+                if (!driftAfterRepositoryVerification) return;
+                driftAfterRepositoryVerification = false;
+                await seed.query('BEGIN');
+                await seed.query(
+                  "SELECT set_config('claudian_cloud.project_id', $1, true)",
+                  [projectId],
+                );
+                await seed.query(
+                  `UPDATE claudian_cloud.projects
+                      SET authority_generation = 8
+                    WHERE project_id = $1`,
+                  [projectId],
+                );
+                await seed.query('COMMIT');
+              },
+            })
+          ), options),
         },
       });
       try {
@@ -172,6 +201,38 @@ describe('Project read authority integration', () => {
         assert.equal(snapshot.currentMember.activatedAt, ACTIVATED);
         assert.deepEqual(snapshot.openRequests, []);
         assert.deepEqual(snapshot.ticketHighlights, []);
+
+        // A queued read does not allocate snapshot facts or compete for SQL connections.
+        const blocker = await admission.acquireGitChild({ classification: 'read', projectId });
+        const beforeQueuedRead = allReadScopes;
+        const controller = new AbortController();
+        const queuedRead = authority.getProjectSnapshot(
+          createDevelopmentPrincipal('member-a'), projectId, { signal: controller.signal },
+        );
+        const cancelledRead = assert.rejects(queuedRead, error => (
+          error instanceof ProjectReadAuthorityError && error.code === 'cancelled'
+        ));
+        try {
+          await new Promise<void>(resolve => setImmediate(resolve));
+          assert.equal(allReadScopes, beforeQueuedRead);
+        } finally {
+          controller.abort();
+          blocker.release();
+          await cancelledRead;
+        }
+
+        // New traffic cannot evict a read between its two live Git checks.
+        saturateContinuation = true;
+        try {
+          assert.deepEqual(await authority.getProjectSnapshot(
+            createDevelopmentPrincipal('member-a'), projectId,
+          ), snapshot);
+        } finally {
+          saturateContinuation = false;
+          holdCompetitors = false;
+          for (const permit of heldCompetitors) permit.release();
+          await Promise.all(competitors);
+        }
 
         // Coordination projections do not certify unrelated Git objects.
         // Content reads still detect their corruption.

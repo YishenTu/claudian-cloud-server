@@ -75,7 +75,6 @@ function assertOptions(options: BootstrapUploadAdmissionOptions): void {
   ];
   if (
     positiveIntegers.some(value => !Number.isSafeInteger(value) || value <= 0)
-    || options.maxConcurrentUploads !== 1
     || options.maxUploadsPerAttempt !== 1
     || !isAbsolute(options.stagingRoot)
     || normalize(options.stagingRoot) !== options.stagingRoot

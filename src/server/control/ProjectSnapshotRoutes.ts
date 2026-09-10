@@ -62,6 +62,7 @@ function authorityFailure(error: ProjectReadAuthorityError): ProjectJsonRouteFai
         recoveryActions: ['retry'],
       }));
     case 'cancelled':
+    case 'busy':
     case 'closed':
     case 'dependency-failed':
       return new ProjectJsonRouteFailure(503, new CollabError({

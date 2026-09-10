@@ -226,7 +226,6 @@ describe('BootstrapUploadAdmission', () => {
       stagingRoot: '/srv/claudian/staging',
     } as const;
     for (const invalid of [
-      { ...options, maxConcurrentUploads: 2 },
       { ...options, maxUploadsPerAttempt: 2 },
       { ...options, queueMax: 0 },
       { ...options, queueTimeoutMs: 0 },

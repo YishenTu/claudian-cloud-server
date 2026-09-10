@@ -312,6 +312,7 @@ function createImporter(
     | 'uploadIdleTimeoutMs'
     | 'uploadTotalTimeoutMs'
   >> & {
+    readonly maxConcurrentUploads?: number;
     readonly createBundleReadStream?: (
       path: string,
       signal: AbortSignal,
@@ -325,7 +326,7 @@ function createImporter(
   readonly uploadAdmission: BootstrapUploadAdmission;
 } {
   const uploadAdmission = new BootstrapUploadAdmission({
-    maxConcurrentUploads: 1,
+    maxConcurrentUploads: overrides.maxConcurrentUploads ?? 1,
     maxUploadsPerAttempt: 1,
     queueMax: 2,
     queueTimeoutMs: 1_000,
@@ -385,7 +386,7 @@ function importInput(
 ): ImportGitBundleInput {
   return {
     attemptId: 'attempt-a',
-    body: createReadStream(fixture.bundlePath, { highWaterMark: 7 }),
+    body: overrides.body ?? createReadStream(fixture.bundlePath, { highWaterMark: 7 }),
     contentEncoding: 'identity',
     contentType: 'application/x-git-bundle',
     declaredByteCount: fixture.bundleByteCount,
@@ -415,6 +416,62 @@ async function expectImportError(
 }
 
 describe('GitBundleImporter', () => {
+  it('imports overlapping uploads for different Projects with exact independent repositories', async () => {
+    const fixture = await createBundleFixture();
+    const owners = createImporter(fixture, { maxConcurrentUploads: 2, uploadIdleTimeoutMs: 5_000 });
+    const bytes = await readFile(fixture.bundlePath);
+    const gate = () => {
+      let resolve!: () => void;
+      const promise = new Promise<void>(resolvePromise => { resolve = resolvePromise; });
+      return { promise, resolve };
+    };
+    const releaseBodies = gate();
+    const entered = [gate(), gate()];
+    const imports = entered.map((entry, index) => owners.importer.importBundle(importInput(fixture, {
+      attemptId: `attempt-parallel-${String(index)}`,
+      projectId: `project-parallel-${String(index)}`,
+      body: {
+        async *[Symbol.asyncIterator]() {
+          entry.resolve();
+          await releaseBodies.promise;
+          yield bytes;
+        },
+      },
+    })));
+    const settled = Promise.allSettled(imports);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all(entered.map(entry => entry.promise)),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('parallel uploads did not enter')), 2_000);
+        }),
+      ]);
+      releaseBodies.resolve();
+      const results = await Promise.all(imports);
+      for (const [index, result] of results.entries()) {
+        assert.equal(result.projectId, `project-parallel-${String(index)}`);
+        assert.deepEqual(result.refs, fixture.refs);
+        const attemptRoot = join(fixture.stagingRoot,
+          Buffer.from(result.projectId).toString('hex'),
+          Buffer.from(result.attemptId).toString('hex'));
+        assert.deepEqual(await readFile(join(attemptRoot, 'source.bundle')), bytes);
+        const repository = join(attemptRoot, 'repository');
+        await git(repository, ['fsck', '--full']);
+        for (const ref of fixture.refs) {
+          assert.equal(await git(repository, ['rev-parse', '--verify', ref.name]), ref.oid);
+        }
+      }
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      releaseBodies.resolve();
+      await settled;
+      await owners.importer.close();
+      await Promise.all([owners.resourceAdmission.close(), owners.uploadAdmission.close()]);
+      await rm(fixture.authorityRoot, { force: true, recursive: true });
+    }
+  });
+
   it('stages a production checkpoint independently from bootstrap upload admission', async () => {
     const fixture = await createBundleFixture({
       memberIds: ['member-a', 'member-b', 'member-c'],

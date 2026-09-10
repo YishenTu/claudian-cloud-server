@@ -128,6 +128,91 @@ async function malformedAuthorizedUpgrade(
 }
 
 describe('ProjectEventRoutes', () => {
+  it('keeps the cursor and socket through temporary read capacity exhaustion', async () => {
+    let calls = 0;
+    const cursors: number[] = [];
+    const wakeup = new ProjectEventWakeup();
+    const admission = new ProjectEventAdmission({ maxConnections: 2, maxConnectionsPerProject: 1 });
+    const events = new ProjectEventRoutes({
+      admission,
+      authority: {
+        getProjectEvents: async (_principal, projectId, afterSequence) => {
+          await Promise.resolve();
+          cursors.push(afterSequence);
+          calls += 1;
+          if (calls === 2) throw new ProjectReadAuthorityError('busy');
+          return calls < 3
+            ? { events: [], kind: 'events', latestSequence: 0 }
+            : { events: [{
+              kind: 'membership.updated', occurredAt: '2026-08-21T00:00:00.000Z',
+              payload: { memberId: 'member-a' }, projectId, protocolVersion: 10, sequence: 1,
+            }], kind: 'events', latestSequence: 1 };
+        },
+      },
+      heartbeatMs: 30_000,
+      maximumBufferedBytes: 1024,
+      principalAdapter: new DevelopmentPrincipalAdapter({ profile: 'loopback-development' }),
+      wakeup,
+    });
+    const server = new HttpServer({
+      config: { host: '127.0.0.1', port: 0 }, isReady: () => true, upgradeRoutes: [events],
+    });
+    try {
+      const address = await server.start();
+      const socket = await open(`http://${address.host}:${String(address.port)}`, 'project-a', 0);
+      const result = decodeCollabCloudProjectEventMessage(await message(socket, 'capacity-recovered'));
+      assert.equal(result.kind, 'membership.updated');
+      assert.deepEqual(cursors, [0, 0, 0]);
+      assert.equal(socket.readyState, WebSocket.OPEN);
+      socket.close();
+      await closed(socket);
+    } finally {
+      await events.close();
+      await admission.close();
+      wakeup.close();
+      await server.close(1_000);
+    }
+  });
+
+  for (const failure of ['project-not-found', 'dependency-failed'] as const) {
+    it(`rechecks authority after capacity recovery and closes on ${failure}`, async () => {
+      let calls = 0;
+      const wakeup = new ProjectEventWakeup();
+      const admission = new ProjectEventAdmission({ maxConnections: 2, maxConnectionsPerProject: 1 });
+      const events = new ProjectEventRoutes({
+        admission,
+        authority: {
+          getProjectEvents: async () => {
+            await Promise.resolve();
+            calls += 1;
+            if (calls === 2) throw new ProjectReadAuthorityError('busy');
+            if (calls === 3) throw new ProjectReadAuthorityError(failure);
+            return { events: [], kind: 'events', latestSequence: 0 };
+          },
+        },
+        heartbeatMs: 30_000, maximumBufferedBytes: 1024,
+        principalAdapter: new DevelopmentPrincipalAdapter({ profile: 'loopback-development' }),
+        wakeup,
+      });
+      const server = new HttpServer({
+        config: { host: '127.0.0.1', port: 0 }, isReady: () => true, upgradeRoutes: [events],
+      });
+      try {
+        const address = await server.start();
+        const socket = await open(`http://${address.host}:${String(address.port)}`, 'project-a', 0);
+        await closed(socket);
+        assert.equal(calls, 3);
+        assert.deepEqual(inboxes.get(socket)?.frames, []);
+        assert.equal((await closePromises.get(socket))?.[0], 1011);
+      } finally {
+        await events.close();
+        await admission.close();
+        wakeup.close();
+        await server.close(1_000);
+      }
+    });
+  }
+
   it('authorizes before upgrade and bounds pending work independently of Project IDs', async () => {
     let authorize!: () => void;
     const authorization = new Promise<void>(resolve => { authorize = resolve; });

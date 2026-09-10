@@ -65,6 +65,14 @@ function config(options: {
   readonly repositoryRoot: string;
 }): ServerConfig {
   return Object.freeze({
+    checkpointAdmission: {
+      maxConcurrentStreams: 2,
+      maxConcurrentStreamsPerProject: 1,
+      maxStagingAttempts: 2,
+      maxStagingAttemptsPerProject: 1,
+      queueMax: 2,
+      queueMaxPerProject: 1,
+    },
     developmentBootstrap: Object.freeze({
       attemptTtlMs: 86_400_000,
       maxBundleBytes: 1_073_741_824,

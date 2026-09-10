@@ -5,6 +5,7 @@ import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { gzipSync } from 'node:zlib';
 import { describe, it } from 'node:test';
 
 import { COLLAB_MAIN_REF, collabCloudGitRoute } from '@claudian-collab/protocol';
@@ -45,6 +46,68 @@ function repositoryPath(root: string, placement: RepositoryPlacementLease): stri
 }
 
 describe('GitUploadPackRoutes', () => {
+  it('decodes gzip within wire and decoded limits and rejects malformed encodings safely', async () => {
+    const received: Buffer[] = [];
+    const route = new GitUploadPackRoutes({
+      authority: {
+        advertiseUploadPack: () => Promise.resolve(Buffer.alloc(0)),
+        runUploadPack: (_principal, _projectId, options) => {
+          received.push(options.request);
+          return Promise.resolve();
+        },
+      },
+      maximumRequestBytes: 128,
+      maximumResponseBytes: 1_024,
+      operationTimeoutMs: 1_000,
+      principalAdapter: new DevelopmentPrincipalAdapter({ profile: 'loopback-development' }),
+    });
+    const server = new HttpServer({
+      config: { host: '127.0.0.1', port: 0 }, isReady: () => true, routes: [route],
+    });
+    const literal = Buffer.from('0000');
+    const compressed = gzipSync(literal);
+    const wireOversize = gzipSync(Buffer.from(Array.from({ length: 128 }, (_, index) => index)));
+    assert.ok(wireOversize.length > 128);
+    try {
+      const address = await server.start();
+      const url = `http://${address.host}:${String(address.port)}${collabCloudGitRoute('project-a', 'git-upload-pack').target}`;
+      for (const example of [
+        { encoding: 'identity', body: literal, status: 200, decoded: literal },
+        { encoding: 'gzip', body: compressed, status: 200, decoded: literal },
+        { encoding: 'GZip', body: compressed, status: 200, decoded: literal },
+        { encoding: 'gzip', body: Buffer.concat([compressed, compressed]), status: 200, decoded: Buffer.from('00000000') },
+        { encoding: 'gzip', body: gzipSync(Buffer.alloc(128, 120)), status: 200, decoded: Buffer.alloc(128, 120) },
+        { encoding: 'gzip', body: gzipSync(Buffer.alloc(129, 120)), status: 413 },
+        { encoding: 'gzip', body: wireOversize, status: 413 },
+        { encoding: 'gzip', body: Buffer.from('private-invalid-gzip-body'), status: 400 },
+        { encoding: 'gzip', body: compressed.subarray(0, -3), status: 400 },
+        { encoding: 'gzip', body: Buffer.alloc(0), status: 400 },
+        { encoding: 'gzip, gzip', body: compressed, status: 415 },
+        { encoding: 'br', body: compressed, status: 415 },
+      ]) {
+        const before = received.length;
+        const response = await fetch(url, {
+          method: 'POST', body: example.body,
+          headers: {
+            'content-type': 'application/x-git-upload-pack-request',
+            'content-encoding': example.encoding,
+            'x-claudian-development-actor': 'member-a',
+          },
+        });
+        assert.equal(response.status, example.status, example.encoding);
+        assert.equal(await response.text(), '');
+        if (example.decoded !== undefined) {
+          assert.equal(received.length, before + 1);
+          assert.deepEqual(received.at(-1), example.decoded);
+        } else {
+          assert.equal(received.length, before);
+        }
+      }
+    } finally {
+      await server.close(1_000);
+    }
+  });
+
   it('maps every pre-output RPC failure before committing success headers', async () => {
     const route = new GitUploadPackRoutes({
       authority: {
@@ -149,7 +212,7 @@ describe('GitUploadPackRoutes', () => {
     }
   });
 
-  it('serves a real authenticated Git advertisement and clone without paths in transport', async () => {
+  it('serves authenticated full clones and fetches with gzip requests and twenty Member refs', async () => {
     const root = await mkdtemp(join(tmpdir(), 'claudian-upload-pack-'));
     const work = join(root, 'work');
     const checkout = join(root, 'checkout');
@@ -234,10 +297,16 @@ describe('GitUploadPackRoutes', () => {
         profile: 'loopback-development',
       }),
     });
+    let gzipRequests = 0;
     const server = new HttpServer({
       config: { host: '127.0.0.1', port: 0 },
       isReady: () => true,
-      routes: [route],
+      routes: [{
+        handle(request, response) {
+          if (request.headers['content-encoding'] === 'gzip') gzipRequests += 1;
+          return route.handle(request, response);
+        },
+      }],
     });
     try {
       await execFileAsync(GIT_EXECUTABLE, ['init', '--initial-branch=main', work]);
@@ -255,7 +324,11 @@ describe('GitUploadPackRoutes', () => {
         ['rev-parse', 'HEAD'],
         { cwd: work, encoding: 'utf8' },
       );
-      expectedRefs = [{ name: COLLAB_MAIN_REF, oid: mainOid.trim() }];
+      const members = Array.from({ length: 20 }, (_, index) => `refs/heads/members/member-${String(index)}`);
+      for (const name of members) {
+        await execFileAsync(GIT_EXECUTABLE, ['update-ref', name, mainOid.trim()], { cwd: work });
+      }
+      expectedRefs = [COLLAB_MAIN_REF, ...members].map(name => ({ name, oid: mainOid.trim() }));
       await execFileAsync(GIT_EXECUTABLE, [
         'clone',
         '--bare',
@@ -275,6 +348,19 @@ describe('GitUploadPackRoutes', () => {
       ]);
       assert.equal(await readFile(join(checkout, 'cloud.txt'), 'utf8'), 'cloud authority\n');
       assert.equal(revalidations >= 2, true);
+      assert.ok(gzipRequests > 0);
+      const clonedRefs = (await execFileAsync(GIT_EXECUTABLE, [
+        'for-each-ref', '--format=%(refname)', 'refs/remotes/origin/members',
+      ], { cwd: checkout })).stdout.trim().split('\n');
+      assert.equal(clonedRefs.length, 20);
+      const cloneGzipRequests = gzipRequests;
+      await execFileAsync(GIT_EXECUTABLE, [
+        '-c', 'http.extraHeader=x-claudian-development-actor: member-a',
+        'fetch', '--refetch', 'origin',
+      ], { cwd: checkout });
+      assert.ok(gzipRequests > cloneGzipRequests);
+      assert.equal(await readFile(join(checkout, 'cloud.txt'), 'utf8'), 'cloud authority\n');
+
 
       await assert.rejects(
         execFileAsync(GIT_EXECUTABLE, ['ls-remote', repositoryUrl]),
@@ -304,7 +390,7 @@ describe('GitUploadPackRoutes', () => {
     }
   });
 
-  it('cancels a stalled partial upload-pack body at the route deadline', async () => {
+  it('cancels a stalled gzip upload-pack body at the route deadline', async () => {
     let runCount = 0;
     const route = new GitUploadPackRoutes({
       authority: {
@@ -328,10 +414,12 @@ describe('GitUploadPackRoutes', () => {
     });
     try {
       const address = await server.start();
+      let responseStatus: number | undefined;
       const settled = new Promise<void>(resolve => {
         const client = httpRequest({
           headers: {
             'content-length': '100',
+            'content-encoding': 'gzip',
             'content-type': 'application/x-git-upload-pack-request',
             'x-claudian-development-actor': 'member-a',
           },
@@ -340,6 +428,7 @@ describe('GitUploadPackRoutes', () => {
           path: collabCloudGitRoute('project-a', 'git-upload-pack').target,
           port: address.port,
         }, response => {
+          responseStatus = response.statusCode;
           response.resume();
           response.once('end', resolve);
         });
@@ -352,9 +441,76 @@ describe('GitUploadPackRoutes', () => {
           setTimeout(() => reject(new Error('partial-body-not-cancelled')), 1_000).unref();
         }),
       ]);
+      assert.ok(responseStatus === undefined || responseStatus === 408);
       assert.equal(runCount, 0);
     } finally {
       await server.close(1_000);
+    }
+  });
+
+  it('closes rejected or cancelled incomplete gzip uploads before admitting Git work', async () => {
+    for (const mode of ['declared-limit', 'chunked-limit', 'disconnect', 'shutdown'] as const) {
+      let runCount = 0;
+      let markHandled!: () => void;
+      const handled = new Promise<void>(resolve => { markHandled = resolve; });
+      let markClosed!: () => void;
+      const closed = new Promise<void>(resolve => { markClosed = resolve; });
+      const route = new GitUploadPackRoutes({
+        authority: {
+          advertiseUploadPack: () => Promise.resolve(Buffer.alloc(0)),
+          runUploadPack: () => { runCount += 1; return Promise.resolve(); },
+        },
+        maximumRequestBytes: 128,
+        maximumResponseBytes: 1_024,
+        operationTimeoutMs: 2_000,
+        principalAdapter: new DevelopmentPrincipalAdapter({ profile: 'loopback-development' }),
+      });
+      const server = new HttpServer({
+        config: { host: '127.0.0.1', port: 0 }, isReady: () => true,
+        routes: [{
+          handle(request, response) {
+            request.once('close', markClosed);
+            const accepted = route.handle(request, response);
+            markHandled();
+            return accepted;
+          },
+        }],
+      });
+      try {
+        const address = await server.start();
+        let status: number | undefined;
+        let resolveResponse!: () => void;
+        const responseEnded = new Promise<void>(resolve => { resolveResponse = resolve; });
+        const client = httpRequest({
+          host: address.host, port: address.port, method: 'POST',
+          path: collabCloudGitRoute('project-a', 'git-upload-pack').target,
+          headers: {
+            'content-type': 'application/x-git-upload-pack-request',
+            'content-encoding': 'gzip',
+            'x-claudian-development-actor': 'member-a',
+            ...(mode === 'declared-limit' ? { 'content-length': '256' } : {}),
+          },
+        }, response => {
+          status = response.statusCode;
+          response.resume();
+          response.once('end', resolveResponse);
+        });
+        client.once('error', resolveResponse);
+        client.write(mode === 'chunked-limit' ? Buffer.alloc(256, 120) : Buffer.from([0x1f, 0x8b]));
+        await handled;
+        if (mode === 'disconnect') client.destroy();
+        if (mode === 'shutdown') await server.close(20);
+        await Promise.race([
+          Promise.all([closed, responseEnded]),
+          new Promise<never>((_resolve, reject) => {
+            setTimeout(() => reject(new Error(`gzip-upload-not-settled:${mode}`)), 1_000).unref();
+          }),
+        ]);
+        if (mode === 'declared-limit' || mode === 'chunked-limit') assert.equal(status, 413);
+        assert.equal(runCount, 0);
+      } finally {
+        await server.close(1_000);
+      }
     }
   });
 

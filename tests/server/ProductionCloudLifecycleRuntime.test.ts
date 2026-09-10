@@ -58,6 +58,14 @@ describe('production Cloud lifecycle runtime', () => {
   it('keeps serving reconciliation available while ordinary recovery candidates remain pending', async () => {
     const runtime = createProductionCloudLifecycleRuntime({
       config: {
+        checkpointAdmission: {
+          maxConcurrentStreams: 2,
+          maxConcurrentStreamsPerProject: 1,
+          maxStagingAttempts: 2,
+          maxStagingAttemptsPerProject: 1,
+          queueMax: 2,
+          queueMaxPerProject: 1,
+        },
         developmentBootstrap: {
           stagingFreeSpaceFloorBytes: 1_073_741_824,
           stagingRoot: '/tmp/claudian-runtime-test-staging',
@@ -100,6 +108,14 @@ describe('production Cloud lifecycle runtime', () => {
       const record = journal(kind);
       const runtime = createProductionCloudLifecycleRuntime({
         config: {
+          checkpointAdmission: {
+            maxConcurrentStreams: 2,
+            maxConcurrentStreamsPerProject: 1,
+            maxStagingAttempts: 2,
+            maxStagingAttemptsPerProject: 1,
+            queueMax: 2,
+            queueMaxPerProject: 1,
+          },
           developmentBootstrap: {
             maxBundleBytes: 1_073_741_824,
             stagingFreeSpaceFloorBytes: 1_073_741_824,
