@@ -11,10 +11,8 @@ function fail(): never {
 export class ProjectAuthoritySourceFence implements CloudToLanSourceFencePort {
   async quiesce(input: Parameters<CloudToLanSourceFencePort['quiesce']>[0]): Promise<void> {
     await input.lease.withProjectScope(async scope => {
-      const [journal, project] = await Promise.all([
-        scope.portability.getLifecycleJournal(input.transferId),
-        scope.getProject(),
-      ]);
+      const journal = await scope.portability.getLifecycleJournal(input.transferId);
+      const project = await scope.getProject();
       if (
         journal?.kind !== 'authority-transfer'
         || journal.direction !== 'cloud-to-lan'
@@ -28,11 +26,9 @@ export class ProjectAuthoritySourceFence implements CloudToLanSourceFencePort {
 
   async relinquish(input: Parameters<CloudToLanSourceFencePort['relinquish']>[0]): Promise<void> {
     await input.lease.withProjectScope(async scope => {
-      const [journal, project, recovery] = await Promise.all([
-        scope.portability.getLifecycleJournal(input.proof.transferId),
-        scope.getProject(),
-        scope.portability.getAuthorityTransferRecovery(input.proof.transferId),
-      ]);
+      const journal = await scope.portability.getLifecycleJournal(input.proof.transferId);
+      const project = await scope.getProject();
+      const recovery = await scope.portability.getAuthorityTransferRecovery(input.proof.transferId);
       if (
         journal?.kind !== 'authority-transfer'
         || journal.direction !== 'cloud-to-lan'
@@ -46,11 +42,9 @@ export class ProjectAuthoritySourceFence implements CloudToLanSourceFencePort {
 
   async reopen(input: Parameters<CloudToLanSourceFencePort['reopen']>[0]): Promise<void> {
     await input.lease.withProjectScope(async scope => {
-      const [journal, project, recovery] = await Promise.all([
-        scope.portability.getLifecycleJournal(input.transferId),
-        scope.getProject(),
-        scope.portability.getAuthorityTransferRecovery(input.transferId),
-      ]);
+      const journal = await scope.portability.getLifecycleJournal(input.transferId);
+      const project = await scope.getProject();
+      const recovery = await scope.portability.getAuthorityTransferRecovery(input.transferId);
       const sourceStayedActive = project?.serviceState === 'active'
         && recovery?.targetProof === undefined;
       if (

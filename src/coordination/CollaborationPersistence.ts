@@ -253,5 +253,8 @@ export interface CollaborationProjectPersistence
   extends CollaborationReadPersistence {
   readonly idempotency: CollaborationIdempotencyPersistence;
   readonly requests: CollaborationRequestPersistence;
+  readonly snapshot: CollaborationSnapshotPersistence & {
+    readRequestsForAdmission(): Promise<readonly CollabChangeRequest[]>;
+  };
   readonly tickets: CollaborationTicketPersistence;
 }

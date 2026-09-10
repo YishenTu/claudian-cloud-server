@@ -5,9 +5,9 @@ import { describe, it } from 'node:test';
 
 const repositoryRoot = resolve(import.meta.dirname, '../..');
 const protocolPackageName = '@claudian-collab/protocol';
-const protocolVersion = '4.3.1';
-const protocolRegistryArtifact = 'https://registry.npmjs.org/@claudian-collab/protocol/-/protocol-4.3.1.tgz';
-const protocolIntegrity = 'sha512-opMwok4rf7pinsGXxaSNNkI7HhsTBET60lyY/u7VpVuZRNgnM8Vpo/+PS14q/58jjfGVzNc5/FXHC399803bhQ==';
+const protocolVersion = '4.3.2';
+const protocolRegistryArtifact = 'https://registry.npmjs.org/@claudian-collab/protocol/-/protocol-4.3.2.tgz';
+const protocolIntegrity = 'sha512-Inz+a8HDk9Ys/qISb9xeCJ3BfivVQzSTSy2KbqbdOHbyPMPyrxNknifJ4/7LVCFfeedBTtz30+scmm/SZZ1OBQ==';
 
 interface PackageManifest {
   readonly dependencies: Readonly<Record<string, string>>;

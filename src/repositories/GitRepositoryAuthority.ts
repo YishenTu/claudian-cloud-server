@@ -831,7 +831,7 @@ implements ProjectAcceptRepository, ProjectMembershipRepository {
     await this.#verifyProjectRead(options, true);
   }
 
-  async verifyProjectEventRead(options: VerifyProjectReadOptions): Promise<void> {
+  async verifyProjectProjectionRead(options: VerifyProjectReadOptions): Promise<void> {
     await this.#verifyProjectRead(options, false);
   }
 

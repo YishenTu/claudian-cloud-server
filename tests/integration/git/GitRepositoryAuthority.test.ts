@@ -460,7 +460,7 @@ describe('GitRepositoryAuthority', () => {
         expectedMainOid: oid,
         placement: accepted,
       });
-      await authority.verifyProjectEventRead({
+      await authority.verifyProjectProjectionRead({
         expectedRefs,
         expectedMainOid: oid,
         placement: accepted,
@@ -476,7 +476,7 @@ describe('GitRepositoryAuthority', () => {
         'repository-corrupt',
       );
       await expectGitError(
-        authority.verifyProjectEventRead({
+        authority.verifyProjectProjectionRead({
           expectedRefs: expectedRefs.map(ref => (
             ref.name === COLLAB_MAIN_REF ? { ...ref, oid: 'f'.repeat(40) } : ref
           )),
@@ -500,7 +500,7 @@ describe('GitRepositoryAuthority', () => {
         'repository-corrupt',
       );
       await expectGitError(
-        authority.verifyProjectEventRead({
+        authority.verifyProjectProjectionRead({
           expectedRefs,
           expectedMainOid: oid,
           placement: accepted,

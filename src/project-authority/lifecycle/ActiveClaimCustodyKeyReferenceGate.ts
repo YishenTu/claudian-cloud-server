@@ -164,10 +164,8 @@ export class ActiveClaimCustodyKeyReferenceGate {
         { signal },
       );
       records = await lease.withProjectScope(async scope => {
-        const [project, placement] = await Promise.all([
-          scope.getProject(),
-          scope.getRepositoryPlacement(),
-        ]);
+        const project = await scope.getProject();
+        const placement = await scope.getRepositoryPlacement();
         if (
           (project?.serviceState !== 'active'
             && project?.serviceState !== 'read-only-transition')

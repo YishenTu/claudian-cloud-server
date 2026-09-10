@@ -2293,10 +2293,8 @@ implements PortabilityLifecyclePersistence {
   async getAuthorityTransferStatus(
     transferId: string,
   ): Promise<CollabAuthorityTransferStatus | undefined> {
-    const [journal, recovery] = await Promise.all([
-      this.getLifecycleJournal(transferId),
-      this.getAuthorityTransferRecovery(transferId),
-    ]);
+    const journal = await this.getLifecycleJournal(transferId);
+    const recovery = await this.getAuthorityTransferRecovery(transferId);
     if (journal === undefined && recovery === undefined) return undefined;
     if (
       journal?.kind === 'authority-transfer'
@@ -3162,10 +3160,8 @@ implements PortabilityLifecyclePersistence {
   ): Promise<PersistenceAdvanceResult> {
     opaqueId(input.transferId);
     const expiresAt = timestamp(input.expiresAt);
-    const [journal, recovery] = await Promise.all([
-      this.getLifecycleJournal(input.transferId),
-      this.getAuthorityTransferRecovery(input.transferId),
-    ]);
+    const journal = await this.getLifecycleJournal(input.transferId);
+    const recovery = await this.getAuthorityTransferRecovery(input.transferId);
     if (
       journal?.kind !== 'authority-transfer'
       || journal.direction !== 'cloud-to-lan'

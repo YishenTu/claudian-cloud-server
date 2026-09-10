@@ -650,14 +650,31 @@ class PostgresCollaborationRequests implements CollaborationRequestPersistence {
        LIMIT $2`,
       [this.#projectId, limit],
     );
+    const relations = rows.length === 0 ? [] : await this.#query<RelationRow>(
+      `${RELATION_SELECT}
+       WHERE relation.project_id = $1 AND relation.request_id = ANY($2::text[])
+       ORDER BY relation.request_id, ticket.ticket_number, relation.relation_id`,
+      [this.#projectId, rows.map(row => row.request_id)],
+    );
+    const byRequest = new Map<string, CollabRequestTicketRelation[]>();
+    for (const relation of relations) {
+      const group = byRequest.get(relation.request_id) ?? [];
+      group.push(requestRelation(relation));
+      byRequest.set(relation.request_id, group);
+    }
     const requests: CollabChangeRequest[] = [];
-    for (const row of rows) requests.push(await this.#decode(row));
+    for (const row of rows) {
+      requests.push(await this.#decode(row, Object.freeze(byRequest.get(row.request_id) ?? [])));
+    }
     return Object.freeze(requests.sort((left, right) => (
       left.id.localeCompare(right.id, 'en-US')
     )));
   }
 
-  async #decode(row: RequestRow): Promise<CollabChangeRequest> {
+  async #decode(
+    row: RequestRow,
+    loadedRelations?: readonly CollabRequestTicketRelation[],
+  ): Promise<CollabChangeRequest> {
     if (
       !isCollabOpaqueId(row.request_id)
       || !isCollabMemberId(row.member_id)
@@ -669,7 +686,7 @@ class PostgresCollaborationRequests implements CollaborationRequestPersistence {
       dependencyFailure();
     }
     const status = row.status as CollabChangeRequest['status'];
-    const relations = await this.#listRelations(row.request_id);
+    const relations = loadedRelations ?? await this.#listRelations(row.request_id);
     return Object.freeze({
       commentCount: safeInteger(row.comment_count),
       createdAt: dateIso(row.created_at),
@@ -1208,9 +1225,7 @@ class PostgresCollaborationSnapshot implements CollaborationSnapshotPersistence 
   }
 
   async read(): Promise<CollaborationSnapshotReadResult> {
-    const openRequests = await this.#requests.listOpen(
-      COLLAB_CLOUD_BINDING_LIMITS.maxCloudOpenRequests + 1,
-    );
+    const openRequests = await this.readRequestsForAdmission();
     if (openRequests.length > COLLAB_CLOUD_BINDING_LIMITS.maxCloudOpenRequests) {
       return Object.freeze({ kind: 'too-large' as const });
     }
@@ -1230,6 +1245,10 @@ class PostgresCollaborationSnapshot implements CollaborationSnapshotPersistence 
       return Object.freeze({ kind: 'too-large' as const });
     }
     return Object.freeze({ kind: 'snapshot' as const, snapshot });
+  }
+
+  readRequestsForAdmission(): Promise<readonly CollabChangeRequest[]> {
+    return this.#requests.listOpen(COLLAB_CLOUD_BINDING_LIMITS.maxCloudOpenRequests + 1);
   }
 }
 
@@ -1252,7 +1271,7 @@ export class PostgresCollaborationPersistence
 implements CollaborationProjectPersistence {
   readonly idempotency: CollaborationIdempotencyPersistence;
   readonly requests: PostgresCollaborationRequests;
-  readonly snapshot: CollaborationSnapshotPersistence;
+  readonly snapshot: CollaborationProjectPersistence['snapshot'];
   readonly tickets: PostgresCollaborationTickets;
 
   constructor(projectId: CollabProjectId, query: ProjectQuery) {

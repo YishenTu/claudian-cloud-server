@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import assert from 'node:assert/strict';
 import { promisify } from 'node:util';
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -12,6 +13,13 @@ import { SafeLogger } from '../../src/observability/SafeLogger.js';
 import { acquirePostgresTestDatabase } from './PostgresTestDatabase.js';
 
 const clientRoot = process.argv[2];
+let overlappingQueryWarning = false;
+const observeWarning = (warning: Error): void => {
+  if (warning.message.startsWith('Calling client.query() when the client is already executing')) {
+    overlappingQueryWarning = true;
+  }
+};
+process.on('warning', observeWarning);
 if (clientRoot === undefined || !isAbsolute(clientRoot)) {
   throw new Error('authority-roundtrip-gate.client-checkout-required');
 }
@@ -66,4 +74,6 @@ try {
   await app?.close();
   await database.close();
   await rm(root, { force: true, recursive: true });
+  process.off('warning', observeWarning);
 }
+assert.equal(overlappingQueryWarning, false, 'Project transactions must settle each query before submitting another');

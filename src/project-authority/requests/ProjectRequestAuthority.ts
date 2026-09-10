@@ -1,3 +1,4 @@
+import { assertProjectRequestSnapshotCapacity, measureProjectRequestSnapshotCapacity } from './ProjectRequestSnapshotCapacity.js';
 import { createHash, randomUUID } from 'node:crypto';
 
 import {
@@ -537,6 +538,7 @@ export class ProjectRequestAuthority {
               existing.description !== description
               || !sameRelations(existing.ticketRelations, relations)
             ) {
+              const capacity = await measureProjectRequestSnapshotCapacity(scope);
               await scope.collaboration.requests.replacePendingRelations({
                 actorMemberId: write.memberId,
                 commitOid: existing.latestHeadOid,
@@ -559,6 +561,7 @@ export class ProjectRequestAuthority {
                 );
               }
               result = updated;
+              await assertProjectRequestSnapshotCapacity(scope, capacity);
               await scope.appendProjectEvent({
                 kind: 'request.updated',
                 occurredAt: updatedAt,
@@ -663,6 +666,7 @@ export class ProjectRequestAuthority {
               const existing = await scope.collaboration.requests.findOpenByMember(
                 write.memberId,
               );
+              const capacity = await measureProjectRequestSnapshotCapacity(scope);
               const occurredAt = this.#now().toISOString();
               let changed = false;
               let result;
@@ -712,6 +716,7 @@ export class ProjectRequestAuthority {
               }
               const response = { mainOid: write.expectedMainOid, request: result };
               if (changed) {
+                await assertProjectRequestSnapshotCapacity(scope, capacity);
                 await scope.appendProjectEvent({
                   kind: 'request.updated',
                   occurredAt,

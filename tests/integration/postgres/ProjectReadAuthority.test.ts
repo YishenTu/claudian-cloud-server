@@ -76,9 +76,9 @@ describe('Project read authority integration', () => {
         repository: {
           advertiseUploadPack: repository.advertiseUploadPack.bind(repository),
           runUploadPack: repository.runUploadPack.bind(repository),
-          verifyProjectEventRead: input => repository.verifyProjectEventRead(input),
-          verifyProjectRead: async input => {
-            await repository.verifyProjectRead(input);
+          verifyProjectRead: input => repository.verifyProjectRead(input),
+          verifyProjectProjectionRead: async input => {
+            await repository.verifyProjectProjectionRead(input);
             if (!driftAfterRepositoryVerification) return;
             driftAfterRepositoryVerification = false;
             await seed.query('BEGIN');
@@ -173,8 +173,8 @@ describe('Project read authority integration', () => {
         assert.deepEqual(snapshot.openRequests, []);
         assert.deepEqual(snapshot.ticketHighlights, []);
 
-        // Events invalidate coordination projections; they do not certify
-        // unrelated Git objects. Content reads still detect their corruption.
+        // Coordination projections do not certify unrelated Git objects.
+        // Content reads still detect their corruption.
         const corruptObjectDirectory = join(repositoryPath, 'objects', 'ee');
         const corruptObject = join(corruptObjectDirectory, 'e'.repeat(38));
         await mkdir(corruptObjectDirectory, { recursive: true });
@@ -182,8 +182,12 @@ describe('Project read authority integration', () => {
         assert.deepEqual(await authority.getProjectEvents(
           createDevelopmentPrincipal('member-a'), projectId, 0,
         ), { events: [], kind: 'events', latestSequence: 0 });
+        assert.deepEqual(
+          await authority.getProjectSnapshot(createDevelopmentPrincipal('member-a'), projectId),
+          snapshot,
+        );
         await assert.rejects(
-          authority.getProjectSnapshot(createDevelopmentPrincipal('member-a'), projectId),
+          authority.advertiseUploadPack(createDevelopmentPrincipal('member-a'), projectId),
           error => error instanceof ProjectReadAuthorityError
             && error.code === 'dependency-failed',
         );

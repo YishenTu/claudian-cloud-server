@@ -42,12 +42,10 @@ implements CloudToLanCheckpointCapturePort {
     try {
       const metadata = await this.#metadata.read();
       const snapshot = await input.lease.withProjectScope(async scope => {
-        const [journal, memberships, placement, project] = await Promise.all([
-          scope.portability.getLifecycleJournal(input.operationId),
-          scope.listMemberships(),
-          scope.getRepositoryPlacement(),
-          scope.getProject(),
-        ]);
+        const journal = await scope.portability.getLifecycleJournal(input.operationId);
+        const memberships = await scope.listMemberships();
+        const placement = await scope.getRepositoryPlacement();
+        const project = await scope.getProject();
         if (
           journal?.kind !== 'authority-transfer'
           || journal.direction !== 'cloud-to-lan'

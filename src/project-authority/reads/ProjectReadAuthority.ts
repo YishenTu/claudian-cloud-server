@@ -94,7 +94,7 @@ export interface ProjectReadRepository {
     }>,
   ): Promise<void>;
   verifyProjectRead(input: VerifyProjectReadInput): Promise<void>;
-  verifyProjectEventRead(input: VerifyProjectReadInput): Promise<void>;
+  verifyProjectProjectionRead(input: VerifyProjectReadInput): Promise<void>;
 }
 
 export interface ProjectReadAuthorityOptions {
@@ -390,7 +390,7 @@ export class ProjectReadAuthority {
   async #verifyRepository(
     facts: AdmissionFacts,
     signal: AbortSignal | undefined,
-    kind: 'content' | 'events' = 'content',
+    kind: 'content' | 'projection' = 'content',
   ): Promise<void> {
     this.#assertAvailable(signal);
     try {
@@ -400,7 +400,7 @@ export class ProjectReadAuthority {
         placement: facts.placement,
         ...(signal === undefined ? {} : { signal }),
       };
-      if (kind === 'events') await this.#repository.verifyProjectEventRead(input);
+      if (kind === 'projection') await this.#repository.verifyProjectProjectionRead(input);
       else await this.#repository.verifyProjectRead(input);
     } catch (error: unknown) {
       if (error instanceof ProjectReadAuthorityError) throw error;
@@ -415,10 +415,10 @@ export class ProjectReadAuthority {
     signal: AbortSignal | undefined,
   ): Promise<CollabCloudProjectSnapshot> {
     const initial = await this.#readSnapshotFacts(principal, projectId, signal);
-    await this.#verifyRepository(initial, signal);
+    await this.#verifyRepository(initial, signal, 'projection');
     const current = await this.#readSnapshotFacts(principal, projectId, signal);
     if (!sameSnapshotFacts(initial, current)) return fail('state-conflict');
-    await this.#verifyRepository(current, signal);
+    await this.#verifyRepository(current, signal, 'projection');
     const members = Object.freeze(current.members.map(snapshotMember));
     const currentMember = members.find(member => member.id === current.memberId);
     if (currentMember === undefined) return fail('state-conflict');
@@ -462,7 +462,7 @@ export class ProjectReadAuthority {
       return fail('state-conflict');
     }
     const initial = await this.#readAdmission(principal, projectId, signal);
-    await this.#verifyRepository(initial, signal, 'events');
+    await this.#verifyRepository(initial, signal, 'projection');
     const observed = await this.#coordination.withProjectReadScope(
       projectId,
       async scope => {
@@ -478,7 +478,7 @@ export class ProjectReadAuthority {
       },
       signal === undefined ? {} : { signal },
     );
-    await this.#verifyRepository(observed.current, signal, 'events');
+    await this.#verifyRepository(observed.current, signal, 'projection');
     const { result } = observed;
     const needsSnapshot = afterSequence > result.latestSequence
       || afterSequence + 1 < result.retainedFromSequence

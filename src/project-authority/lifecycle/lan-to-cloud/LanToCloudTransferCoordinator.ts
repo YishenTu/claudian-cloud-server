@@ -513,12 +513,11 @@ async function storedTransfer(
   signal?: AbortSignal,
   authorizedPrincipalId?: string,
 ): Promise<StoredTransfer> {
-  const [journal, recovery] = await lease.withProjectScope(async scope => (
-    Promise.all([
-      scope.portability.getLifecycleJournal(transferId),
-      scope.portability.getAuthorityTransferRecovery(transferId),
-    ])
-  ), signal ? { signal } : {});
+  const [journal, recovery] = await lease.withProjectScope(async scope => {
+    const journal = await scope.portability.getLifecycleJournal(transferId);
+    const recovery = await scope.portability.getAuthorityTransferRecovery(transferId);
+    return [journal, recovery] as const;
+  }, signal ? { signal } : {});
   if (
     journal?.kind !== 'authority-transfer'
     || journal.direction !== 'lan-to-cloud'
@@ -890,10 +889,8 @@ implements ProjectLifecycleRecoveryOwner {
           if (existing === undefined) {
             const createdAt = timestamp(this.#clock);
             const expiresAt = defaultAuthorityTransferExpiresAt(createdAt);
-            const [project, tombstone] = await Promise.all([
-              scope.getProject(),
-              scope.portability.getProjectTombstone(),
-            ]);
+            const project = await scope.getProject();
+            const tombstone = await scope.portability.getProjectTombstone();
             if (project !== undefined) return fail('state-conflict');
             if (tombstone !== undefined) {
               if (tombstone.terminalOperationKind !== 'authority-transfer') {

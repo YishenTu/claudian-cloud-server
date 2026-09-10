@@ -42,6 +42,11 @@ class MemoryCollaboration {
   readonly comments: CollabComment[] = [];
 
   readonly persistence = {
+    snapshot: {
+      readRequestsForAdmission: () => Promise.resolve(
+        this.request?.status === 'open' ? [this.request] : [],
+      ),
+    },
     idempotency: {
       find: (input: {
         readonly idempotencyKey: string;

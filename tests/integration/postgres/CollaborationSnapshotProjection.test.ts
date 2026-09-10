@@ -2,10 +2,13 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { COLLAB_CLOUD_BINDING_LIMITS } from '@claudian-collab/protocol';
-import { Client } from 'pg';
+import { Client, type QueryResultRow } from 'pg';
 
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
+import { PostgresCollaborationPersistence } from '../../../src/coordination/postgres/PostgresCollaborationPersistence.js';
 import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
+import { ProjectRequestAuthority } from '../../../src/project-authority/requests/ProjectRequestAuthority.js';
+import { createDevelopmentPrincipal } from '../../../src/request-context/RequestPrincipal.js';
 import {
   type PostgresTestDatabase,
   withPostgresTestDatabase,
@@ -64,6 +67,122 @@ async function seedProject(
 }
 
 describe('Collaboration snapshot projection', () => {
+  for (const operation of ['metadata', 'ensure'] as const) {
+  it(`rejects oversized ${operation} atomically and permits shrinking existing content`, async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
+      await seedProject(database, 'project-write-budget', 30);
+      const client = new Client({ connectionString: database.migrationUrl });
+      const store = coordination(database);
+      const authority = new ProjectRequestAuthority({
+        coordination: store,
+        recovery: { recoverProject: () => Promise.resolve() },
+        repository: {
+          inspectRequest: () => Promise.reject(new Error('metadata does not read Git')),
+          withRequestHeadValidation: (_projectId, execute) => execute(input => input.revalidateAuthority()),
+        },
+      });
+      try {
+        await client.connect();
+        await client.query('BEGIN');
+        await client.query("SELECT set_config('claudian_cloud.project_id', $1, true)", ['project-write-budget']);
+        await client.query(`INSERT INTO claudian_cloud.development_actor_mappings
+          (project_id, actor_id, member_id, created_at)
+          VALUES ('project-write-budget', 'member-000', 'member-000', $1)`, [CREATED]);
+        await client.query(`INSERT INTO claudian_cloud.repository_placements
+          (project_id, storage_node_id, repository_storage_key, generation, active, created_at, updated_at)
+          VALUES ('project-write-budget', 'budget-node', 'budget-repository', 1, true, $1, $1)`, [CREATED]);
+        await client.query('COMMIT');
+        await store.withProjectScope('project-write-budget', async scope => {
+          for (let index = 0; index < 30; index += 1) {
+            await scope.collaboration.requests.create({
+              createdAt: CREATED,
+              description: 'x'.repeat(index === 0 ? 1_000 : 14_000),
+              firstBaseOid: 'a'.repeat(40), latestHeadOid: 'b'.repeat(40),
+              memberId: `member-${String(index).padStart(3, '0')}`,
+              requestId: `request-${String(index).padStart(3, '0')}`,
+            });
+          }
+        });
+        const request = {
+          projectId: 'project-write-budget', requestId: 'request-000',
+          expectedHeadOid: 'b'.repeat(40), expectedRequestRevision: 1,
+          idempotencyKey: 'oversized-update', description: 'y'.repeat(16_000),
+        };
+        const update = (description: string, idempotencyKey: string) => operation === 'metadata'
+          ? authority.updateMyRequestMetadata(createDevelopmentPrincipal('member-000'), {
+            ...request, description, idempotencyKey,
+          })
+          : authority.ensureMyRequest(createDevelopmentPrincipal('member-000'), {
+            projectId: request.projectId, description, idempotencyKey,
+            headOid: request.expectedHeadOid, expectedMainOid: 'a'.repeat(40),
+          });
+        await assert.rejects(
+          update(request.description, request.idempotencyKey),
+          { code: 'quota-exceeded' },
+        );
+        const unchanged = await store.withProjectReadScope('project-write-budget', async scope => ({
+          request: await scope.collaboration.requests.find('request-000'),
+          sequence: await scope.getProjectEventSequence(),
+        }));
+        assert.equal(unchanged.request?.description, 'x'.repeat(1_000));
+        assert.equal(unchanged.request.revision, 1);
+        assert.equal(unchanged.sequence, 0);
+        const smaller = await update('Shorter', 'smaller-update');
+        assert.equal(smaller.request.description, 'Shorter');
+      } finally {
+        await authority.close();
+        await client.end();
+        await store.close();
+      }
+    });
+  });
+
+  }
+
+  it('reads a full Request collection within a fixed database round-trip budget', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
+      await seedProject(database, 'project-query-budget', 100);
+      const store = coordination(database);
+      const client = new Client({ connectionString: database.migrationUrl });
+      try {
+        await store.withProjectScope('project-query-budget', async scope => {
+          for (let index = 0; index < 100; index += 1) {
+            await scope.collaboration.requests.create({
+              createdAt: CREATED,
+              description: 'Ready',
+              firstBaseOid: 'a'.repeat(40),
+              latestHeadOid: 'b'.repeat(40),
+              memberId: `member-${String(index).padStart(3, '0')}`,
+              requestId: `request-${String(index).padStart(3, '0')}`,
+            });
+          }
+        });
+        await client.connect();
+        await client.query('BEGIN READ ONLY');
+        await client.query("SELECT set_config('claudian_cloud.project_id', $1, true)", [
+          'project-query-budget',
+        ]);
+        let roundTrips = 0;
+        const projection = new PostgresCollaborationPersistence(
+          'project-query-budget',
+          async <Row extends QueryResultRow>(query: string, values: readonly unknown[]) => {
+            roundTrips += 1;
+            return (await client.query<Row>(query, [...values])).rows;
+          },
+        );
+        const result = await projection.snapshot.read();
+        assert.equal(result.kind, 'snapshot');
+        assert.equal(result.snapshot.openRequests.length, 100);
+        assert.ok(roundTrips <= 5, `snapshot exceeded five round trips: ${String(roundTrips)}`);
+      } finally {
+        await client.end();
+        await store.close();
+      }
+    });
+  });
+
   it('sorts nonempty Requests and exposes the newest five open Ticket summaries', async () => {
     await withPostgresTestDatabase(async database => {
       await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();

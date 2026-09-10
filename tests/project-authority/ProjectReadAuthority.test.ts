@@ -196,7 +196,7 @@ class MemoryRepository implements ProjectReadRepository {
     return Promise.resolve();
   }
 
-  verifyProjectEventRead(input: Parameters<ProjectReadRepository['verifyProjectEventRead']>[0]) {
+  verifyProjectProjectionRead(input: Parameters<ProjectReadRepository['verifyProjectProjectionRead']>[0]) {
     return this.verifyProjectRead(input);
   }
 }
