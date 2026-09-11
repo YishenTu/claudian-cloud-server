@@ -25,6 +25,7 @@ async function packageRelease() {
       'README.md', 'LICENSE', '.env.example',
       'deploy/README.md', 'deploy/compose.yaml', 'deploy/bootstrap-postgres.sh',
       'deploy/configure.sh', 'deploy/initializeConfig.ts',
+      'deploy/deploy.sh', 'deploy/release-update.sh',
     ]) {
       await copyFile(join(root, path), join(bundle, path));
     }

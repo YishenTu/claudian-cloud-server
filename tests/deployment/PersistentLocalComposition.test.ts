@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -335,6 +335,120 @@ function runComposeExpectingFailure(
   assert.equal(result.signal, null);
 }
 
+async function exerciseReleaseUpdate(fixture: CompositionFixture): Promise<void> {
+  const realDocker = execFileSync('which', ['docker'], { encoding: 'utf8' }).trim();
+  const candidateTag = `${fixture.image}-update`;
+  const candidateReference = `ghcr.io/yishentu/claudian-cloud-server@sha256:${'a'.repeat(64)}`;
+  const candidateRevision = 'e'.repeat(40);
+  const assets = join(fixture.root, 'release-assets');
+  const stateDirectory = join(fixture.root, 'update-state');
+  const bin = join(fixture.root, 'update-bin');
+  const backupCatalogRoot = join(fixture.root, 'backup-catalogs');
+  await mkdir(stateDirectory);
+  await mkdir(bin);
+  await mkdir(backupCatalogRoot);
+  execFileSync(realDocker, ['build', '--tag', candidateTag, '-'], {
+    input: `FROM ${fixture.image}\nLABEL com.claudian.release-update-test=candidate\n`,
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const candidateImage = execFileSync(realDocker, ['image', 'inspect', '--format', '{{.Id}}', candidateTag], {
+    encoding: 'utf8',
+  }).trim();
+  execFileSync(process.execPath, [join(repositoryRoot, 'scripts/packageRelease.ts'),
+    candidateReference, candidateRevision, assets]);
+  execFileSync('tar', ['-xzf', join(assets, 'claudian-cloud-server.tar.gz'), '-C', fixture.root]);
+  const installation = join(fixture.root, 'claudian-cloud-server');
+  const settings = [
+    `CLAUDIAN_CLOUD_IMAGE=${fixture.image}`,
+    `COMPOSE_PROJECT_NAME=${fixture.projectName}`,
+    `CLAUDIAN_CLOUD_BACKUP_CATALOG_ROOT=${backupCatalogRoot}`,
+    ...Object.entries(fixture.environment)
+      .filter(([key, value]) => key.startsWith('CLAUDIAN_CLOUD_') && key !== 'CLAUDIAN_CLOUD_IMAGE' && value !== undefined)
+      .map(([key, value]) => `${key}=${value ?? ''}`),
+    '',
+  ].join('\n');
+  await writeFile(join(installation, 'release.env'), settings, { mode: 0o600 });
+  // Substitute registry acquisition and inject a start failure; all executed Docker operations stay real.
+  await writeFile(join(bin, 'docker'), `#!${process.execPath}
+const {spawnSync} = require('node:child_process');
+const args = process.argv.slice(2);
+if (process.env.TEST_FAIL_UPDATE_START === '1' && args[0] === 'compose' && args.includes('up')) process.exit(1);
+if (args[0] === 'pull' && args[1] === process.env.TEST_RELEASE_REFERENCE) process.exit(0);
+if (args[0] === 'image' && args[1] === 'inspect' && args.at(-1) === process.env.TEST_RELEASE_REFERENCE) {
+  args[args.length - 1] = process.env.TEST_RELEASE_IMAGE;
+}
+const child = spawnSync(process.env.TEST_REAL_DOCKER, args, {stdio:'inherit'});
+process.exit(child.status ?? 1);
+`);
+  await writeFile(join(bin, 'curl'), `#!${process.execPath}
+const fs = require('node:fs');
+const path = require('node:path');
+const args = process.argv.slice(2);
+const name = args.at(-1).endsWith('.sha256') ? 'claudian-cloud-server.tar.gz.sha256' : 'claudian-cloud-server.tar.gz';
+fs.copyFileSync(path.join(process.env.TEST_RELEASE_ASSETS, name), args[args.indexOf('--output') + 1]);
+`);
+  await chmod(join(bin, 'docker'), 0o755);
+  await chmod(join(bin, 'curl'), 0o755);
+  const oldContainer = runCompose(fixture, ['ps', '--quiet', 'cloud-server']);
+  const databaseContainer = runCompose(fixture, ['ps', '--quiet', 'postgres']);
+  const oldImage = execFileSync(realDocker, ['inspect', '--format', '{{.Image}}', oldContainer], {
+    encoding: 'utf8',
+  }).trim();
+  assert.notEqual(candidateImage, oldImage);
+  const started = Date.now();
+  const updateOptions = {
+    cwd: installation,
+    encoding: 'utf8' as const,
+    timeout: 90_000,
+    maxBuffer: 4 * 1_024 * 1_024,
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH ?? ''}`,
+      CLAUDIAN_DEPLOY_LOCK_FILE: join(stateDirectory, 'deploy.lock'),
+      CLAUDIAN_DEPLOY_FORWARD_STATE_FILE: join(stateDirectory, 'deploy-forward'),
+      TEST_REAL_DOCKER: realDocker,
+      TEST_RELEASE_REFERENCE: candidateReference,
+      TEST_RELEASE_IMAGE: candidateImage,
+      TEST_RELEASE_ASSETS: assets,
+    },
+  };
+  const failed = spawnSync('bash', [join(installation, 'deploy/deploy.sh'), '--update'], {
+    ...updateOptions,
+    env: { ...updateOptions.env, TEST_FAIL_UPDATE_START: '1' },
+  });
+  assert.equal(failed.status, 1, failed.stderr);
+  assert.match(await readFile(join(stateDirectory, 'deploy-forward'), 'utf8'), /^release-recovery-started-v1 /);
+  assert.equal(execFileSync(realDocker, ['inspect', '--format', '{{.State.Running}}', oldContainer], {
+    encoding: 'utf8',
+  }).trim(), 'false');
+  execFileSync(realDocker, ['rm', oldContainer], { stdio: 'pipe' });
+  const result = spawnSync('bash', [join(installation, 'deploy/deploy.sh'), '--update'], updateOptions);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /deployment\.ready/);
+  await assert.rejects(readFile(join(stateDirectory, 'deploy-forward')));
+  const updatedContainer = runCompose(fixture, ['ps', '--quiet', 'cloud-server']);
+  assert.equal(execFileSync(realDocker, ['inspect', '--format', '{{.Image}}', updatedContainer], {
+    encoding: 'utf8',
+  }).trim(), candidateImage);
+  assert.equal(runCompose(fixture, ['ps', '--quiet', 'postgres']), databaseContainer);
+  assert.equal((await fetch(`http://127.0.0.1:${String(fixture.runtimePort)}/readyz`)).status, 200);
+  const events = execFileSync(realDocker, ['events', '--since', String(Math.floor(started / 1000) - 1),
+    '--until', String(Math.ceil(Date.now() / 1000)), '--filter', `container=${oldContainer}`,
+    '--format', '{{json .}}'], { encoding: 'utf8', timeout: 5_000 }).trim().split('\n')
+    .filter(Boolean).map(line => JSON.parse(line) as {
+      Action: string; timeNano: number; Actor: { Attributes: Record<string, string> };
+    });
+  const killed = events.find(event => event.Action === 'kill' && event.Actor.Attributes.signal === '15');
+  const exited = events.find(event => event.Action === 'die');
+  assert.ok(killed);
+  assert.ok(exited);
+  assert.equal(exited.Actor.Attributes.exitCode, '0');
+  assert.ok((exited.timeNano - killed.timeNano) / 1_000_000 < 20_000);
+  const retainedSettings = await readFile(join(installation, 'release.env'), 'utf8');
+  assert.equal(retainedSettings, settings);
+}
+
 describe('persistent local Compose model', () => {
   it('isolates credentials and binds PostgreSQL and Cloud to persistent loopback authority', async () => {
     const root = await mkdtemp(join(tmpdir(), 'claudian-compose-model-'));
@@ -662,6 +776,8 @@ describe('persistent local Compose model', () => {
       );
       assert.equal(ready.status, 200);
 
+      await exerciseReleaseUpdate(fixture);
+
       runCompose(fixture, ['restart', 'postgres']);
       runCompose(fixture, ['up', '--detach', '--wait', 'postgres']);
       runCompose(fixture, ['restart', 'cloud-server']);
@@ -713,6 +829,11 @@ describe('persistent local Compose model', () => {
         // Continue cleaning the isolated image and environment files.
       }
       if (imageBuilt) {
+        try {
+          execFileSync('docker', ['image', 'rm', '--force', `${fixture.image}-update`], { stdio: 'ignore' });
+        } catch {
+          // The candidate may not have been built before the failure.
+        }
         try {
           execFileSync('docker', ['image', 'rm', '--force', fixture.image], {
             stdio: 'ignore',
