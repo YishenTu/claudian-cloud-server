@@ -9,10 +9,10 @@ import {
 } from '@claudian-collab/protocol';
 
 import type {
-  CreateProjectInvitationPersistenceInput,
+  InsertProjectInvitationInput,
   ProjectInvitationRecord,
   ProjectInvitationPersistence,
-  RevokeProjectInvitationPersistenceInput,
+  RevokeInvitationRowInput,
 } from '../../src/coordination/ProjectMembershipPersistence.js';
 import {
   ProjectInvitationAuthority,
@@ -35,70 +35,47 @@ class MemoryMembershipPersistence implements ProjectInvitationPersistence {
   invitation: ProjectInvitationRecord | undefined;
   managerSetGeneration = 1;
   capacity = 1;
-  rejection: 'permanently-stale' | undefined;
-
-  createInvitation(
-    input: CreateProjectInvitationPersistenceInput,
-  ): Promise<Readonly<{
-    readonly record?: ProjectInvitationRecord;
-    readonly status: 'permanently-stale' | 'conflict' | 'created' | 'quota' | 'replayed' | 'replay-expired' | 'stale-generation';
-  }>> {
-    if (this.rejection !== undefined) return Promise.resolve({ status: this.rejection });
-    if (this.managerSetGeneration !== input.expectedManagerSetGeneration) {
-      return Promise.resolve({ status: 'stale-generation' });
-    }
-    if (this.invitation !== undefined) {
-      return Promise.resolve(
-        this.invitation.issuedByMemberId === input.issuedByMemberId
-        && this.invitation.idempotencyKey === input.idempotencyKey
-        && this.invitation.requestFingerprint === input.requestFingerprint
-          ? { record: this.invitation, status: 'replayed' }
-          : { status: 'conflict' },
-      );
-    }
-    if (this.capacity >= 100) return Promise.resolve({ status: 'quota' });
+  readonly results = new Map<string, { requestFingerprint: string; response: unknown }>();
+  expireInvitations(): Promise<void> { return Promise.resolve(); }
+  findSecretReplayTombstone(): Promise<string | undefined> { return Promise.resolve(undefined); }
+  readMembershipReservationCount(): Promise<bigint> { return Promise.resolve(BigInt(this.capacity)); }
+  readInvitationIssuance(actor: string, key: string): Promise<ProjectInvitationRecord | undefined> {
+    return Promise.resolve(this.invitation?.issuedByMemberId === actor && this.invitation.idempotencyKey === key ? this.invitation : undefined);
+  }
+  readInvitationRecord(id: string): Promise<ProjectInvitationRecord | undefined> {
+    return Promise.resolve(this.invitation?.invitationId === id ? this.invitation : undefined);
+  }
+  readInvitations(): Promise<readonly ProjectInvitationRecord[]> { return Promise.resolve(this.invitation === undefined ? [] : [this.invitation]); }
+  insertInvitation(input: InsertProjectInvitationInput): Promise<ProjectInvitationRecord> {
+    assert.equal(this.invitation, undefined);
     this.invitation = Object.freeze({ ...input, revision: 1, state: 'active' });
     this.capacity += 1;
-    return Promise.resolve({ record: this.invitation, status: 'created' });
+    return Promise.resolve(this.invitation);
+  }
+  revokeInvitationRow(input: RevokeInvitationRowInput): Promise<ProjectInvitationRecord> {
+    assert.ok(this.invitation);
+    assert.equal(input.invitationId, this.invitation.invitationId);
+    assert.equal(input.expectedInvitationRevision, this.invitation.revision);
+    this.invitation = Object.freeze({ ...this.invitation, revision: 2, state: 'revoked', terminalAt: input.revokedAt });
+    return Promise.resolve(this.invitation);
+  }
+  findMembershipResult(actor: string, operation: string, key: string) {
+    return Promise.resolve(this.results.get(JSON.stringify([actor, operation, key])));
+  }
+  storeMembershipResult(actor: string, operation: string, key: string, requestFingerprint: string, response: unknown): Promise<void> {
+    this.results.set(JSON.stringify([actor, operation, key]), { requestFingerprint, response });
+    return Promise.resolve();
   }
 
-  listInvitations(): Promise<Readonly<{
-    readonly invitations: readonly ProjectInvitationRecord[];
-    readonly managerSetGeneration: number;
-  }>> {
-    return Promise.resolve({
-      invitations: this.invitation === undefined ? [] : [this.invitation],
-      managerSetGeneration: this.managerSetGeneration,
-    });
-  }
-
-  revokeInvitation(
-    input: RevokeProjectInvitationPersistenceInput,
-  ): Promise<Readonly<{
-    readonly record?: ProjectInvitationRecord;
-    readonly status: 'permanently-stale' | 'conflict' | 'replayed' | 'revoked' | 'stale-generation' | 'stale-invitation';
-  }>> {
-    if (this.rejection !== undefined) return Promise.resolve({ status: this.rejection });
-    if (input.expectedManagerSetGeneration !== this.managerSetGeneration) {
-      return Promise.resolve({ status: 'stale-generation' });
-    }
-    if (
-      this.invitation === undefined
-      || input.invitationId !== this.invitation.invitationId
-      || input.expectedInvitationRevision !== this.invitation.revision
-    ) return Promise.resolve({ status: 'stale-invitation' });
-    this.invitation = Object.freeze({
-      ...this.invitation,
-      revision: 2,
-      state: 'revoked',
-      terminalAt: input.revokedAt,
-    });
-    return Promise.resolve({ record: this.invitation, status: 'revoked' });
-  }
 }
 
 function fixture(role: 'manager' | 'member' = 'manager') {
   const persistence = new MemoryMembershipPersistence();
+  const scope = {
+    membership: persistence,
+    getProject: () => Promise.resolve({ managerSetGeneration: persistence.managerSetGeneration }),
+    findMembership: () => Promise.resolve({ role, status: 'active' }),
+  };
   const writeAdmission = {
     run: async <T>(
       _principal: unknown,
@@ -108,8 +85,8 @@ function fixture(role: 'manager' | 'member' = 'manager') {
       memberId: 'member-manager',
       role,
       transact: <U>(
-        transaction: (scope: { membership: ProjectInvitationPersistence }) => Promise<U>,
-      ) => transaction({ membership: persistence }),
+        transaction: (value: typeof scope) => Promise<U>,
+      ) => transaction(scope),
     }),
   };
   return {
@@ -178,9 +155,9 @@ describe('ProjectInvitationAuthority', () => {
     });
   });
 
-  it('preserves negative-settlement evidence from invitation persistence', async () => {
+  it('classifies strictly advanced invitation expectations as permanent rejections', async () => {
     const { authority, persistence } = fixture();
-    persistence.rejection = 'permanently-stale';
+    persistence.managerSetGeneration = 2;
     const expected = { code: 'authority-not-synchronized', name: 'ProjectMutationRejection' };
     await assert.rejects(authority.create(PRINCIPAL, REQUEST), expected);
     await assert.rejects(authority.revoke(PRINCIPAL, {

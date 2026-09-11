@@ -67,6 +67,9 @@ class MemoryJoinPersistence implements ProjectJoinPersistence {
     return Promise.resolve(this.invitationUnavailable ? undefined : this.invitation);
   }
 
+  readMembershipReservationCount(): Promise<bigint> { return Promise.resolve(2n); }
+  readInvitationRecord(): Promise<ProjectInvitationRecord | undefined> { return Promise.resolve(this.invitation); }
+
   findJoinByPrincipal(): Promise<ProjectJoinJournal | undefined> {
     return Promise.resolve(this.journal);
   }
@@ -79,11 +82,9 @@ class MemoryJoinPersistence implements ProjectJoinPersistence {
     return Promise.resolve(this.journal?.phase === 'completed' ? undefined : this.journal);
   }
 
-  prepareJoin(input: PrepareProjectJoinInput) {
-    if (this.journal !== undefined) return Promise.resolve({
-      journal: this.journal,
-      status: 'replayed' as const,
-    });
+  readPrincipalBindingState(): Promise<string | undefined> { return Promise.resolve(undefined); }
+
+  insertJoin(input: PrepareProjectJoinInput) {
     this.commit({
       ...input,
       phase: 'prepared',
@@ -91,7 +92,7 @@ class MemoryJoinPersistence implements ProjectJoinPersistence {
       updatedAt: input.preparedAt,
     });
     assert.ok(this.journal);
-    return Promise.resolve({ journal: this.journal, status: 'created' as const });
+    return Promise.resolve(this.journal);
   }
 
   advanceJoin(input: Readonly<{

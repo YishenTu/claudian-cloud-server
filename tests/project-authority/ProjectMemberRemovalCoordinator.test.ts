@@ -38,7 +38,7 @@ describe('ProjectMemberRemovalCoordinator', () => {
     const membership = {
       async getNonterminalJoin() { return undefined; },
       async getRemoval() { return journal; },
-      async prepareRemoval(input: Omit<
+      async insertRemoval(input: Omit<
         ProjectMemberRemovalJournal,
         'phase' | 'response' | 'updatedAt'
       >) {
@@ -48,18 +48,19 @@ describe('ProjectMemberRemovalCoordinator', () => {
           response: undefined,
           updatedAt: input.preparedAt,
         });
-        return { journal, status: 'created' as const };
+        return journal;
       },
-      async settleRemoval() {
-        if (stalePreparedJournal) return { status: 'stale' as const };
-        effects.push('settle');
+      async readMemberExitFacts() {
+        return {
+          activeManagerCount: 1n, leftAt: null, managerSetGeneration: 3,
+          openRequestId: 'request-open', revision: 7n, role: 'member' as const,
+          status: journal !== undefined && stalePreparedJournal ? 'revoked' as const : 'active' as const,
+        };
+      },
+      async applyMemberExit() { effects.push('settle'); },
+      async recordRemovalSettlement(input: { readonly response: typeof response }) {
         assert.ok(journal);
-        journal = Object.freeze({
-          ...journal,
-          phase: 'membership-revoked' as const,
-          response,
-        });
-        return { response, status: 'settled' as const };
+        journal = Object.freeze({ ...journal, phase: 'membership-revoked' as const, response: input.response });
       },
       async advanceRemoval() {
         assert.ok(journal);

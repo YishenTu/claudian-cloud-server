@@ -1,3 +1,4 @@
+import { ProjectTransferredMembershipClaims } from '../../membership/ProjectTransferredMembershipClaims.js';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -1382,43 +1383,13 @@ implements ProjectLifecycleRecoveryOwner {
           project?.serviceState !== 'active'
           || project.authorityGeneration !== exact.recovery.targetAuthority.generation
         ) return fail('recovery-required');
-        const membership = (scope as Partial<typeof scope>).membership;
-        if (membership !== undefined) {
-          return membership.resolveEffectiveTransferredMembershipClaim(
-            request.transferId,
-            claimSha256,
-            timestamp(this.#clock),
-          );
-        }
-        const original = await scope.portability
-          .findTransferredMembershipClaimBySha256(
-            request.transferId,
-            claimSha256,
-          );
-        if (original === undefined) return undefined;
-        return Object.freeze({
-          checkpointSha256: original.checkpointSha256,
-          claimGeneration: 0,
-          claimSha256: original.claimSha256,
-          expiresAt: original.expiresAt,
-          kind: 'original' as const,
-          memberId: original.memberId,
-          operationIntentId: original.operationIntentId ?? null,
-          redemptionReceiptId: original.redemptionReceiptId ?? null,
-          state: original.state === 'unclaimed'
-            ? 'active' as const
-            : original.state === 'redeemed'
-              ? 'redeemed' as const
-              : undefined,
-          targetPrincipalId: original.targetPrincipalId ?? null,
-          transferId: original.transferId,
-          updatedAt: original.updatedAt,
-        });
+        return new ProjectTransferredMembershipClaims(scope, request.projectId).resolveEffectiveTransferredMembershipClaim(
+          request.transferId, claimSha256, timestamp(this.#clock),
+        );
       });
       if (claim === undefined || claim.memberId === exact.proof.sourceHostMemberId) {
         return fail('authorization-denied');
       }
-      if (claim.state === undefined) return fail('authorization-denied');
       if (Date.parse(claim.expiresAt) <= this.#clock().valueOf()) return fail('expired');
       let payload: CollabTransferredMembershipRedemptionReceiptSigningPayload;
       if (claim.state === 'redeemed') {
@@ -1481,7 +1452,7 @@ implements ProjectLifecycleRecoveryOwner {
           )
         ) return fail('authorization-denied');
         if (claim.kind === 'override') {
-          return scope.membership.redeemTransferredMembershipClaimOverride({
+          return scope.membership.recordClaimOverrideRedemption({
             claim,
             operationIntentId: request.idempotencyKey,
             receipt,

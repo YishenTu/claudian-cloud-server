@@ -1,3 +1,4 @@
+import { ProjectMembershipSettlement } from '../../membership/ProjectMembershipSettlement.js';
 import { createHash } from 'node:crypto';
 
 import {
@@ -478,40 +479,18 @@ implements ProjectLifecycleRecoveryOwner, ProjectRecoveryPort {
     now: string,
   ): Promise<void> {
     const memberships = await scope.listMemberships();
-    const activeManagerCount = memberships.filter(value => (
-      value.status === 'active' && value.role === 'manager'
-    )).length;
-    if (membership.role !== 'manager' || activeManagerCount > 1) {
-      if (
-        request.managerResponsibilityOfferId !== null
-        || request.expectedOfferRevision !== null
-      ) return fail('state-conflict');
-      return;
-    }
-    if (
-      activeManagerCount !== 1
-      || request.managerResponsibilityOfferId === null
-    ) return fail('manager-succession-required');
-    const offer = await scope.membership.getManagerResponsibilityOffer({
-      actorMemberId: membership.memberId,
-      actorRole: 'manager',
-      now,
-      offerId: request.managerResponsibilityOfferId,
+    const decision = await new ProjectMembershipSettlement(scope, request.projectId).decideLeaveSuccession({
+      expectedManagerSetGeneration: request.expectedManagerSetGeneration,
+      expectedOfferRevision: request.expectedOfferRevision,
+      leftAt: now,
+      managerResponsibilityOfferId: request.managerResponsibilityOfferId,
+      memberId: membership.memberId,
+    }, {
+      activeManagerCount: BigInt(memberships.filter(value => value.status === 'active' && value.role === 'manager').length),
+      role: membership.role,
     });
-    if (
-      offer === undefined
-      || offer.sourceManagerMemberId !== membership.memberId
-      || offer.purpose !== 'manager-leave'
-      || offer.state !== 'acknowledged'
-      || offer.revision !== request.expectedOfferRevision
-      || offer.managerSetGenerationAtOffer !== request.expectedManagerSetGeneration
-    ) return fail('manager-succession-required');
-    const successor = await scope.findMembership(offer.targetMemberId);
-    if (
-      successor?.status !== 'active'
-      || successor.role !== 'member'
-      || successor.revision !== BigInt(offer.targetMembershipRevisionAtOffer)
-    ) return fail('manager-succession-required');
+    if (decision.status === 'stale') return fail('state-conflict');
+    if (decision.status === 'last-manager') return fail('manager-succession-required');
   }
 
   async #continue(
@@ -563,7 +542,7 @@ implements ProjectLifecycleRecoveryOwner, ProjectRecoveryPort {
           if (exactPrincipalId === undefined) return fail('recovery-required');
         }
         const leftAt = journal.scheduledAt;
-        const settlement = await scope.portability.settleLeaveMembership({
+        const settlement = await new ProjectMembershipSettlement(scope, request.projectId).settleLeaveMembership({
           expectedManagerSetGeneration: request.expectedManagerSetGeneration,
           expectedMembershipRevision: BigInt(request.expectedMembershipRevision),
           expectedOfferRevision: request.expectedOfferRevision,

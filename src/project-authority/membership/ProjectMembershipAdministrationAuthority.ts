@@ -1,3 +1,4 @@
+import { ProjectMembershipAdministration } from './ProjectMembershipAdministration.js';
 import { createHash, randomUUID } from 'node:crypto';
 
 import {
@@ -17,7 +18,7 @@ import {
   type TransitionManagerResponsibilityOfferRequest,
 } from '@claudian-collab/protocol';
 
-import type { MembershipAdministrationStatus } from '../../coordination/ProjectMembershipPersistence.js';
+import type { MembershipAdministrationStatus } from './ProjectMembershipAdministration.js';
 import { ProjectMutationRejection } from '../ProjectMutationRejection.js';
 import type { RequestPrincipal } from '../../request-context/RequestPrincipal.js';
 import type { ProjectWriteAdmission } from '../admission/ProjectWriteAdmission.js';
@@ -93,7 +94,7 @@ export class ProjectMembershipAdministrationAuthority {
   ): Promise<ListProjectMembersResponse> {
     return this.#writeAdmission.run(principal, request.projectId, async write => {
       const response = await write.transact(scope => (
-        scope.membership.listProjectMembers({
+        new ProjectMembershipAdministration(scope, request.projectId).listProjectMembers({
           actorRole: write.role,
           now: canonicalNow(this.#clock),
         })
@@ -113,7 +114,7 @@ export class ProjectMembershipAdministrationAuthority {
       }
       const offeredAt = canonicalNow(this.#clock);
       const result = await write.transact(scope => (
-        scope.membership.createManagerResponsibilityOffer({
+        new ProjectMembershipAdministration(scope, request.projectId).createManagerResponsibilityOffer({
           actorMemberId: write.memberId,
           expectedManagerSetGeneration: request.expectedManagerSetGeneration,
           expectedTargetMembershipRevision: request.expectedTargetMembershipRevision,
@@ -146,7 +147,7 @@ export class ProjectMembershipAdministrationAuthority {
   ): Promise<ListCurrentManagerResponsibilityOffersResponse> {
     return this.#writeAdmission.run(principal, request.projectId, async write => {
       const offers = await write.transact(scope => (
-        scope.membership.listCurrentManagerResponsibilityOffers({
+        new ProjectMembershipAdministration(scope, request.projectId).listCurrentManagerResponsibilityOffers({
           actorMemberId: write.memberId,
           actorRole: write.role,
           now: canonicalNow(this.#clock),
@@ -164,7 +165,7 @@ export class ProjectMembershipAdministrationAuthority {
   ): Promise<CollabManagerResponsibilityOfferResponse> {
     return this.#writeAdmission.run(principal, request.projectId, async write => {
       const offer = await write.transact(scope => (
-        scope.membership.getManagerResponsibilityOffer({
+        new ProjectMembershipAdministration(scope, request.projectId).getManagerResponsibilityOffer({
           actorMemberId: write.memberId,
           actorRole: write.role,
           now: canonicalNow(this.#clock),
@@ -232,7 +233,7 @@ export class ProjectMembershipAdministrationAuthority {
       }
       const promotedAt = canonicalNow(this.#clock);
       const result = await write.transact(async scope => {
-        const mutation = await scope.membership.promoteManager({
+        const mutation = await new ProjectMembershipAdministration(scope, request.projectId).promoteManager({
           actorMemberId: write.memberId,
           expectedManagerSetGeneration: request.expectedManagerSetGeneration,
           expectedOfferRevision: request.expectedOfferRevision,
@@ -273,7 +274,7 @@ export class ProjectMembershipAdministrationAuthority {
       }
       const demotedAt = canonicalNow(this.#clock);
       const result = await write.transact(async scope => {
-        const mutation = await scope.membership.demoteManager({
+        const mutation = await new ProjectMembershipAdministration(scope, request.projectId).demoteManager({
           actorMemberId: write.memberId,
           demotedAt,
           expectedManagerSetGeneration: request.expectedManagerSetGeneration,
@@ -310,7 +311,7 @@ export class ProjectMembershipAdministrationAuthority {
   ): Promise<CollabManagerResponsibilityOfferResponse> {
     return this.#writeAdmission.run(principal, request.projectId, async write => {
       const result = await write.transact(scope => (
-        scope.membership.transitionManagerResponsibilityOffer({
+        new ProjectMembershipAdministration(scope, request.projectId).transitionManagerResponsibilityOffer({
           actorMemberId: write.memberId,
           actorRole: write.role,
           expectedOfferRevision: request.expectedOfferRevision,

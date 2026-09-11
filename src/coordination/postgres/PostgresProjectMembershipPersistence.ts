@@ -8,25 +8,29 @@ import {
   isCollabOpaqueId,
   isCollabProjectId,
   type CollabManagerResponsibilityOffer,
-  type CollabManagerResponsibilityOfferResponse,
   type CollabTransferredMembershipRedemptionReceipt,
-  type DemoteManagerResponse,
   type JoinCloudProjectResponse,
-  type ListProjectMembersResponse,
-  type PromoteManagerResponse,
   type RemoveMemberResponse,
-  type RevokeTransferredMembershipClaimResponse,
 } from '@claudian-collab/protocol';
 import { isDeepStrictEqual } from 'node:util';
 import { createHash } from 'node:crypto';
 import type { QueryResultRow } from 'pg';
 
 import type {
-  CreateProjectInvitationPersistenceInput,
+  InsertClaimOverrideInput,
+  RevokeClaimRowInput,
+  ImportedTransferClaimRecord,
+  TransferredMembershipClaimRecord,
+  ApplyMemberExitInput,
+  InsertResponsibilityOfferInput,
+  TransitionResponsibilityOfferInput,
+  MemberAdministrationFacts,
+  ManagerRoleChangeInput,
+  InsertProjectInvitationInput,
   ProjectInvitationRecord,
   ProjectMembershipPersistence,
   ProtectedInvitationEnvelope,
-  RevokeProjectInvitationPersistenceInput,
+  RevokeInvitationRowInput,
   PrepareProjectJoinInput,
   ProjectJoinJournal,
   ProjectMemberRemovalJournal,
@@ -585,96 +589,10 @@ export class PostgresProjectMembershipPersistence
     return rows[0] === undefined ? undefined : removalJournal(rows[0]);
   }
 
-  async prepareRemoval(
+  async insertRemoval(
     input: Omit<ProjectMemberRemovalJournal, 'phase' | 'response' | 'updatedAt'>,
-  ) {
-    const existing = await this.getRemoval(input.operationId);
-    if (existing !== undefined) {
-      const exact = existing.actorMemberId === input.actorMemberId
-        && existing.targetMemberId === input.targetMemberId
-        && existing.idempotencyKey === input.idempotencyKey
-        && existing.requestFingerprint === input.requestFingerprint
-        && existing.expectedTargetMembershipRevision
-          === input.expectedTargetMembershipRevision
-        && existing.expectedManagerSetGeneration
-          === input.expectedManagerSetGeneration
-        && existing.expectedPersonalRefOid === input.expectedPersonalRefOid
-        && existing.personalRef === input.personalRef
-        && existing.storageNodeId === input.storageNodeId
-        && existing.repositoryStorageKey === input.repositoryStorageKey
-        && existing.placementGeneration === input.placementGeneration;
-      return exact
-        ? { journal: existing, status: 'replayed' as const }
-        : { status: 'conflict' as const };
-    }
-    const facts = await this.#query<{
-      readonly active: boolean;
-      readonly actor_role: string;
-      readonly actor_status: string;
-      readonly authority_generation: string;
-      readonly generation: string;
-      readonly manager_count: string;
-      readonly manager_set_generation: string;
-      readonly repository_storage_key: string;
-      readonly service_state: string;
-      readonly storage_node_id: string;
-      readonly target_revision: string;
-      readonly target_role: string;
-      readonly target_status: string;
-    }>(
-      `SELECT project.service_state, project.authority_generation,
-              project.manager_set_generation, actor.role AS actor_role,
-              actor.status AS actor_status, target.role AS target_role,
-              target.status AS target_status, target.revision AS target_revision,
-              placement.active, placement.generation,
-              placement.storage_node_id, placement.repository_storage_key,
-              (SELECT count(*)::text
-                 FROM claudian_cloud.project_memberships AS manager
-                WHERE manager.project_id = project.project_id
-                  AND manager.status = 'active' AND manager.role = 'manager'
-              ) AS manager_count
-         FROM claudian_cloud.projects AS project
-         JOIN claudian_cloud.project_memberships AS actor
-           ON actor.project_id = project.project_id AND actor.member_id = $2
-         JOIN claudian_cloud.project_memberships AS target
-           ON target.project_id = project.project_id AND target.member_id = $3
-         JOIN claudian_cloud.repository_placements AS placement
-           ON placement.project_id = project.project_id
-        WHERE project.project_id = $1
-        FOR UPDATE OF project, actor, target, placement`,
-      [this.#projectId, input.actorMemberId, input.targetMemberId],
-    );
-    const fact = facts[0];
-    if (
-      fact === undefined
-      || fact.actor_status !== 'active'
-      || fact.actor_role !== 'manager'
-      || input.actorMemberId === input.targetMemberId
-    ) return { status: 'authorization-denied' as const };
-    if (
-      Number(fact.manager_set_generation) > input.expectedManagerSetGeneration
-      || Number(fact.target_revision) > input.expectedTargetMembershipRevision
-    ) return { status: 'permanently-stale' as const };
-    if (
-      fact.service_state !== 'active'
-      || fact.target_status !== 'active'
-      || Number(fact.target_revision) !== input.expectedTargetMembershipRevision
-      || Number(fact.manager_set_generation) !== input.expectedManagerSetGeneration
-      || !fact.active
-      || Number(fact.generation) !== input.placementGeneration
-      || fact.storage_node_id !== input.storageNodeId
-      || fact.repository_storage_key !== input.repositoryStorageKey
-    ) return { status: 'stale' as const };
-    if (fact.target_role === 'manager' && BigInt(fact.manager_count) <= 1n) {
-      return { status: 'final-manager' as const };
-    }
-    const nonterminal = await this.#query<{ readonly operation_id: string }>(
-      `SELECT operation_id
-         FROM claudian_cloud.project_lifecycle_journals
-        WHERE project_id = $1 AND state IN ('active', 'recovery-required')`,
-      [this.#projectId],
-    );
-    if (nonterminal.length !== 0) return { status: 'conflict' as const };
+    authorityGeneration: number,
+  ): Promise<ProjectMemberRemovalJournal> {
     const lifecycle = await this.#query<{ readonly operation_id: string }>(
       `INSERT INTO claudian_cloud.project_lifecycle_journals (
          project_id, operation_id, kind, direction, phase, recovery_from_phase,
@@ -689,7 +607,7 @@ export class PostgresProjectMembershipPersistence
       [
         this.#projectId,
         input.operationId,
-        fact.authority_generation,
+        authorityGeneration,
         input.actorMemberId,
         input.idempotencyKey,
         input.requestFingerprint,
@@ -737,118 +655,96 @@ export class PostgresProjectMembershipPersistence
     const journal = await this.getRemoval(input.operationId);
     return journal === undefined
       ? dependencyFailure()
-      : { journal, status: 'created' as const };
+      : journal;
   }
 
-  async settleRemoval(input: Readonly<{
-    readonly operationId: string;
-    readonly removedAt: string;
-  }>) {
-    const rows = await this.#query<RemovalRow>(
-      `${SELECT_REMOVAL}
-        WHERE project_id = $1 AND operation_id = $2
-        FOR UPDATE`,
-      [this.#projectId, input.operationId],
-    );
-    const journal = rows[0] === undefined ? undefined : removalJournal(rows[0]);
-    if (journal === undefined) return dependencyFailure();
-    if (journal.phase !== 'prepared') {
-      return journal.response === undefined
-        ? dependencyFailure()
-        : { response: journal.response, status: 'replayed' as const };
-    }
-    const facts = await this.#query<{
-      readonly actor_role: string;
-      readonly actor_status: string;
-      readonly manager_count: string;
+  async readMemberExitFacts(memberId: string) {
+    const rows = await this.#query<{
       readonly manager_set_generation: string;
-      readonly target_revision: string;
-      readonly target_role: string;
-      readonly target_status: string;
+      readonly manager_count: string;
+      readonly role: 'manager' | 'member';
+      readonly status: 'active' | 'left' | 'pending' | 'revoked';
+      readonly revision: string;
+      readonly left_at: Date | null;
     }>(
-      `SELECT project.manager_set_generation,
-              actor.role AS actor_role, actor.status AS actor_status,
-              target.role AS target_role, target.status AS target_status,
-              target.revision AS target_revision,
-              (SELECT count(*)::text
-                 FROM claudian_cloud.project_memberships AS manager
+      `SELECT project.manager_set_generation, membership.role, membership.status,
+              membership.revision, membership.left_at,
+              (SELECT count(*)::text FROM claudian_cloud.project_memberships AS manager
                 WHERE manager.project_id = project.project_id
-                  AND manager.status = 'active' AND manager.role = 'manager'
-              ) AS manager_count
+                  AND manager.role = 'manager' AND manager.status = 'active') AS manager_count
          FROM claudian_cloud.projects AS project
-         JOIN claudian_cloud.project_memberships AS actor
-           ON actor.project_id = project.project_id AND actor.member_id = $2
-         JOIN claudian_cloud.project_memberships AS target
-           ON target.project_id = project.project_id AND target.member_id = $3
+         JOIN claudian_cloud.project_memberships AS membership
+           ON membership.project_id = project.project_id AND membership.member_id = $2
         WHERE project.project_id = $1
-        FOR UPDATE OF project, actor, target`,
-      [this.#projectId, journal.actorMemberId, journal.targetMemberId],
+        FOR UPDATE OF project, membership`,
+      [this.#projectId, memberId],
     );
-    const fact = facts[0];
-    if (
-      fact === undefined
-      || fact.actor_role !== 'manager'
-      || fact.actor_status !== 'active'
-      || fact.target_status !== 'active'
-      || Number(fact.target_revision) !== journal.expectedTargetMembershipRevision
-      || Number(fact.manager_set_generation) !== journal.expectedManagerSetGeneration
-      || (fact.target_role === 'manager' && BigInt(fact.manager_count) <= 1n)
-    ) return { status: 'stale' as const };
-    const openRequests = await this.#query<{ readonly request_id: string }>(
+    const row = rows[0];
+    if (row === undefined) return undefined;
+    const requests = await this.#query<{ readonly request_id: string }>(
       `SELECT request_id FROM claudian_cloud.change_requests
-        WHERE project_id = $1 AND member_id = $2 AND status = 'open'
-        FOR UPDATE`,
-      [this.#projectId, journal.targetMemberId],
+        WHERE project_id = $1 AND member_id = $2 AND status = 'open' FOR UPDATE`,
+      [this.#projectId, memberId],
     );
-    if (openRequests.length > 1) return dependencyFailure();
-    const nextManagerSetGeneration = journal.expectedManagerSetGeneration
-      + (fact.target_role === 'manager' ? 1 : 0);
-    if (fact.target_role === 'manager') {
-      const updated = await this.#query<{ readonly project_id: string }>(
-        `UPDATE claudian_cloud.projects
-            SET manager_set_generation = manager_set_generation + 1
-          WHERE project_id = $1 AND manager_set_generation = $2
-         RETURNING project_id`,
-        [this.#projectId, journal.expectedManagerSetGeneration],
+    if (requests.length > 1) return dependencyFailure();
+    return Object.freeze({
+      activeManagerCount: BigInt(row.manager_count),
+      leftAt: row.left_at === null ? null : timestamp(row.left_at),
+      managerSetGeneration: Number(row.manager_set_generation),
+      openRequestId: requests[0]?.request_id ?? null,
+      revision: BigInt(row.revision),
+      role: row.role,
+      status: row.status,
+    });
+  }
+
+  async applyMemberExit(input: ApplyMemberExitInput): Promise<void> {
+    if (input.successor !== undefined) {
+      const promoted = await this.#query<{ readonly member_id: string }>(
+        `UPDATE claudian_cloud.project_memberships
+            SET role = 'manager', revision = revision + 1, updated_at = $3::timestamptz
+          WHERE project_id = $1 AND member_id = $2 AND status = 'active'
+            AND role = 'member' AND revision = $4 RETURNING member_id`,
+        [this.#projectId, input.successor.memberId, input.exitedAt, input.successor.membershipRevision],
       );
-      if (updated.length !== 1) return { status: 'stale' as const };
+      const consumed = await this.#query<{ readonly offer_id: string }>(
+        `UPDATE claudian_cloud.manager_responsibility_offers
+            SET state = 'consumed', revision = revision + 1, terminal_at = $3::timestamptz
+          WHERE project_id = $1 AND offer_id = $2 AND state = 'acknowledged'
+            AND revision = $4 RETURNING offer_id`,
+        [this.#projectId, input.successor.offerId, input.exitedAt, input.successor.offerRevision],
+      );
+      if (promoted.length !== 1 || consumed.length !== 1) throw new CoordinationError('state-conflict');
     }
-    const revoked = await this.#query<{ readonly member_id: string }>(
+    if (input.advanceManagerSet) {
+      const updated = await this.#query<{ readonly project_id: string }>(
+        `UPDATE claudian_cloud.projects SET manager_set_generation = manager_set_generation + 1
+          WHERE project_id = $1 AND manager_set_generation = $2 RETURNING project_id`,
+        [this.#projectId, input.expectedManagerSetGeneration],
+      );
+      if (updated.length !== 1) throw new CoordinationError('state-conflict');
+    }
+    const exited = await this.#query<{ readonly member_id: string }>(
       `UPDATE claudian_cloud.project_memberships
-          SET status = 'revoked', revision = revision + 1,
-              revoked_at = $4::timestamptz, updated_at = $4::timestamptz
-        WHERE project_id = $1 AND member_id = $2 AND status = 'active'
-          AND revision = $3
+          SET status = $5, revision = revision + 1, updated_at = $4::timestamptz,
+              left_at = CASE WHEN $5 = 'left' THEN $4::timestamptz ELSE left_at END,
+              revoked_at = CASE WHEN $5 = 'revoked' THEN $4::timestamptz ELSE revoked_at END
+        WHERE project_id = $1 AND member_id = $2 AND status = 'active' AND revision = $3
        RETURNING member_id`,
-      [
-        this.#projectId,
-        journal.targetMemberId,
-        journal.expectedTargetMembershipRevision,
-        input.removedAt,
-      ],
+      [this.#projectId, input.memberId, input.expectedMembershipRevision.toString(), input.exitedAt, input.status],
     );
-    if (revoked.length !== 1) return dependencyFailure();
+    if (exited.length !== 1) throw new CoordinationError('state-conflict');
     await this.#query(
       `UPDATE claudian_cloud.project_principal_bindings
           SET state = 'revoked', revoked_at = $3::timestamptz
         WHERE project_id = $1 AND member_id = $2 AND state IN ('active', 'pending')`,
-      [this.#projectId, journal.targetMemberId, input.removedAt],
+      [this.#projectId, input.memberId, input.exitedAt],
     );
-    await this.#query(
-      `DELETE FROM claudian_cloud.source_protected_claim_envelopes AS envelope
-        WHERE envelope.project_id = $1 AND envelope.member_id = $2
-          AND NOT EXISTS (
-            SELECT 1 FROM claudian_cloud.project_tombstones AS tombstone
-             WHERE tombstone.project_id = envelope.project_id
-               AND tombstone.terminal_operation_id = envelope.transfer_id
-               AND tombstone.terminal_operation_kind = 'authority-transfer'
-          )`,
-      [this.#projectId, journal.targetMemberId],
-    );
+    await this.#removeUnretainedSourceEnvelopes({ memberId: input.memberId });
     await this.#query(
       `DELETE FROM claudian_cloud.protected_claim_override_envelopes
         WHERE project_id = $1 AND member_id = $2`,
-      [this.#projectId, journal.targetMemberId],
+      [this.#projectId, input.memberId],
     );
     await this.#query(
       `UPDATE claudian_cloud.transferred_membership_claims
@@ -857,7 +753,7 @@ export class PostgresProjectMembershipPersistence
               updated_at = $3::timestamptz
         WHERE project_id = $1 AND member_id = $2
           AND state IN ('unclaimed', 'redeemed')`,
-      [this.#projectId, journal.targetMemberId, input.removedAt],
+      [this.#projectId, input.memberId, input.exitedAt],
     );
     await this.#query(
       `UPDATE claudian_cloud.transferred_membership_claim_overrides
@@ -866,19 +762,19 @@ export class PostgresProjectMembershipPersistence
               updated_at = $3::timestamptz
         WHERE project_id = $1 AND member_id = $2
           AND state IN ('active', 'redeemed')`,
-      [this.#projectId, journal.targetMemberId, input.removedAt],
+      [this.#projectId, input.memberId, input.exitedAt],
     );
     await this.#query(
       `UPDATE claudian_cloud.change_requests
           SET status = 'discarded', revision = revision + 1,
               updated_at = $3::timestamptz
         WHERE project_id = $1 AND member_id = $2 AND status = 'open'`,
-      [this.#projectId, journal.targetMemberId, input.removedAt],
+      [this.#projectId, input.memberId, input.exitedAt],
     );
     await this.#query(
       `DELETE FROM claudian_cloud.ticket_mentions
         WHERE project_id = $1 AND mentioned_member_id = $2`,
-      [this.#projectId, journal.targetMemberId],
+      [this.#projectId, input.memberId],
     );
     await this.#query(
       `UPDATE claudian_cloud.manager_responsibility_offers
@@ -891,28 +787,26 @@ export class PostgresProjectMembershipPersistence
           )`,
       [
         this.#projectId,
-        journal.targetMemberId,
-        input.removedAt,
-        fact.target_role === 'manager'
-          ? journal.expectedManagerSetGeneration
+        input.memberId,
+        input.exitedAt,
+        input.advanceManagerSet
+          ? input.expectedManagerSetGeneration
           : -1,
       ],
     );
-    const response = collabControlOperationCodec('removeMember').decodeResponse({
-      discardedRequestId: openRequests[0]?.request_id ?? null,
-      managerSetGeneration: nextManagerSetGeneration,
-      memberId: journal.targetMemberId,
-      projectId: this.#projectId,
-      removedAt: input.removedAt,
-      status: 'revoked',
-    });
+  }
+
+  async recordRemovalSettlement(input: Readonly<{
+    readonly operationId: string;
+    readonly response: RemoveMemberResponse;
+  }>): Promise<void> {
     const advanced = await this.#query<{ readonly operation_id: string }>(
       `UPDATE claudian_cloud.project_member_removal_journals
           SET phase = 'membership-revoked', response_json = $3,
               updated_at = $4::timestamptz
         WHERE project_id = $1 AND operation_id = $2 AND phase = 'prepared'
        RETURNING operation_id`,
-      [this.#projectId, journal.operationId, JSON.stringify(response), input.removedAt],
+      [this.#projectId, input.operationId, JSON.stringify(input.response), input.response.removedAt],
     );
     if (advanced.length !== 1) return dependencyFailure();
     await this.#query(
@@ -920,9 +814,8 @@ export class PostgresProjectMembershipPersistence
           SET phase = 'membership-revoked', updated_at = $3::timestamptz
         WHERE project_id = $1 AND operation_id = $2 AND kind = 'remove-member'
           AND phase = 'prepared' AND state = 'active'`,
-      [this.#projectId, journal.operationId, input.removedAt],
+      [this.#projectId, input.operationId, input.response.removedAt],
     );
-    return { response, status: 'settled' as const };
   }
 
   async advanceRemoval(input: Readonly<{
@@ -1003,8 +896,8 @@ export class PostgresProjectMembershipPersistence
   }
 
   async findInvitationForJoin(invitationId: string, now: string) {
-    await this.#expireAndScrub(now);
-    return this.#findInvitation(invitationId);
+    await this.expireInvitations(now);
+    return this.readInvitationRecord(invitationId);
   }
 
   async findJoinByPrincipal(principalId: string, idempotencyKey: string) {
@@ -1035,84 +928,15 @@ export class PostgresProjectMembershipPersistence
     return rows[0] === undefined ? undefined : joinJournal(rows[0]);
   }
 
-  async prepareJoin(input: PrepareProjectJoinInput) {
-    const existing = await this.findJoinByPrincipal(
-      input.principalId,
-      input.idempotencyKey,
+  async readPrincipalBindingState(principalId: string): Promise<string | undefined> {
+    const rows = await this.#query<{ readonly state: string }>(
+      `SELECT state FROM claudian_cloud.project_principal_bindings WHERE project_id = $1 AND principal_id = $2`,
+      [this.#projectId, principalId],
     );
-    if (existing !== undefined) {
-      return existing.requestFingerprint === input.requestFingerprint
-        ? { journal: existing, status: 'replayed' as const }
-        : { status: 'conflict' as const };
-    }
-    const bindings = await this.#query<{ readonly state: string }>(
-      `SELECT state
-         FROM claudian_cloud.project_principal_bindings
-        WHERE project_id = $1 AND principal_id = $2`,
-      [this.#projectId, input.principalId],
-    );
-    if (bindings[0]?.state === 'revoked') return { status: 'revoked' as const };
-    if (bindings.length !== 0) return { status: 'already-bound' as const };
-    const facts = await this.#query<{
-      readonly active: boolean;
-      readonly expected_main_oid: string;
-      readonly generation: string;
-      readonly manager_set_generation: string;
-      readonly repository_storage_key: string;
-      readonly reserved: string;
-      readonly service_state: string;
-      readonly storage_node_id: string;
-    }>(
-      `SELECT project.expected_main_oid,
-              project.manager_set_generation,
-              project.service_state,
-              placement.storage_node_id,
-              placement.repository_storage_key,
-              placement.generation,
-              placement.active,
-              (SELECT COUNT(*)
-                 FROM claudian_cloud.project_memberships
-                WHERE project_id = $1 AND status IN ('active', 'pending'))
-            + (SELECT COUNT(*)
-                 FROM claudian_cloud.project_invitations AS invitation
-                WHERE invitation.project_id = $1
-                  AND invitation.state IN ('active', 'redeeming')
-                  AND (
-                    invitation.state = 'active'
-                    OR NOT EXISTS (
-                      SELECT 1
-                        FROM claudian_cloud.cloud_project_join_journals AS join_journal
-                        JOIN claudian_cloud.project_memberships AS pending_membership
-                          ON pending_membership.project_id = join_journal.project_id
-                         AND pending_membership.member_id = join_journal.member_id
-                         AND pending_membership.status = 'pending'
-                       WHERE join_journal.project_id = invitation.project_id
-                         AND join_journal.invitation_id = invitation.invitation_id
-                         AND join_journal.phase IN (
-                           'membership-pending',
-                           'personal-ref-created'
-                         )
-                    )
-                  )) AS reserved
-         FROM claudian_cloud.projects AS project
-         JOIN claudian_cloud.repository_placements AS placement USING (project_id)
-        WHERE project.project_id = $1`,
-      [this.#projectId],
-    );
-    const fact = facts[0];
-    if (
-      fact === undefined
-      || fact.service_state !== 'active'
-      || !fact.active
-      || fact.expected_main_oid !== input.expectedMainOid
-      || Number(fact.manager_set_generation) !== input.managerSetGeneration
-      || fact.storage_node_id !== input.storageNodeId
-      || fact.repository_storage_key !== input.repositoryStorageKey
-      || Number(fact.generation) !== input.placementGeneration
-    ) return { status: 'conflict' as const };
-    if (Number(fact.reserved) > COLLAB_PROJECT_MEMBERSHIP_LIMITS.maxProjectMembers) {
-      return { status: 'quota' as const };
-    }
+    return rows[0]?.state;
+  }
+
+  async insertJoin(input: PrepareProjectJoinInput) {
     const reserved = await this.#query<{ readonly invitation_id: string }>(
       `UPDATE claudian_cloud.project_invitations
           SET state = 'redeeming', revision = revision + 1
@@ -1128,7 +952,7 @@ export class PostgresProjectMembershipPersistence
         input.preparedAt,
       ],
     );
-    if (reserved.length !== 1) return { status: 'invitation-invalid' as const };
+    if (reserved.length !== 1) throw new CoordinationError('state-conflict');
     await this.#query(
       `INSERT INTO claudian_cloud.cloud_project_join_journals (
          project_id, operation_id, phase, principal_id, principal_sha256,
@@ -1170,7 +994,7 @@ export class PostgresProjectMembershipPersistence
     );
     const journal = await this.findJoinByPrincipalOperation(input.operationId);
     if (journal === undefined) return dependencyFailure();
-    return { journal, status: 'created' as const };
+    return journal;
   }
 
   async advanceJoin(input: Readonly<{
@@ -1300,54 +1124,16 @@ export class PostgresProjectMembershipPersistence
     return completed.response;
   }
 
-  async createInvitation(input: CreateProjectInvitationPersistenceInput) {
-    await this.#expireAndScrub(input.createdAt);
-    const tombstones = await this.#query<{
-      readonly request_fingerprint: string;
-    }>(
-      `SELECT request_fingerprint
-         FROM claudian_cloud.secret_replay_tombstones
-        WHERE project_id = $1
-          AND actor_member_id = $2
-          AND operation = 'createProjectInvitation'
-          AND idempotency_key = $3`,
-      [this.#projectId, input.issuedByMemberId, input.idempotencyKey],
+  async findSecretReplayTombstone(actorMemberId: string, operation: string, idempotencyKey: string): Promise<string | undefined> {
+    const rows = await this.#query<{ readonly request_fingerprint: string }>(
+      `SELECT request_fingerprint FROM claudian_cloud.secret_replay_tombstones
+        WHERE project_id = $1 AND actor_member_id = $2 AND operation = $3 AND idempotency_key = $4`,
+      [this.#projectId, actorMemberId, operation, idempotencyKey],
     );
-    const tombstone = tombstones[0];
-    if (tombstone !== undefined) {
-      return { status: tombstone.request_fingerprint === input.requestFingerprint
-        ? 'replay-expired' as const
-        : 'conflict' as const };
-    }
-    const existing = await this.#findIssuance(
-      input.issuedByMemberId,
-      input.idempotencyKey,
-    );
-    if (existing !== undefined) {
-      if (existing.requestFingerprint !== input.requestFingerprint) {
-        return { status: 'conflict' as const };
-      }
-      return existing.envelope === undefined
-        ? { status: 'replay-expired' as const }
-        : { record: existing, status: 'replayed' as const };
-    }
-    const project = await this.#query<{ readonly manager_set_generation: string }>(
-      `SELECT project.manager_set_generation
-         FROM claudian_cloud.projects AS project
-         JOIN claudian_cloud.project_memberships AS membership
-           ON membership.project_id = project.project_id
-          AND membership.member_id = $2
-          AND membership.status = 'active'
-          AND membership.role = 'manager'
-        WHERE project.project_id = $1`,
-      [this.#projectId, input.issuedByMemberId],
-    );
-    if (Number(project[0]?.manager_set_generation) > input.expectedManagerSetGeneration) {
-      return { status: 'permanently-stale' as const };
-    }
-    if (Number(project[0]?.manager_set_generation) !== input.expectedManagerSetGeneration) {
-      return { status: 'stale-generation' as const };
-    }
+    return rows[0]?.request_fingerprint;
+  }
+
+  async readMembershipReservationCount(): Promise<bigint> {
     const capacity = await this.#query<{ readonly reserved: string }>(
       `SELECT
          (SELECT COUNT(*)
@@ -1376,9 +1162,11 @@ export class PostgresProjectMembershipPersistence
              )) AS reserved`,
       [this.#projectId],
     );
-    if (Number(capacity[0]?.reserved) >= COLLAB_PROJECT_MEMBERSHIP_LIMITS.maxProjectMembers) {
-      return { status: 'quota' as const };
-    }
+    if (capacity[0] === undefined) return dependencyFailure();
+    return BigInt(capacity[0].reserved);
+  }
+
+  async insertInvitation(input: InsertProjectInvitationInput) {
     await this.#query(
       `INSERT INTO claudian_cloud.project_invitations (
          project_id, invitation_id, issued_by_member_id, idempotency_key,
@@ -1416,21 +1204,12 @@ export class PostgresProjectMembershipPersistence
         input.expiresAt,
       ],
     );
-    const record = await this.#findInvitation(input.invitationId);
+    const record = await this.readInvitationRecord(input.invitationId);
     if (record === undefined) return dependencyFailure();
-    return { record, status: 'created' as const };
+    return record;
   }
 
-  async listInvitations(now: string) {
-    await this.#expireAndScrub(now);
-    const projects = await this.#query<{ readonly manager_set_generation: string }>(
-      `SELECT manager_set_generation
-         FROM claudian_cloud.projects
-        WHERE project_id = $1`,
-      [this.#projectId],
-    );
-    const managerSetGeneration = Number(projects[0]?.manager_set_generation);
-    if (!Number.isSafeInteger(managerSetGeneration)) return dependencyFailure();
+  async readInvitations() {
     const rows = await this.#query<InvitationRow>(
       `${SELECT_INVITATION}
         WHERE invitation.project_id = $1
@@ -1438,18 +1217,15 @@ export class PostgresProjectMembershipPersistence
         LIMIT $2`,
       [this.#projectId, COLLAB_PROJECT_MEMBERSHIP_LIMITS.maxProjectInvitations],
     );
-    return Object.freeze({
-      invitations: Object.freeze(rows.map(invitation)),
-      managerSetGeneration,
-    });
+    return Object.freeze(rows.map(invitation));
   }
 
   async reconcileExpirations(now: string): Promise<void> {
     if (Number.isNaN(Date.parse(now))) throw new CoordinationError('invalid-record');
-    await this.#expireAndScrub(now);
-    await this.#expireClaimOverrides(now);
-    await this.#scrubClaimOverrideEnvelopes(now);
-    await this.#expireOffers(now);
+    await this.expireInvitations(now);
+    await this.expireClaimOverrides(now);
+    await this.scrubClaimOverrideEnvelopes(now);
+    await this.expireResponsibilityOffers(now);
     await this.#compactTerminalOffers(now);
   }
 
@@ -1494,18 +1270,9 @@ export class PostgresProjectMembershipPersistence
       RETURNING project_id`,
       [this.#projectId, input.relinquishedAt],
     );
-    const sourceEnvelopes = await this.#query<{ readonly project_id: string }>(
-      `DELETE FROM claudian_cloud.source_protected_claim_envelopes AS envelope
-        WHERE envelope.project_id = $1 AND envelope.transfer_id <> $2
-          AND NOT EXISTS (
-            SELECT 1 FROM claudian_cloud.project_tombstones AS tombstone
-             WHERE tombstone.project_id = envelope.project_id
-               AND tombstone.terminal_operation_id = envelope.transfer_id
-               AND tombstone.terminal_operation_kind = 'authority-transfer'
-          )
-      RETURNING envelope.project_id`,
-      [this.#projectId, input.retainedOutgoingTransferId],
-    );
+    const sourceEnvelopes = await this.#removeUnretainedSourceEnvelopes({
+      retainedOutgoingTransferId: input.retainedOutgoingTransferId,
+    });
     const sourceClaims = await this.#query<{ readonly project_id: string }>(
       `UPDATE claudian_cloud.transferred_membership_claims
           SET state = 'revoked', updated_at = $2
@@ -1528,42 +1295,28 @@ export class PostgresProjectMembershipPersistence
     ].some(rows => rows.length > 0) ? 'advanced' : 'replayed';
   }
 
-  async revokeInvitation(input: RevokeProjectInvitationPersistenceInput) {
-    await this.#expireAndScrub(input.revokedAt);
-    const replays = await this.#query<{ readonly request_fingerprint: string }>(
-      `SELECT request_fingerprint
-         FROM claudian_cloud.idempotency_results
-        WHERE project_id = $1 AND member_id = $2
-          AND operation = 'revokeProjectInvitation' AND idempotency_key = $3`,
-      [this.#projectId, input.actorMemberId, input.idempotencyKey],
+  async #removeUnretainedSourceEnvelopes(input:
+    | Readonly<{ readonly memberId: string }>
+    | Readonly<{ readonly retainedOutgoingTransferId: string }>
+  ) {
+    return this.#query<{ readonly project_id: string }>(
+      `DELETE FROM claudian_cloud.source_protected_claim_envelopes AS envelope
+        WHERE envelope.project_id = $1
+          AND ($2::text IS NULL OR envelope.member_id = $2)
+          AND ($3::text IS NULL OR envelope.transfer_id <> $3)
+          AND NOT EXISTS (
+            SELECT 1 FROM claudian_cloud.project_tombstones AS tombstone
+             WHERE tombstone.project_id = envelope.project_id
+               AND tombstone.terminal_operation_id = envelope.transfer_id
+               AND tombstone.terminal_operation_kind = 'authority-transfer'
+          )
+      RETURNING envelope.project_id`,
+      [this.#projectId, 'memberId' in input ? input.memberId : null,
+        'retainedOutgoingTransferId' in input ? input.retainedOutgoingTransferId : null],
     );
-    const replay = replays[0];
-    if (replay !== undefined) {
-      if (replay.request_fingerprint !== input.requestFingerprint) {
-        return { status: 'conflict' as const };
-      }
-      const record = await this.#findInvitation(input.invitationId);
-      return record === undefined
-        ? { status: 'conflict' as const }
-        : { record, status: 'replayed' as const };
-    }
-    const managers = await this.#query<{ readonly manager_set_generation: string }>(
-      `SELECT project.manager_set_generation
-         FROM claudian_cloud.projects AS project
-         JOIN claudian_cloud.project_memberships AS membership
-           ON membership.project_id = project.project_id
-          AND membership.member_id = $2
-          AND membership.status = 'active'
-          AND membership.role = 'manager'
-        WHERE project.project_id = $1`,
-      [this.#projectId, input.actorMemberId],
-    );
-    if (Number(managers[0]?.manager_set_generation) > input.expectedManagerSetGeneration) {
-      return { status: 'permanently-stale' as const };
-    }
-    if (Number(managers[0]?.manager_set_generation) !== input.expectedManagerSetGeneration) {
-      return { status: 'stale-generation' as const };
-    }
+  }
+
+  async revokeInvitationRow(input: RevokeInvitationRowInput) {
     const rows = await this.#query<{ readonly invitation_id: string }>(
       `UPDATE claudian_cloud.project_invitations
           SET state = 'revoked', revision = revision + 1, terminal_at = $4
@@ -1577,140 +1330,39 @@ export class PostgresProjectMembershipPersistence
         input.revokedAt,
       ],
     );
-    if (rows.length !== 1) {
-      const current = await this.#findInvitation(input.invitationId);
-      return { status: current !== undefined && current.revision > input.expectedInvitationRevision
-        ? 'permanently-stale' as const : 'stale-invitation' as const };
-    }
-    await this.#query(
-      `INSERT INTO claudian_cloud.idempotency_results (
-         project_id, member_id, operation, idempotency_key,
-         request_fingerprint, response_json, created_at
-       ) VALUES ($1, $2, 'revokeProjectInvitation', $3, $4, $5::jsonb, $6)`,
-      [
-        this.#projectId,
-        input.actorMemberId,
-        input.idempotencyKey,
-        input.requestFingerprint,
-        JSON.stringify({ invitationId: input.invitationId }),
-        input.revokedAt,
-      ],
-    );
-    const record = await this.#findInvitation(input.invitationId);
+    if (rows.length !== 1) throw new CoordinationError('state-conflict');
+    const record = await this.readInvitationRecord(input.invitationId);
     if (record === undefined) return dependencyFailure();
-    return { record, status: 'revoked' as const };
+    return record;
   }
 
-  async getImportedMembershipClaimFacts(memberId: string, now: string) {
-    await this.#expireClaimOverrides(now);
-    const facts = await this.#importedClaimFacts(memberId, now);
-    return facts === undefined ? undefined : Object.freeze({
-      claimGeneration: facts.claimGeneration,
-      claimSha256: facts.claimSha256,
-      memberId,
-      transferId: facts.transferId,
-    });
+  async hasLiveMemberBinding(memberId: string): Promise<boolean> {
+    const rows = await this.#query<{ readonly member_id: string }>(
+      `SELECT member_id FROM claudian_cloud.project_principal_bindings
+        WHERE project_id = $1 AND member_id = $2 AND state IN ('active', 'pending') LIMIT 1`,
+      [this.#projectId, memberId],
+    );
+    return rows.length !== 0;
   }
 
-  async reissueTransferredMembershipClaim(input: Readonly<{
-    readonly actorMemberId: string;
-    readonly claimGeneration: number;
-    readonly claimSha256: string;
-    readonly createdAt: string;
-    readonly envelope: ProtectedClaimOverrideEnvelope;
-    readonly expectedClaimGeneration: number;
-    readonly expectedManagerSetGeneration: number;
-    readonly expectedMembershipRevision: number;
-    readonly expiresAt: string;
-    readonly idempotencyKey: string;
-    readonly memberId: string;
-    readonly projectId: string;
-    readonly requestFingerprint: string;
-    readonly secretReplayExpiresAt: string;
-    readonly transferId: string;
-  }>) {
-    await this.#expireClaimOverrides(input.createdAt);
-    await this.#scrubClaimOverrideEnvelopes(input.createdAt);
-    const tombstones = await this.#query<{ readonly request_fingerprint: string }>(
-      `SELECT request_fingerprint
-         FROM claudian_cloud.secret_replay_tombstones
-        WHERE project_id = $1 AND actor_member_id = $2
-          AND operation = 'reissueTransferredMembershipClaim'
-          AND idempotency_key = $3`,
-      [this.#projectId, input.actorMemberId, input.idempotencyKey],
+  async readClaimOverrideIssuance(actorMemberId: string, idempotencyKey: string) {
+    const rows = await this.#query<ClaimOverrideRow>(
+      `${SELECT_CLAIM_OVERRIDE} WHERE override.project_id = $1 AND override.manager_member_id = $2 AND override.idempotency_key = $3`,
+      [this.#projectId, actorMemberId, idempotencyKey],
     );
-    if (tombstones[0] !== undefined) {
-      return {
-        status: tombstones[0].request_fingerprint === input.requestFingerprint
-          ? 'replay-expired' as const
-          : 'conflict' as const,
-      };
-    }
-    const existingRows = await this.#query<ClaimOverrideRow>(
-      `${SELECT_CLAIM_OVERRIDE}
-        WHERE override.project_id = $1 AND override.manager_member_id = $2
-          AND override.idempotency_key = $3`,
-      [this.#projectId, input.actorMemberId, input.idempotencyKey],
+    return rows[0] === undefined ? undefined : claimOverride(rows[0]);
+  }
+
+  async readHighestClaimOverride(transferId: string, memberId: string) {
+    const rows = await this.#query<ClaimOverrideRow>(
+      `${SELECT_CLAIM_OVERRIDE} WHERE override.project_id = $1 AND override.transfer_id = $2 AND override.member_id = $3
+        ORDER BY override.claim_generation DESC LIMIT 1`,
+      [this.#projectId, transferId, memberId],
     );
-    const existing = existingRows[0];
-    if (existing !== undefined) {
-      const record = claimOverride(existing);
-      if (record.requestFingerprint !== input.requestFingerprint) {
-        return { status: 'conflict' as const };
-      }
-      return record.envelope === undefined
-        ? { status: 'replay-expired' as const }
-        : { record, status: 'replayed' as const };
-    }
-    const authorization = await this.#query<{
-      readonly manager_set_generation: string;
-      readonly revision: string;
-      readonly source_is_manager: boolean;
-      readonly status: string;
-      readonly unbound: boolean;
-    }>(
-      `SELECT project.manager_set_generation,
-              target.revision,
-              target.status,
-              NOT EXISTS (
-                SELECT 1 FROM claudian_cloud.project_principal_bindings AS binding
-                 WHERE binding.project_id = target.project_id
-                   AND binding.member_id = target.member_id
-                   AND binding.state IN ('active', 'pending')
-              ) AS unbound,
-              EXISTS (
-                SELECT 1 FROM claudian_cloud.project_memberships AS source
-                 WHERE source.project_id = project.project_id
-                   AND source.member_id = $2
-                   AND source.status = 'active' AND source.role = 'manager'
-              ) AS source_is_manager
-         FROM claudian_cloud.projects AS project
-         JOIN claudian_cloud.project_memberships AS target
-           ON target.project_id = project.project_id AND target.member_id = $3
-        WHERE project.project_id = $1`,
-      [this.#projectId, input.actorMemberId, input.memberId],
-    );
-    const authorized = authorization[0];
-    if (authorized?.source_is_manager !== true) {
-      return { status: 'authorization-denied' as const };
-    }
-    if (
-      Number(authorized.manager_set_generation) > input.expectedManagerSetGeneration
-      || Number(authorized.revision) > input.expectedMembershipRevision
-    ) return { status: 'permanently-stale' as const };
-    if (
-      Number(authorized.manager_set_generation) !== input.expectedManagerSetGeneration
-      || Number(authorized.revision) !== input.expectedMembershipRevision
-      || authorized.status !== 'active'
-      || !authorized.unbound
-    ) return { status: 'stale' as const };
-    const current = await this.#importedClaimFacts(input.memberId, input.createdAt);
-    if (
-      current === undefined
-      || current.transferId !== input.transferId
-      || current.claimGeneration !== input.expectedClaimGeneration
-      || input.claimGeneration !== input.expectedClaimGeneration + 1
-    ) return { status: 'stale' as const };
+    return rows[0] === undefined ? undefined : claimOverride(rows[0]);
+  }
+
+  async insertClaimOverride(input: InsertClaimOverrideInput) {
     if (input.expectedClaimGeneration > 0) {
       await this.#query(
         `UPDATE claudian_cloud.transferred_membership_claim_overrides
@@ -1742,9 +1394,9 @@ export class PostgresProjectMembershipPersistence
         input.transferId,
         input.memberId,
         input.claimGeneration,
-        current.claimSha256,
+        input.supersededClaimSha256,
         input.claimSha256,
-        input.actorMemberId,
+        input.managerMemberId,
         input.idempotencyKey,
         input.requestFingerprint,
         input.createdAt,
@@ -1774,88 +1426,18 @@ export class PostgresProjectMembershipPersistence
         input.expiresAt,
       ],
     );
-    const record = await this.#findClaimOverride(
+    const record = await this.readClaimOverride(
       input.transferId,
       input.memberId,
       input.claimGeneration,
     );
     if (record === undefined) return dependencyFailure();
-    return { record, status: 'created' as const };
+    return record;
   }
 
-  async revokeTransferredMembershipClaim(input: Readonly<{
-    readonly actorMemberId: string;
-    readonly expectedClaimGeneration: number;
-    readonly expectedManagerSetGeneration: number;
-    readonly expectedMembershipRevision: number;
-    readonly idempotencyKey: string;
-    readonly memberId: string;
-    readonly projectId: string;
-    readonly requestFingerprint: string;
-    readonly revokedAt: string;
-  }>) {
-    const replay = await this.#administrationReplay<
-      RevokeTransferredMembershipClaimResponse
-    >(
-      input.actorMemberId,
-      'revokeTransferredMembershipClaim',
-      input.idempotencyKey,
-      input.requestFingerprint,
-      value => collabControlOperationCodec('revokeTransferredMembershipClaim')
-        .decodeResponse(value),
-    );
-    if (replay !== undefined) return replay;
-    await this.#expireClaimOverrides(input.revokedAt);
-    const authorization = await this.#query<{
-      readonly manager_set_generation: string;
-      readonly revision: string;
-      readonly source_is_manager: boolean;
-      readonly status: string;
-      readonly unbound: boolean;
-    }>(
-      `SELECT project.manager_set_generation,
-              target.revision,
-              target.status,
-              NOT EXISTS (
-                SELECT 1 FROM claudian_cloud.project_principal_bindings AS binding
-                 WHERE binding.project_id = target.project_id
-                   AND binding.member_id = target.member_id
-                   AND binding.state IN ('active', 'pending')
-              ) AS unbound,
-              EXISTS (
-                SELECT 1 FROM claudian_cloud.project_memberships AS source
-                 WHERE source.project_id = project.project_id
-                   AND source.member_id = $2
-                   AND source.status = 'active' AND source.role = 'manager'
-              ) AS source_is_manager
-         FROM claudian_cloud.projects AS project
-         JOIN claudian_cloud.project_memberships AS target
-           ON target.project_id = project.project_id AND target.member_id = $3
-        WHERE project.project_id = $1`,
-      [this.#projectId, input.actorMemberId, input.memberId],
-    );
-    const authorized = authorization[0];
-    if (authorized?.source_is_manager !== true) {
-      return { status: 'authorization-denied' as const };
-    }
-    if (
-      Number(authorized.manager_set_generation) > input.expectedManagerSetGeneration
-      || Number(authorized.revision) > input.expectedMembershipRevision
-    ) return { status: 'permanently-stale' as const };
-    if (
-      Number(authorized.manager_set_generation) !== input.expectedManagerSetGeneration
-      || Number(authorized.revision) !== input.expectedMembershipRevision
-      || authorized.status !== 'active'
-      || !authorized.unbound
-    ) return { status: 'stale' as const };
-    const current = await this.#importedClaimFacts(input.memberId, input.revokedAt);
-    if (
-      current === undefined
-      || current.claimGeneration !== input.expectedClaimGeneration
-      || current.state !== 'active'
-    ) return { status: 'stale' as const };
+  async revokeClaimRow(input: RevokeClaimRowInput): Promise<void> {
     let revoked: readonly QueryResultRow[];
-    if (current.claimGeneration === 0) {
+    if (input.claimGeneration === 0) {
       revoked = await this.#query<{ readonly member_id: string }>(
         `UPDATE claudian_cloud.transferred_membership_claims
             SET state = 'revoked', updated_at = $5
@@ -1864,9 +1446,9 @@ export class PostgresProjectMembershipPersistence
          RETURNING member_id`,
         [
           this.#projectId,
-          current.transferId,
+          input.transferId,
           input.memberId,
-          current.claimSha256,
+          input.claimSha256,
           input.revokedAt,
         ],
       );
@@ -1880,40 +1462,21 @@ export class PostgresProjectMembershipPersistence
          RETURNING member_id`,
         [
           this.#projectId,
-          current.transferId,
+          input.transferId,
           input.memberId,
-          current.claimGeneration,
-          current.claimSha256,
+          input.claimGeneration,
+          input.claimSha256,
           input.revokedAt,
         ],
       );
     }
-    if (revoked.length !== 1) return { status: 'stale' as const };
-    const response = collabControlOperationCodec('revokeTransferredMembershipClaim')
-      .decodeResponse({
-        claimGeneration: current.claimGeneration,
-        memberId: input.memberId,
-        projectId: this.#projectId,
-        revokedAt: input.revokedAt,
-        state: 'revoked',
-      });
-    await this.#storeAdministrationResult(
-      input.actorMemberId,
-      'revokeTransferredMembershipClaim',
-      input.idempotencyKey,
-      input.requestFingerprint,
-      response,
-      input.revokedAt,
-    );
-    return { response, status: 'created' as const };
+    if (revoked.length !== 1) throw new CoordinationError('state-conflict');
   }
 
-  async resolveEffectiveTransferredMembershipClaim(
+  async readTransferredClaimByDigest(
     transferId: string,
     claimSha256: string,
-    now: string,
-  ): Promise<EffectiveTransferredMembershipClaim | undefined> {
-    await this.#expireClaimOverrides(now);
+  ): Promise<TransferredMembershipClaimRecord | undefined> {
     const overrides = await this.#query<{
       readonly checkpoint_sha256: string;
       readonly claim_generation: string;
@@ -1945,19 +1508,11 @@ export class PostgresProjectMembershipPersistence
          ) AS original ON true
         WHERE override.project_id = $1 AND override.transfer_id = $2
           AND override.claim_sha256 = $3
-          AND NOT EXISTS (
-            SELECT 1
-              FROM claudian_cloud.transferred_membership_claim_overrides AS newer
-             WHERE newer.project_id = override.project_id
-               AND newer.transfer_id = override.transfer_id
-               AND newer.member_id = override.member_id
-               AND newer.claim_generation > override.claim_generation
-          )`,
+`,
       [this.#projectId, transferId, claimSha256],
     );
     const override = overrides[0];
     if (override !== undefined) {
-      if (override.state !== 'active' && override.state !== 'redeemed') return undefined;
       return Object.freeze({
         checkpointSha256: override.checkpoint_sha256,
         claimGeneration: Number(override.claim_generation),
@@ -1992,24 +1547,12 @@ export class PostgresProjectMembershipPersistence
          FROM claudian_cloud.transferred_membership_claims AS claim
         WHERE claim.project_id = $1 AND claim.transfer_id = $2
           AND claim.claim_sha256 = $3
-          AND NOT EXISTS (
-            SELECT 1
-              FROM claudian_cloud.transferred_membership_claim_overrides AS override
-             WHERE override.project_id = claim.project_id
-               AND override.transfer_id = claim.transfer_id
-               AND override.member_id = claim.member_id
-          )
         ORDER BY claim.batch_revision DESC
         LIMIT 1`,
       [this.#projectId, transferId, claimSha256],
     );
     const original = originals[0];
-    if (
-      original === undefined
-      || (original.state !== 'unclaimed' && original.state !== 'redeemed')
-      || (original.state === 'unclaimed'
-        && original.expires_at.valueOf() <= Date.parse(now))
-    ) return undefined;
+    if (original === undefined) return undefined;
     return Object.freeze({
       checkpointSha256: original.checkpoint_sha256,
       claimGeneration: 0,
@@ -2019,14 +1562,14 @@ export class PostgresProjectMembershipPersistence
       memberId: original.member_id,
       operationIntentId: original.operation_intent_id,
       redemptionReceiptId: original.redemption_receipt_id,
-      state: original.state === 'unclaimed' ? 'active' as const : 'redeemed' as const,
+      state: original.state,
       targetPrincipalId: original.target_principal_id,
       transferId: original.transfer_id,
       updatedAt: timestamp(original.updated_at),
     });
   }
 
-  async redeemTransferredMembershipClaimOverride(input: Readonly<{
+  async recordClaimOverrideRedemption(input: Readonly<{
     readonly claim: EffectiveTransferredMembershipClaim;
     readonly operationIntentId: string;
     readonly receipt: CollabTransferredMembershipRedemptionReceipt;
@@ -2132,7 +1675,7 @@ export class PostgresProjectMembershipPersistence
       throw new CoordinationError('state-conflict');
     }
     if (updated.length === 0) {
-      const replay = await this.#findClaimOverride(
+      const replay = await this.readClaimOverride(
         input.claim.transferId,
         input.claim.memberId,
         input.claim.claimGeneration,
@@ -2150,21 +1693,159 @@ export class PostgresProjectMembershipPersistence
     return storedReceipt;
   }
 
-  async listProjectMembers(input: Readonly<{
-    readonly actorRole: 'manager' | 'member';
-    readonly now: string;
-  }>): Promise<ListProjectMembersResponse> {
-    await this.#expireClaimOverrides(input.now);
-    const projects = await this.#query<{ readonly manager_set_generation: string }>(
-      `SELECT manager_set_generation
-         FROM claudian_cloud.projects
-        WHERE project_id = $1`,
+  async countActiveManagers(): Promise<bigint> {
+    const rows = await this.#query<{ readonly count: string }>(
+      `SELECT count(*)::text AS count FROM claudian_cloud.project_memberships
+        WHERE project_id = $1 AND role = 'manager' AND status = 'active'`,
       [this.#projectId],
     );
-    const managerSetGeneration = Number(projects[0]?.manager_set_generation);
-    if (!Number.isSafeInteger(managerSetGeneration) || managerSetGeneration < 1) {
+    if (rows[0] === undefined) return dependencyFailure();
+    return BigInt(rows[0].count);
+  }
+
+  async applyManagerRoleChange(input: ManagerRoleChangeInput): Promise<void> {
+    const membership = await this.#query<{ readonly member_id: string }>(
+      `UPDATE claudian_cloud.project_memberships
+          SET role = $5, revision = revision + 1, updated_at = $4
+        WHERE project_id = $1 AND member_id = $2 AND status = 'active'
+          AND role = $6 AND revision = $3 RETURNING member_id`,
+      [this.#projectId, input.memberId, input.expectedMembershipRevision,
+        input.changedAt, input.role, input.role === 'manager' ? 'member' : 'manager'],
+    );
+    const project = await this.#query<{ readonly project_id: string }>(
+      `UPDATE claudian_cloud.projects SET manager_set_generation = manager_set_generation + 1
+        WHERE project_id = $1 AND manager_set_generation = $2 RETURNING project_id`,
+      [this.#projectId, input.expectedManagerSetGeneration],
+    );
+    if (membership.length !== 1 || project.length !== 1) throw new CoordinationError('state-conflict');
+    if (input.consumeOffer !== undefined) {
+      const offer = await this.#query<{ readonly offer_id: string }>(
+        `UPDATE claudian_cloud.manager_responsibility_offers
+            SET state = 'consumed', revision = revision + 1, terminal_at = $4
+          WHERE project_id = $1 AND offer_id = $2 AND state = 'acknowledged'
+            AND revision = $3 RETURNING offer_id`,
+        [this.#projectId, input.consumeOffer.offerId, input.consumeOffer.revision, input.changedAt],
+      );
+      if (offer.length !== 1) throw new CoordinationError('state-conflict');
+    }
+    await this.#cancelSupersededOffers(input.expectedManagerSetGeneration, input.changedAt, input.consumeOffer?.offerId);
+  }
+
+  async insertResponsibilityOffer(input: InsertResponsibilityOfferInput): Promise<CollabManagerResponsibilityOffer> {
+    const inserted = await this.#query<ManagerResponsibilityOfferRow>(
+      `INSERT INTO claudian_cloud.manager_responsibility_offers (
+         project_id, offer_id, source_manager_member_id, target_member_id,
+         purpose, state, revision, manager_set_generation_at_offer,
+         target_membership_revision_at_offer, idempotency_key,
+         request_fingerprint, offered_at, expires_at,
+         acknowledged_at, terminal_at
+       ) VALUES (
+         $1, $2, $3, $4, $5, 'offered', 1, $6, $7, $8, $9,
+         $10, $11, NULL, NULL
+       )
+       RETURNING offer_id, source_manager_member_id, target_member_id,
+                 purpose, state, revision, manager_set_generation_at_offer,
+                 target_membership_revision_at_offer, offered_at, expires_at,
+                 acknowledged_at, terminal_at, request_fingerprint`,
+      [
+        this.#projectId,
+        input.offerId,
+        input.actorMemberId,
+        input.targetMemberId,
+        input.purpose,
+        input.expectedManagerSetGeneration,
+        input.expectedTargetMembershipRevision,
+        input.idempotencyKey,
+        input.requestFingerprint,
+        input.offeredAt,
+        input.expiresAt,
+      ],
+    );
+    const insertedOffer = inserted[0];
+    if (inserted.length !== 1 || insertedOffer === undefined) {
       return dependencyFailure();
     }
+    return managerResponsibilityOffer(insertedOffer);
+  }
+
+  async transitionResponsibilityOffer(input: TransitionResponsibilityOfferInput): Promise<CollabManagerResponsibilityOffer> {
+    const rows = await this.#query<ManagerResponsibilityOfferRow>(
+      `UPDATE claudian_cloud.manager_responsibility_offers
+          SET state = $3,
+              revision = revision + 1,
+              acknowledged_at = CASE WHEN $3 = 'acknowledged'
+                THEN $5 ELSE acknowledged_at END,
+              terminal_at = CASE WHEN $3 IN ('declined', 'cancelled')
+                THEN $5 ELSE terminal_at END
+        WHERE project_id = $1 AND offer_id = $2 AND revision = $4
+       RETURNING offer_id, source_manager_member_id, target_member_id,
+                 purpose, state, revision, manager_set_generation_at_offer,
+                 target_membership_revision_at_offer, offered_at, expires_at,
+                 acknowledged_at, terminal_at, request_fingerprint`,
+      [
+        this.#projectId,
+        input.offerId,
+        input.nextState,
+        input.expectedOfferRevision,
+        input.transitionedAt,
+      ],
+    );
+    const transitionedOffer = rows[0];
+    if (rows.length !== 1 || transitionedOffer === undefined) {
+      throw new CoordinationError('state-conflict');
+    }
+    return managerResponsibilityOffer(transitionedOffer);
+  }
+
+  async readResponsibilityOffer(offerId: string) {
+    const rows = await this.#query<ManagerResponsibilityOfferRow>(
+      `${SELECT_MANAGER_RESPONSIBILITY_OFFER}
+        WHERE project_id = $1 AND offer_id = $2`,
+      [this.#projectId, offerId],
+    );
+    return rows[0] === undefined
+      ? undefined
+      : managerResponsibilityOffer(rows[0]);
+  }
+
+  async readCurrentResponsibilityOffers() {
+    const rows = await this.#query<ManagerResponsibilityOfferRow>(
+      `${SELECT_MANAGER_RESPONSIBILITY_OFFER}
+        WHERE project_id = $1
+          AND state IN ('offered', 'acknowledged')
+        ORDER BY offer_id
+        LIMIT $2`,
+      [
+        this.#projectId,
+        COLLAB_PROJECT_MEMBERSHIP_LIMITS.maxCurrentManagerOffers,
+      ],
+    );
+    return Object.freeze(rows.map(managerResponsibilityOffer));
+  }
+
+  async findConflictingResponsibilityOffer(input: Readonly<{
+    readonly actorMemberId: string;
+    readonly targetMemberId: string;
+  }>): Promise<string | undefined> {
+    const currentOffers = await this.#query<{ readonly offer_id: string }>(
+      `SELECT offer_id
+         FROM claudian_cloud.manager_responsibility_offers
+        WHERE project_id = $1 AND state IN ('offered', 'acknowledged')
+          AND (
+            source_manager_member_id = $2
+            OR target_member_id = $3
+          )
+        LIMIT 1`,
+      [
+        this.#projectId,
+        input.actorMemberId,
+        input.targetMemberId,
+      ],
+    );
+    return currentOffers[0]?.offer_id;
+  }
+
+  async readMemberAdministrationFacts(): Promise<readonly MemberAdministrationFacts[]> {
     const rows = await this.#query<ProjectMemberRow>(
       `SELECT membership.member_id,
               membership.display_name,
@@ -2213,592 +1894,20 @@ export class PostgresProjectMembershipPersistence
         LIMIT $2`,
       [this.#projectId, COLLAB_PROJECT_MEMBERSHIP_LIMITS.maxProjectMembers],
     );
-    const members = rows.map(row => {
-      const membershipRevision = Number(row.revision);
-      if (
-        !isCollabMemberId(row.member_id)
-        || !Number.isSafeInteger(membershipRevision)
-        || membershipRevision < 1
-        || (row.role !== 'manager' && row.role !== 'member')
-        || (row.binding_state !== 'bound' && row.binding_state !== 'unbound')
-      ) return dependencyFailure();
-      let importedClaimState: ListProjectMembersResponse['members'][number]['importedClaimState'];
-      if (input.actorRole !== 'manager') {
-        importedClaimState = 'hidden';
-      } else if (row.override_state === 'active') {
-        importedClaimState = 'override-active';
-      } else if (row.override_state === 'redeemed') {
-        importedClaimState = 'redeemed';
-      } else if (row.override_state === 'revoked') {
-        importedClaimState = 'revoked';
-      } else if (row.override_state === 'expired') {
-        importedClaimState = 'expired';
-      } else if (row.override_state === 'superseded') {
-        return dependencyFailure();
-      } else if (row.claim_state === null) {
-        importedClaimState = 'not-applicable';
-      } else if (row.claim_state === 'redeemed') {
-        importedClaimState = 'redeemed';
-      } else if (row.claim_state === 'revoked') {
-        importedClaimState = 'revoked';
-      } else if (row.claim_state === 'unclaimed' && row.claim_expires_at !== null) {
-        importedClaimState = row.claim_expires_at.valueOf() <= Date.parse(input.now)
-          ? 'expired'
-          : 'original-active';
-      } else {
-        return dependencyFailure();
-      }
-      return Object.freeze({
-        bindingState: input.actorRole === 'manager'
-          ? row.binding_state
-          : 'hidden' as const,
-        displayName: row.display_name,
-        importedClaimGeneration: importedClaimState === 'hidden'
-          || importedClaimState === 'not-applicable'
-          ? null
-          : Number(row.override_claim_generation ?? 0),
-        importedClaimState,
-        memberId: row.member_id,
-        membershipRevision,
-        role: row.role,
-      });
-    });
-    return collabControlOperationCodec('listProjectMembers').decodeResponse({
-      managerSetGeneration,
-      members,
-      projectId: this.#projectId,
-    });
+    return rows.map(row => ({
+      bindingState: row.binding_state,
+      claimExpiresAt: row.claim_expires_at === null ? null : timestamp(row.claim_expires_at),
+      claimState: row.claim_state,
+      displayName: row.display_name,
+      memberId: row.member_id,
+      overrideClaimGeneration: row.override_claim_generation === null ? null : Number(row.override_claim_generation),
+      overrideState: row.override_state,
+      revision: Number(row.revision),
+      role: row.role,
+    }));
   }
 
-  async createManagerResponsibilityOffer(input: Readonly<{
-    readonly actorMemberId: string;
-    readonly expectedManagerSetGeneration: number;
-    readonly expectedTargetMembershipRevision: number;
-    readonly expiresAt: string;
-    readonly idempotencyKey: string;
-    readonly offerId: string;
-    readonly offeredAt: string;
-    readonly projectId: string;
-    readonly purpose: 'manager-promotion' | 'manager-leave';
-    readonly requestFingerprint: string;
-    readonly targetMemberId: string;
-  }>) {
-    const replay = await this.#administrationReplay<
-      CollabManagerResponsibilityOfferResponse
-    >(
-      input.actorMemberId,
-      'createManagerResponsibilityOffer',
-      input.idempotencyKey,
-      input.requestFingerprint,
-      value => collabControlOperationCodec(
-        'createManagerResponsibilityOffer',
-      ).decodeResponse(value),
-    );
-    if (replay !== undefined) return replay;
-    await this.#expireOffers(input.offeredAt);
-    const facts = await this.#query<{
-      readonly manager_set_generation: string;
-      readonly revision: string;
-      readonly role: string;
-      readonly source_is_manager: boolean;
-      readonly status: string;
-    }>(
-      `SELECT project.manager_set_generation,
-              target.revision,
-              target.role,
-              target.status,
-              EXISTS (
-                SELECT 1
-                  FROM claudian_cloud.project_memberships AS source
-                 WHERE source.project_id = project.project_id
-                   AND source.member_id = $2
-                   AND source.status = 'active'
-                   AND source.role = 'manager'
-              ) AS source_is_manager
-         FROM claudian_cloud.projects AS project
-         JOIN claudian_cloud.project_memberships AS target
-           ON target.project_id = project.project_id AND target.member_id = $3
-        WHERE project.project_id = $1`,
-      [this.#projectId, input.actorMemberId, input.targetMemberId],
-    );
-    const fact = facts[0];
-    if (fact?.source_is_manager !== true) {
-      return { status: 'authorization-denied' as const };
-    }
-    if (
-      Number(fact.manager_set_generation) > input.expectedManagerSetGeneration
-      || Number(fact.revision) > input.expectedTargetMembershipRevision
-    ) return { status: 'permanently-stale' as const };
-    if (
-      Number(fact.manager_set_generation) !== input.expectedManagerSetGeneration
-      || Number(fact.revision) !== input.expectedTargetMembershipRevision
-      || fact.status !== 'active'
-      || fact.role !== 'member'
-      || input.actorMemberId === input.targetMemberId
-    ) return { status: 'stale' as const };
-    const currentOffers = await this.#query<{ readonly offer_id: string }>(
-      `SELECT offer_id
-         FROM claudian_cloud.manager_responsibility_offers
-        WHERE project_id = $1 AND state IN ('offered', 'acknowledged')
-          AND (
-            source_manager_member_id = $2
-            OR target_member_id = $3
-          )
-        LIMIT 1`,
-      [
-        this.#projectId,
-        input.actorMemberId,
-        input.targetMemberId,
-      ],
-    );
-    if (currentOffers.length !== 0) return { status: 'stale' as const };
-    const inserted = await this.#query<ManagerResponsibilityOfferRow>(
-      `INSERT INTO claudian_cloud.manager_responsibility_offers (
-         project_id, offer_id, source_manager_member_id, target_member_id,
-         purpose, state, revision, manager_set_generation_at_offer,
-         target_membership_revision_at_offer, idempotency_key,
-         request_fingerprint, offered_at, expires_at,
-         acknowledged_at, terminal_at
-       ) VALUES (
-         $1, $2, $3, $4, $5, 'offered', 1, $6, $7, $8, $9,
-         $10, $11, NULL, NULL
-       )
-       RETURNING offer_id, source_manager_member_id, target_member_id,
-                 purpose, state, revision, manager_set_generation_at_offer,
-                 target_membership_revision_at_offer, offered_at, expires_at,
-                 acknowledged_at, terminal_at, request_fingerprint`,
-      [
-        this.#projectId,
-        input.offerId,
-        input.actorMemberId,
-        input.targetMemberId,
-        input.purpose,
-        input.expectedManagerSetGeneration,
-        input.expectedTargetMembershipRevision,
-        input.idempotencyKey,
-        input.requestFingerprint,
-        input.offeredAt,
-        input.expiresAt,
-      ],
-    );
-    const insertedOffer = inserted[0];
-    if (inserted.length !== 1 || insertedOffer === undefined) {
-      return dependencyFailure();
-    }
-    const response = collabControlOperationCodec(
-      'createManagerResponsibilityOffer',
-    ).decodeResponse({ offer: managerResponsibilityOffer(insertedOffer) });
-    await this.#storeAdministrationResult(
-      input.actorMemberId,
-      'createManagerResponsibilityOffer',
-      input.idempotencyKey,
-      input.requestFingerprint,
-      response,
-      input.offeredAt,
-    );
-    return {
-      response,
-      status: 'created' as const,
-    };
-  }
-
-  async listCurrentManagerResponsibilityOffers(input: Readonly<{
-    readonly actorMemberId: string;
-    readonly actorRole: 'manager' | 'member';
-    readonly now: string;
-  }>) {
-    await this.#expireOffers(input.now);
-    const rows = await this.#query<ManagerResponsibilityOfferRow>(
-      `${SELECT_MANAGER_RESPONSIBILITY_OFFER}
-        WHERE project_id = $1
-          AND state IN ('offered', 'acknowledged')
-          AND ($2 = 'manager' OR target_member_id = $3)
-        ORDER BY offer_id
-        LIMIT $4`,
-      [
-        this.#projectId,
-        input.actorRole,
-        input.actorMemberId,
-        COLLAB_PROJECT_MEMBERSHIP_LIMITS.maxCurrentManagerOffers,
-      ],
-    );
-    return Object.freeze(rows.map(managerResponsibilityOffer));
-  }
-
-  async getManagerResponsibilityOffer(input: Readonly<{
-    readonly actorMemberId: string;
-    readonly actorRole: 'manager' | 'member';
-    readonly now: string;
-    readonly offerId: string;
-  }>) {
-    await this.#expireOffers(input.now);
-    const rows = await this.#query<ManagerResponsibilityOfferRow>(
-      `${SELECT_MANAGER_RESPONSIBILITY_OFFER}
-        WHERE project_id = $1 AND offer_id = $2
-          AND ($3 = 'manager' OR target_member_id = $4)`,
-      [this.#projectId, input.offerId, input.actorRole, input.actorMemberId],
-    );
-    return rows[0] === undefined
-      ? undefined
-      : managerResponsibilityOffer(rows[0]);
-  }
-
-  async transitionManagerResponsibilityOffer(input: Readonly<{
-    readonly actorMemberId: string;
-    readonly actorRole: 'manager' | 'member';
-    readonly expectedOfferRevision: number;
-    readonly idempotencyKey: string;
-    readonly nextState: 'acknowledged' | 'cancelled' | 'declined';
-    readonly offerId: string;
-    readonly operation:
-      | 'acknowledgeManagerResponsibility'
-      | 'cancelManagerResponsibilityOffer'
-      | 'declineManagerResponsibility';
-    readonly requestFingerprint: string;
-    readonly transitionedAt: string;
-  }>) {
-    const replay = await this.#administrationReplay<
-      CollabManagerResponsibilityOfferResponse
-    >(
-      input.actorMemberId,
-      input.operation,
-      input.idempotencyKey,
-      input.requestFingerprint,
-      value => collabControlOperationCodec(input.operation).decodeResponse(value),
-    );
-    if (replay !== undefined) return replay;
-    await this.#expireOffers(input.transitionedAt);
-    const offers = await this.#query<ManagerResponsibilityOfferRow>(
-      `${SELECT_MANAGER_RESPONSIBILITY_OFFER}
-        WHERE project_id = $1 AND offer_id = $2`,
-      [this.#projectId, input.offerId],
-    );
-    const offer = offers[0];
-    if (offer === undefined) return { status: 'stale' as const };
-    const canTransition = input.nextState === 'cancelled'
-      ? input.actorRole === 'manager'
-        && offer.source_manager_member_id === input.actorMemberId
-      : offer.target_member_id === input.actorMemberId;
-    if (!canTransition) return { status: 'authorization-denied' as const };
-    if (Number(offer.revision) > input.expectedOfferRevision) {
-      return { status: 'permanently-stale' as const };
-    }
-    if (
-      Number(offer.revision) !== input.expectedOfferRevision
-      || (input.nextState === 'cancelled'
-        ? !['offered', 'acknowledged'].includes(offer.state)
-        : offer.state !== 'offered')
-    ) return { status: 'stale' as const };
-    const rows = await this.#query<ManagerResponsibilityOfferRow>(
-      `UPDATE claudian_cloud.manager_responsibility_offers
-          SET state = $3,
-              revision = revision + 1,
-              acknowledged_at = CASE WHEN $3 = 'acknowledged'
-                THEN $5 ELSE acknowledged_at END,
-              terminal_at = CASE WHEN $3 IN ('declined', 'cancelled')
-                THEN $5 ELSE terminal_at END
-        WHERE project_id = $1 AND offer_id = $2 AND revision = $4
-       RETURNING offer_id, source_manager_member_id, target_member_id,
-                 purpose, state, revision, manager_set_generation_at_offer,
-                 target_membership_revision_at_offer, offered_at, expires_at,
-                 acknowledged_at, terminal_at, request_fingerprint`,
-      [
-        this.#projectId,
-        input.offerId,
-        input.nextState,
-        input.expectedOfferRevision,
-        input.transitionedAt,
-      ],
-    );
-    const transitionedOffer = rows[0];
-    if (rows.length !== 1 || transitionedOffer === undefined) {
-      return { status: 'stale' as const };
-    }
-    const response = collabControlOperationCodec(input.operation).decodeResponse({
-      offer: managerResponsibilityOffer(transitionedOffer),
-    });
-    await this.#storeAdministrationResult(
-      input.actorMemberId,
-      input.operation,
-      input.idempotencyKey,
-      input.requestFingerprint,
-      response,
-      input.transitionedAt,
-    );
-    return { response, status: 'created' as const };
-  }
-
-  async promoteManager(input: Readonly<{
-    readonly actorMemberId: string;
-    readonly expectedManagerSetGeneration: number;
-    readonly expectedOfferRevision: number;
-    readonly expectedTargetMembershipRevision: number;
-    readonly idempotencyKey: string;
-    readonly managerResponsibilityOfferId: string;
-    readonly projectId: string;
-    readonly promotedAt: string;
-    readonly requestFingerprint: string;
-    readonly targetMemberId: string;
-  }>) {
-    const replay = await this.#administrationReplay<PromoteManagerResponse>(
-      input.actorMemberId,
-      'promoteManager',
-      input.idempotencyKey,
-      input.requestFingerprint,
-      value => collabControlOperationCodec('promoteManager').decodeResponse(value),
-    );
-    if (replay !== undefined) return replay;
-    await this.#expireOffers(input.promotedAt);
-    const facts = await this.#query<{
-      readonly manager_set_generation: string;
-      readonly revision: string;
-      readonly role: string;
-      readonly source_is_manager: boolean;
-      readonly status: string;
-    }>(
-      `SELECT project.manager_set_generation,
-              target.revision,
-              target.role,
-              target.status,
-              EXISTS (
-                SELECT 1 FROM claudian_cloud.project_memberships AS source
-                 WHERE source.project_id = project.project_id
-                   AND source.member_id = $2
-                   AND source.status = 'active' AND source.role = 'manager'
-              ) AS source_is_manager
-         FROM claudian_cloud.projects AS project
-         JOIN claudian_cloud.project_memberships AS target
-           ON target.project_id = project.project_id AND target.member_id = $3
-        WHERE project.project_id = $1`,
-      [this.#projectId, input.actorMemberId, input.targetMemberId],
-    );
-    const fact = facts[0];
-    if (fact?.source_is_manager !== true) {
-      return { status: 'authorization-denied' as const };
-    }
-    if (
-      Number(fact.manager_set_generation) > input.expectedManagerSetGeneration
-      || Number(fact.revision) > input.expectedTargetMembershipRevision
-    ) return { status: 'permanently-stale' as const };
-    if (
-      Number(fact.manager_set_generation) !== input.expectedManagerSetGeneration
-      || Number(fact.revision) !== input.expectedTargetMembershipRevision
-      || fact.status !== 'active'
-      || fact.role !== 'member'
-    ) return { status: 'stale' as const };
-    const offers = await this.#query<ManagerResponsibilityOfferRow>(
-      `${SELECT_MANAGER_RESPONSIBILITY_OFFER}
-        WHERE project_id = $1 AND offer_id = $2`,
-      [this.#projectId, input.managerResponsibilityOfferId],
-    );
-    const offer = offers[0];
-    if (offer !== undefined && Number(offer.revision) > input.expectedOfferRevision) {
-      return { status: 'permanently-stale' as const };
-    }
-    if (
-      offer === undefined
-      || offer.source_manager_member_id !== input.actorMemberId
-      || offer.target_member_id !== input.targetMemberId
-      || offer.purpose !== 'manager-promotion'
-      || offer.state !== 'acknowledged'
-      || Number(offer.revision) !== input.expectedOfferRevision
-      || Number(offer.manager_set_generation_at_offer)
-        !== input.expectedManagerSetGeneration
-      || Number(offer.target_membership_revision_at_offer)
-        !== input.expectedTargetMembershipRevision
-    ) return { status: 'stale' as const };
-    const membership = await this.#query<{ readonly revision: string }>(
-      `UPDATE claudian_cloud.project_memberships
-          SET role = 'manager', revision = revision + 1, updated_at = $4
-        WHERE project_id = $1 AND member_id = $2
-          AND status = 'active' AND role = 'member' AND revision = $3
-       RETURNING revision`,
-      [
-        this.#projectId,
-        input.targetMemberId,
-        input.expectedTargetMembershipRevision,
-        input.promotedAt,
-      ],
-    );
-    const project = await this.#query<{ readonly manager_set_generation: string }>(
-      `UPDATE claudian_cloud.projects
-          SET manager_set_generation = manager_set_generation + 1
-        WHERE project_id = $1 AND manager_set_generation = $2
-       RETURNING manager_set_generation`,
-      [this.#projectId, input.expectedManagerSetGeneration],
-    );
-    const consumed = await this.#query<{ readonly revision: string }>(
-      `UPDATE claudian_cloud.manager_responsibility_offers
-          SET state = 'consumed', revision = revision + 1, terminal_at = $4
-        WHERE project_id = $1 AND offer_id = $2
-          AND state = 'acknowledged' AND revision = $3
-       RETURNING revision`,
-      [
-        this.#projectId,
-        input.managerResponsibilityOfferId,
-        input.expectedOfferRevision,
-        input.promotedAt,
-      ],
-    );
-    const membershipResult = membership[0];
-    const projectResult = project[0];
-    const consumedResult = consumed[0];
-    if (
-      membership.length !== 1
-      || project.length !== 1
-      || consumed.length !== 1
-      || membershipResult === undefined
-      || projectResult === undefined
-      || consumedResult === undefined
-    ) {
-      throw new CoordinationError('state-conflict');
-    }
-    await this.#cancelSupersededOffers(
-      input.expectedManagerSetGeneration,
-      input.promotedAt,
-      input.managerResponsibilityOfferId,
-    );
-    const response = collabControlOperationCodec('promoteManager').decodeResponse({
-      managerSetGeneration: Number(projectResult.manager_set_generation),
-      membershipRevision: Number(membershipResult.revision),
-      offerRevision: Number(consumedResult.revision),
-      projectId: this.#projectId,
-      promotedMemberId: input.targetMemberId,
-    });
-    await this.#storeAdministrationResult(
-      input.actorMemberId,
-      'promoteManager',
-      input.idempotencyKey,
-      input.requestFingerprint,
-      response,
-      input.promotedAt,
-    );
-    return { response, status: 'created' as const };
-  }
-
-  async demoteManager(input: Readonly<{
-    readonly actorMemberId: string;
-    readonly demotedAt: string;
-    readonly expectedManagerSetGeneration: number;
-    readonly expectedTargetMembershipRevision: number;
-    readonly idempotencyKey: string;
-    readonly projectId: string;
-    readonly requestFingerprint: string;
-    readonly targetMemberId: string;
-  }>) {
-    const replay = await this.#administrationReplay<DemoteManagerResponse>(
-      input.actorMemberId,
-      'demoteManager',
-      input.idempotencyKey,
-      input.requestFingerprint,
-      value => collabControlOperationCodec('demoteManager').decodeResponse(value),
-    );
-    if (replay !== undefined) return replay;
-    const facts = await this.#query<{
-      readonly manager_count: string;
-      readonly manager_set_generation: string;
-      readonly revision: string;
-      readonly role: string;
-      readonly source_is_manager: boolean;
-      readonly status: string;
-    }>(
-      `SELECT project.manager_set_generation,
-              target.revision,
-              target.role,
-              target.status,
-              EXISTS (
-                SELECT 1 FROM claudian_cloud.project_memberships AS source
-                 WHERE source.project_id = project.project_id
-                   AND source.member_id = $2
-                   AND source.status = 'active' AND source.role = 'manager'
-              ) AS source_is_manager,
-              (SELECT count(*) FROM claudian_cloud.project_memberships AS manager
-                WHERE manager.project_id = project.project_id
-                  AND manager.status = 'active' AND manager.role = 'manager')
-                AS manager_count
-         FROM claudian_cloud.projects AS project
-         JOIN claudian_cloud.project_memberships AS target
-           ON target.project_id = project.project_id AND target.member_id = $3
-        WHERE project.project_id = $1`,
-      [this.#projectId, input.actorMemberId, input.targetMemberId],
-    );
-    const fact = facts[0];
-    if (fact?.source_is_manager !== true || input.actorMemberId === input.targetMemberId) {
-      return { status: 'authorization-denied' as const };
-    }
-    if (
-      Number(fact.manager_set_generation) > input.expectedManagerSetGeneration
-      || Number(fact.revision) > input.expectedTargetMembershipRevision
-    ) return { status: 'permanently-stale' as const };
-    if (Number(fact.manager_count) <= 1) return { status: 'final-manager' as const };
-    if (
-      Number(fact.manager_set_generation) !== input.expectedManagerSetGeneration
-      || Number(fact.revision) !== input.expectedTargetMembershipRevision
-      || fact.status !== 'active'
-      || fact.role !== 'manager'
-    ) return { status: 'stale' as const };
-    const membership = await this.#query<{ readonly revision: string }>(
-      `UPDATE claudian_cloud.project_memberships
-          SET role = 'member', revision = revision + 1, updated_at = $4
-        WHERE project_id = $1 AND member_id = $2
-          AND status = 'active' AND role = 'manager' AND revision = $3
-       RETURNING revision`,
-      [
-        this.#projectId,
-        input.targetMemberId,
-        input.expectedTargetMembershipRevision,
-        input.demotedAt,
-      ],
-    );
-    const project = await this.#query<{ readonly manager_set_generation: string }>(
-      `UPDATE claudian_cloud.projects
-          SET manager_set_generation = manager_set_generation + 1
-        WHERE project_id = $1 AND manager_set_generation = $2
-       RETURNING manager_set_generation`,
-      [this.#projectId, input.expectedManagerSetGeneration],
-    );
-    const membershipResult = membership[0];
-    const projectResult = project[0];
-    if (
-      membership.length !== 1
-      || project.length !== 1
-      || membershipResult === undefined
-      || projectResult === undefined
-    ) {
-      throw new CoordinationError('state-conflict');
-    }
-    await this.#cancelSupersededOffers(
-      input.expectedManagerSetGeneration,
-      input.demotedAt,
-    );
-    const response = collabControlOperationCodec('demoteManager').decodeResponse({
-      demotedMemberId: input.targetMemberId,
-      managerSetGeneration: Number(projectResult.manager_set_generation),
-      membershipRevision: Number(membershipResult.revision),
-      projectId: this.#projectId,
-    });
-    await this.#storeAdministrationResult(
-      input.actorMemberId,
-      'demoteManager',
-      input.idempotencyKey,
-      input.requestFingerprint,
-      response,
-      input.demotedAt,
-    );
-    return { response, status: 'created' as const };
-  }
-
-  async #administrationReplay<Response>(
-    actorMemberId: string,
-    operation: string,
-    idempotencyKey: string,
-    requestFingerprint: string,
-    decode: (value: unknown) => Response,
-  ): Promise<
-    | Readonly<{ readonly response: Response; readonly status: 'replayed' }>
-    | Readonly<{ readonly status: 'conflict' }>
-    | undefined
-  > {
+  async findMembershipResult(actorMemberId: string, operation: string, idempotencyKey: string) {
     const rows = await this.#query<MembershipAdministrationReplayRow>(
       `SELECT request_fingerprint, response_json
          FROM claudian_cloud.idempotency_results
@@ -2807,19 +1916,10 @@ export class PostgresProjectMembershipPersistence
       [this.#projectId, actorMemberId, operation, idempotencyKey],
     );
     const row = rows[0];
-    if (row !== undefined && row.request_fingerprint !== requestFingerprint) {
-      return { status: 'conflict' as const };
-    }
-    if (row !== undefined) {
-      try {
-        return {
-          response: decode(row.response_json),
-          status: 'replayed' as const,
-        };
-      } catch {
-        return dependencyFailure();
-      }
-    }
+    return row === undefined ? undefined : { requestFingerprint: row.request_fingerprint, response: row.response_json };
+  }
+
+  async hasMembershipResultTombstone(actorMemberId: string, operation: string, idempotencyKey: string) {
     const tombstones = await this.#query<{ readonly idempotency_key: string }>(
       `SELECT idempotency_key
          FROM claudian_cloud.project_membership_idempotency_tombstones
@@ -2827,10 +1927,10 @@ export class PostgresProjectMembershipPersistence
           AND operation = $3 AND idempotency_key = $4`,
       [this.#projectId, actorMemberId, operation, idempotencyKey],
     );
-    return tombstones.length === 0 ? undefined : { status: 'conflict' as const };
+    return tombstones.length !== 0;
   }
 
-  async #storeAdministrationResult(
+  async storeMembershipResult(
     actorMemberId: string,
     operation: string,
     idempotencyKey: string,
@@ -2857,7 +1957,7 @@ export class PostgresProjectMembershipPersistence
     if (rows.length !== 1) return dependencyFailure();
   }
 
-  async #expireOffers(now: string): Promise<void> {
+  async expireResponsibilityOffers(now: string): Promise<void> {
     await this.#query(
       `UPDATE claudian_cloud.manager_responsibility_offers
           SET state = 'expired', revision = revision + 1,
@@ -2995,28 +2095,17 @@ export class PostgresProjectMembershipPersistence
     );
   }
 
-  async #importedClaimFacts(memberId: string, now: string): Promise<Readonly<{
-    readonly claimGeneration: number;
-    readonly claimSha256: string;
-    readonly state: 'active' | 'expired' | 'redeemed' | 'revoked' | 'superseded';
-    readonly transferId: string;
-  }> | undefined> {
+  async readCurrentTransferClaim(memberId: string): Promise<ImportedTransferClaimRecord | undefined> {
     const rows = await this.#query<{
       readonly original_claim_sha256: string;
       readonly original_expires_at: Date;
       readonly original_state: string;
-      readonly override_claim_generation: string | null;
-      readonly override_claim_sha256: string | null;
-      readonly override_state: string | null;
       readonly transfer_id: string;
     }>(
       `SELECT original.transfer_id,
               original.claim_sha256 AS original_claim_sha256,
               original.state AS original_state,
-              original.expires_at AS original_expires_at,
-              override.claim_generation AS override_claim_generation,
-              override.claim_sha256 AS override_claim_sha256,
-              override.state AS override_state
+              original.expires_at AS original_expires_at
          FROM claudian_cloud.project_memberships AS membership
          JOIN claudian_cloud.projects AS project
            ON project.project_id = membership.project_id
@@ -3036,71 +2125,15 @@ export class PostgresProjectMembershipPersistence
             WHERE claim.project_id = membership.project_id
               AND claim.member_id = membership.member_id
          ) AS original ON true
-         LEFT JOIN LATERAL (
-           SELECT candidate.claim_generation, candidate.claim_sha256,
-                  candidate.state
-             FROM claudian_cloud.transferred_membership_claim_overrides AS candidate
-            WHERE candidate.project_id = membership.project_id
-              AND candidate.transfer_id = original.transfer_id
-              AND candidate.member_id = membership.member_id
-            ORDER BY candidate.claim_generation DESC
-            LIMIT 1
-         ) AS override ON true
         WHERE membership.project_id = $1 AND membership.member_id = $2
-          AND membership.status = 'active'
-          AND NOT EXISTS (
-            SELECT 1 FROM claudian_cloud.project_principal_bindings AS binding
-             WHERE binding.project_id = membership.project_id
-               AND binding.member_id = membership.member_id
-               AND binding.state IN ('active', 'pending')
-          )`,
+`,
       [this.#projectId, memberId],
     );
     const row = rows[0];
-    if (row === undefined) return undefined;
-    if (row.override_claim_generation !== null) {
-      const claimGeneration = Number(row.override_claim_generation);
-      if (
-        !Number.isSafeInteger(claimGeneration)
-        || claimGeneration < 1
-        || row.override_claim_sha256 === null
-        || !SHA256_PATTERN.test(row.override_claim_sha256)
-        || row.override_state === null
-        || !['active', 'expired', 'redeemed', 'revoked', 'superseded']
-          .includes(row.override_state)
-      ) return dependencyFailure();
-      return Object.freeze({
-        claimGeneration,
-        claimSha256: row.override_claim_sha256,
-        state: row.override_state as
-          | 'active'
-          | 'expired'
-          | 'redeemed'
-          | 'revoked'
-          | 'superseded',
-        transferId: row.transfer_id,
-      });
-    }
-    if (!SHA256_PATTERN.test(row.original_claim_sha256)) return dependencyFailure();
-    let state: 'active' | 'expired' | 'redeemed' | 'revoked';
-    if (row.original_state === 'unclaimed') {
-      state = row.original_expires_at.valueOf() <= Date.parse(now)
-        ? 'expired'
-        : 'active';
-    } else if (row.original_state === 'redeemed' || row.original_state === 'revoked') {
-      state = row.original_state;
-    } else {
-      return dependencyFailure();
-    }
-    return Object.freeze({
-      claimGeneration: 0,
-      claimSha256: row.original_claim_sha256,
-      state,
-      transferId: row.transfer_id,
-    });
+    return row === undefined ? undefined : Object.freeze({ claimSha256: row.original_claim_sha256, expiresAt: timestamp(row.original_expires_at), state: row.original_state, transferId: row.transfer_id });
   }
 
-  async #findClaimOverride(
+  async readClaimOverride(
     transferId: string,
     memberId: string,
     claimGeneration: number,
@@ -3114,7 +2147,7 @@ export class PostgresProjectMembershipPersistence
     return rows[0] === undefined ? undefined : claimOverride(rows[0]);
   }
 
-  async #expireClaimOverrides(now: string): Promise<void> {
+  async expireClaimOverrides(now: string): Promise<void> {
     await this.#query(
       `UPDATE claudian_cloud.transferred_membership_claim_overrides
           SET state = 'expired', updated_at = expires_at
@@ -3123,7 +2156,7 @@ export class PostgresProjectMembershipPersistence
     );
   }
 
-  async #scrubClaimOverrideEnvelopes(now: string): Promise<void> {
+  async scrubClaimOverrideEnvelopes(now: string): Promise<void> {
     await this.#query(
       `INSERT INTO claudian_cloud.secret_replay_tombstones (
          project_id, actor_member_id, operation, idempotency_key,
@@ -3149,7 +2182,7 @@ export class PostgresProjectMembershipPersistence
     );
   }
 
-  async #expireAndScrub(now: string): Promise<void> {
+  async expireInvitations(now: string): Promise<void> {
     await this.#query(
       `UPDATE claudian_cloud.project_invitations
           SET state = 'expired', revision = revision + 1, terminal_at = expires_at
@@ -3178,7 +2211,7 @@ export class PostgresProjectMembershipPersistence
     );
   }
 
-  async #findIssuance(actorMemberId: string, idempotencyKey: string) {
+  async readInvitationIssuance(actorMemberId: string, idempotencyKey: string) {
     const rows = await this.#query<InvitationRow>(
       `${SELECT_INVITATION}
         WHERE invitation.project_id = $1
@@ -3189,7 +2222,7 @@ export class PostgresProjectMembershipPersistence
     return rows[0] === undefined ? undefined : invitation(rows[0]);
   }
 
-  async #findInvitation(invitationId: string) {
+  async readInvitationRecord(invitationId: string) {
     const rows = await this.#query<InvitationRow>(
       `${SELECT_INVITATION}
         WHERE invitation.project_id = $1 AND invitation.invitation_id = $2`,

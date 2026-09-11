@@ -297,22 +297,6 @@ describe('terminal Project lifecycle', () => {
         return 'created' as const;
       },
       async putLeaveProjectRequestFacts() { return 'created' as const; },
-      async settleLeaveMembership() {
-        assert.equal(verified, true);
-        settled = true;
-        return {
-          response: {
-            discardedRequestId: null,
-            leftAt: NOW,
-            managerSetGeneration: 1,
-            memberId: MEMBER_ID,
-            projectId: PROJECT_ID,
-            promotedSuccessorMemberId: null,
-            status: 'left' as const,
-          },
-          status: 'settled' as const,
-        };
-      },
       async putLeaveFormerPrincipalReplay(input: {
         readonly createdAt: string; readonly expiresAt: string;
         readonly expectedPersonalRefOid: string; readonly intentId: string;
@@ -359,7 +343,14 @@ describe('terminal Project lifecycle', () => {
             displayName: 'Member', memberId: MEMBER_ID, revision: 2n,
             role: 'member' as const, status: settled ? 'left' as const : 'active' as const,
           }],
-          membership: { async getNonterminalJoin() { return undefined; } },
+          membership: {
+            async getNonterminalJoin() { return undefined; },
+            async readMemberExitFacts() {
+              return { activeManagerCount: 1n, leftAt: null, managerSetGeneration: 1,
+                openRequestId: null, revision: 2n, role: 'member' as const, status: 'active' as const };
+            },
+            async applyMemberExit() { assert.equal(verified, true); settled = true; },
+          },
           portability,
         } as unknown as ProjectScope);
       },
@@ -434,7 +425,7 @@ describe('terminal Project lifecycle', () => {
                   displayName: 'Manager', memberId: MANAGER_ID, revision: 1n,
                   role: 'manager' as const, status: 'active' as const,
                 }],
-                membership: { async getNonterminalJoin() { return undefined; } },
+                membership: { async getNonterminalJoin() { return undefined; }, async applyMemberExit() { throw new Error('must not settle'); } },
                 portability: {
                   async findProjectPrincipalBinding() {
                     return { boundAt: NOW, memberId: MANAGER_ID,
@@ -445,7 +436,6 @@ describe('terminal Project lifecycle', () => {
                   async getNonterminalLifecycleJournal() { return undefined; },
                   async findLeaveFormerPrincipalReplay() { return undefined; },
                   async putLifecycleJournal() { return 'created' as const; },
-                  async settleLeaveMembership() { return 'last-manager' as const; },
                 },
               } as unknown as ProjectScope);
             },
@@ -513,7 +503,16 @@ describe('terminal Project lifecycle', () => {
             active: true, generation: 7, projectId: PROJECT_ID,
             repositoryStorageKey: 'repository_terminal', storageNodeId: 'local',
           }),
+          membership: {
+            async readMemberExitFacts() {
+              return { activeManagerCount: 1n, leftAt: null, managerSetGeneration: request.expectedManagerSetGeneration,
+                openRequestId: null, revision: 1n, role: 'manager' as const, status: 'active' as const };
+            },
+            async expireResponsibilityOffers(now: string) { observedLeftAt = now; },
+            async readResponsibilityOffer() { return undefined; },
+          },
           portability: {
+            async getLifecycleJournal() { return prepared; },
             async getLeaveProjectRequestFacts() {
               return {
                 expectedManagerSetGeneration: request.expectedManagerSetGeneration,
@@ -527,10 +526,7 @@ describe('terminal Project lifecycle', () => {
                 principalId: MANAGER_PRINCIPAL, revokedAt: undefined,
                 state: 'active' as const }];
             },
-            async settleLeaveMembership(input: { readonly leftAt: string }) {
-              observedLeftAt = input.leftAt;
-              return { response: undefined, status: 'stale' as const };
-            },
+
           },
         } as unknown as ProjectScope);
       },
@@ -574,7 +570,7 @@ describe('terminal Project lifecycle', () => {
                   displayName: 'Member', memberId: MEMBER_ID, revision: 2n,
                   role: 'member' as const, status: 'active' as const,
                 }],
-                membership: { async getNonterminalJoin() { return undefined; } },
+                membership: { async getNonterminalJoin() { return undefined; }, async applyMemberExit() { settlements += 1; } },
                 portability: {
                   async findProjectPrincipalBinding(principalId: string) {
                     return { boundAt: NOW,
@@ -595,10 +591,6 @@ describe('terminal Project lifecycle', () => {
                       updatedAt: input.createdAt,
                     });
                     return 'created' as const;
-                  },
-                  async settleLeaveMembership() {
-                    settlements += 1;
-                    return 'settled' as const;
                   },
                 },
               } as unknown as ProjectScope);

@@ -1,3 +1,4 @@
+import { ProjectTransferredMembershipClaims } from './ProjectTransferredMembershipClaims.js';
 import { createHash, randomBytes } from 'node:crypto';
 
 import {
@@ -115,7 +116,7 @@ export class TransferredMembershipClaimAuthority {
       }
       const createdAt = canonicalNow(this.#clock);
       const facts = await write.transact(scope => (
-        scope.membership.getImportedMembershipClaimFacts(
+        new ProjectTransferredMembershipClaims(scope, request.projectId).getImportedMembershipClaimFacts(
           request.memberId,
           createdAt,
         )
@@ -159,7 +160,7 @@ export class TransferredMembershipClaimAuthority {
         transferId: facts.transferId,
       });
       const result = await write.transact(scope => (
-        scope.membership.reissueTransferredMembershipClaim({
+        new ProjectTransferredMembershipClaims(scope, request.projectId).reissueTransferredMembershipClaim({
           actorMemberId: write.memberId,
           claimGeneration,
           claimSha256: sha256(claim),
@@ -234,7 +235,7 @@ export class TransferredMembershipClaimAuthority {
         throw domainError('authorization-denied', 'manager-required');
       }
       const result = await write.transact(scope => (
-        scope.membership.revokeTransferredMembershipClaim({
+        new ProjectTransferredMembershipClaims(scope, request.projectId).revokeTransferredMembershipClaim({
           actorMemberId: write.memberId,
           expectedClaimGeneration: request.expectedClaimGeneration,
           expectedManagerSetGeneration: request.expectedManagerSetGeneration,

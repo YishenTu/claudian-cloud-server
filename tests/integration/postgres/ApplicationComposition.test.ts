@@ -1,3 +1,4 @@
+import { ProjectMembershipAdministration } from '../../../src/project-authority/membership/ProjectMembershipAdministration.js';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
@@ -1346,7 +1347,7 @@ while :; do sleep 1; done`,
       });
       try {
         const expiredMembers = await expiryStore.withProjectScope(projectId, scope => (
-          scope.membership.listProjectMembers({ actorRole: 'manager', now: response.expiresAt })
+          new ProjectMembershipAdministration(scope, projectId).listProjectMembers({ actorRole: 'manager', now: response.expiresAt })
         ));
         const expired = expiredMembers.members.find(member => member.memberId === importedMemberId);
         assert.equal(expired?.importedClaimState, 'expired');

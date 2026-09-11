@@ -347,21 +347,6 @@ export interface CompleteLeaveFormerPrincipalReplayRecoveryInput {
   readonly resultSha256: string;
 }
 
-export interface SettleLeaveMembershipInput {
-  readonly expectedManagerSetGeneration: number;
-  readonly expectedMembershipRevision: bigint;
-  readonly expectedOfferRevision: number | null;
-  readonly leftAt: CollabIsoTimestamp;
-  readonly managerResponsibilityOfferId: string | null;
-  readonly memberId: CollabMemberId;
-  readonly operationId: string;
-}
-
-export type SettleLeaveMembershipResult = Readonly<{
-  readonly response?: LeaveProjectResponse;
-  readonly status: 'last-manager' | 'replayed' | 'settled' | 'stale';
-}>;
-
 export interface LeaveProjectRequestFacts {
   readonly expectedManagerSetGeneration: number;
   readonly expectedMembershipRevision: number;
@@ -652,9 +637,6 @@ export interface PortabilityLifecyclePersistence
   scrubProtectedClaimEnvelope(
     input: ScrubProtectedClaimEnvelopeInput,
   ): Promise<ProtectedClaimScrubResult>;
-  settleLeaveMembership(
-    input: SettleLeaveMembershipInput,
-  ): Promise<SettleLeaveMembershipResult>;
   stageLanToCloudProject(
     input: StageLanToCloudProjectInput,
   ): Promise<PersistencePutResult>;

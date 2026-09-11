@@ -1,3 +1,6 @@
+import { ProjectTransferredMembershipClaims } from '../../../src/project-authority/membership/ProjectTransferredMembershipClaims.js';
+import { ProjectMembershipAdministration } from '../../../src/project-authority/membership/ProjectMembershipAdministration.js';
+import { ProjectMembershipSettlement } from '../../../src/project-authority/membership/ProjectMembershipSettlement.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { describe, it } from 'node:test';
@@ -1125,7 +1128,7 @@ describe('portability lifecycle persistence', () => {
             requestFingerprint: '7'.repeat(64),
             response: leaveResponse(projectId, memberId),
           });
-          assert.deepEqual(await scope.portability.settleLeaveMembership({
+          assert.deepEqual(await new ProjectMembershipSettlement(scope, projectId).settleLeaveMembership({
             expectedManagerSetGeneration: 1,
             expectedMembershipRevision: 1n,
             expectedOfferRevision: null,
@@ -1157,7 +1160,7 @@ describe('portability lifecycle persistence', () => {
             (await scope.portability.findProjectPrincipalBinding(principalId))?.state,
             'revoked',
           );
-          assert.deepEqual(await scope.portability.settleLeaveMembership({
+          assert.deepEqual(await new ProjectMembershipSettlement(scope, projectId).settleLeaveMembership({
             expectedManagerSetGeneration: 1,
             expectedMembershipRevision: 1n,
             expectedOfferRevision: null,
@@ -1863,20 +1866,20 @@ describe('portability lifecycle persistence', () => {
             memberId: importedMemberId,
             transferId,
           });
-          const original = (await scope.membership.listProjectMembers({
+          const original = (await new ProjectMembershipAdministration(scope, projectId).listProjectMembers({
             actorRole: 'manager',
             now: T1,
           })).members.find(member => member.memberId === importedMemberId);
           assert.equal(original?.importedClaimState, 'original-active');
           assert.equal(original.importedClaimGeneration, 0);
-          const redacted = (await scope.membership.listProjectMembers({
+          const redacted = (await new ProjectMembershipAdministration(scope, projectId).listProjectMembers({
             actorRole: 'member',
             now: T1,
           })).members.find(member => member.memberId === importedMemberId);
           assert.equal(redacted?.importedClaimState, 'hidden');
           assert.equal(redacted.importedClaimGeneration, null);
           assert.deepEqual(
-            await scope.membership.getImportedMembershipClaimFacts(
+            await new ProjectTransferredMembershipClaims(scope, projectId).getImportedMembershipClaimFacts(
               importedMemberId,
               T1,
             ),
@@ -1922,29 +1925,29 @@ describe('portability lifecycle persistence', () => {
             secretReplayExpiresAt: firstExpires,
             transferId,
           };
-          assert.equal((await scope.membership.reissueTransferredMembershipClaim(
+          assert.equal((await new ProjectTransferredMembershipClaims(scope, projectId).reissueTransferredMembershipClaim(
             first,
           )).status, 'created');
-          const overridden = (await scope.membership.listProjectMembers({
+          const overridden = (await new ProjectMembershipAdministration(scope, projectId).listProjectMembers({
             actorRole: 'manager',
             now: T1,
           })).members.find(member => member.memberId === importedMemberId);
           assert.equal(overridden?.importedClaimState, 'override-active');
           assert.equal(overridden.importedClaimGeneration, 1);
-          assert.equal((await scope.membership.reissueTransferredMembershipClaim(
+          assert.equal((await new ProjectTransferredMembershipClaims(scope, projectId).reissueTransferredMembershipClaim(
             first,
           )).status, 'replayed');
-          assert.equal(await scope.membership.resolveEffectiveTransferredMembershipClaim(
+          assert.equal(await new ProjectTransferredMembershipClaims(scope, projectId).resolveEffectiveTransferredMembershipClaim(
             transferId,
             CLAIM_SHA,
             T2,
           ), undefined);
-          assert.equal((await scope.membership.resolveEffectiveTransferredMembershipClaim(
+          assert.equal((await new ProjectTransferredMembershipClaims(scope, projectId).resolveEffectiveTransferredMembershipClaim(
             transferId,
             firstDigest,
             T2,
           ))?.claimGeneration, 1);
-          assert.equal((await scope.membership.revokeTransferredMembershipClaim({
+          assert.equal((await new ProjectTransferredMembershipClaims(scope, projectId).revokeTransferredMembershipClaim({
             actorMemberId: managerMemberId,
             expectedClaimGeneration: 1,
             expectedManagerSetGeneration: 1,
@@ -1957,7 +1960,7 @@ describe('portability lifecycle persistence', () => {
           })).status, 'created');
 
           const secondDigest = '5'.repeat(64);
-          const revoked = (await scope.membership.listProjectMembers({
+          const revoked = (await new ProjectMembershipAdministration(scope, projectId).listProjectMembers({
             actorRole: 'manager',
             now: T2,
           })).members.find(member => member.memberId === importedMemberId);
@@ -1984,15 +1987,15 @@ describe('portability lifecycle persistence', () => {
             requestFingerprint: '7'.repeat(64),
             secretReplayExpiresAt: secondExpires,
           };
-          assert.equal((await scope.membership.reissueTransferredMembershipClaim(
+          assert.equal((await new ProjectTransferredMembershipClaims(scope, projectId).reissueTransferredMembershipClaim(
             second,
           )).status, 'created');
-          assert.equal(await scope.membership.resolveEffectiveTransferredMembershipClaim(
+          assert.equal(await new ProjectTransferredMembershipClaims(scope, projectId).resolveEffectiveTransferredMembershipClaim(
             transferId,
             firstDigest,
             T3,
           ), undefined);
-          const effective = await scope.membership
+          const effective = await new ProjectTransferredMembershipClaims(scope, projectId)
             .resolveEffectiveTransferredMembershipClaim(
               transferId,
               secondDigest,
@@ -2022,7 +2025,7 @@ describe('portability lifecycle persistence', () => {
             transferId,
           };
           assert.deepEqual(
-            await scope.membership.redeemTransferredMembershipClaimOverride({
+            await scope.membership.recordClaimOverrideRedemption({
               claim: effective,
               operationIntentId: receipt.operationIntentId,
               receipt,
@@ -2031,7 +2034,7 @@ describe('portability lifecycle persistence', () => {
             }),
             receipt,
           );
-          const redeemed = (await scope.membership.listProjectMembers({
+          const redeemed = (await new ProjectMembershipAdministration(scope, projectId).listProjectMembers({
             actorRole: 'manager',
             now: redeemedAt,
           })).members.find(member => (
@@ -2068,11 +2071,11 @@ describe('portability lifecycle persistence', () => {
             memberId: importedMemberId,
             transferId: newerTransferId,
           });
-          const transferredAgain = (await scope.membership.listProjectMembers({
+          const transferredAgain = (await new ProjectMembershipAdministration(scope, projectId).listProjectMembers({
             actorRole: 'manager',
             now: redeemedAt,
           })).members.find(member => member.memberId === importedMemberId);
-          const currentFacts = await scope.membership.getImportedMembershipClaimFacts(
+          const currentFacts = await new ProjectTransferredMembershipClaims(scope, projectId).getImportedMembershipClaimFacts(
             importedMemberId,
             redeemedAt,
           );
@@ -2080,7 +2083,7 @@ describe('portability lifecycle persistence', () => {
           const currentOverrideExpiresAt = new Date(
             Date.parse(currentOverrideCreatedAt) + 30 * 24 * 60 * 60 * 1_000,
           ).toISOString();
-          const currentReissue = await scope.membership.reissueTransferredMembershipClaim({
+          const currentReissue = await new ProjectTransferredMembershipClaims(scope, projectId).reissueTransferredMembershipClaim({
             ...first,
             claimGeneration: 1,
             claimSha256: '4'.repeat(64),
@@ -2119,7 +2122,7 @@ describe('portability lifecycle persistence', () => {
             reissuedTransferId: newerTransferId,
             reissueStatus: 'created',
           });
-          const currentOverride = (await scope.membership.listProjectMembers({
+          const currentOverride = (await new ProjectMembershipAdministration(scope, projectId).listProjectMembers({
             actorRole: 'manager',
             now: currentOverrideCreatedAt,
           })).members.find(member => member.memberId === importedMemberId);

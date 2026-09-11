@@ -1,3 +1,4 @@
+import { ProjectMembershipAdmission } from './ProjectMembershipAdmission.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import {
@@ -174,7 +175,7 @@ export class ProjectInvitationAuthority {
           invitationId,
           projectId: request.projectId,
         });
-        const result = await write.transact(scope => scope.membership.createInvitation({
+        const result = await write.transact(scope => new ProjectMembershipAdmission(scope).createInvitation({
           createdAt,
           envelope,
           expectedManagerSetGeneration: request.expectedManagerSetGeneration,
@@ -226,7 +227,7 @@ export class ProjectInvitationAuthority {
         throw domainError('authorization-denied', 'manager-required');
       }
       const result = await write.transact(scope => (
-        scope.membership.listInvitations(canonicalNow(this.#clock))
+        new ProjectMembershipAdmission(scope).listInvitations(canonicalNow(this.#clock))
       ));
       return collabControlOperationCodec('listProjectInvitations').decodeResponse({
         invitations: result.invitations.map(summary),
@@ -246,7 +247,7 @@ export class ProjectInvitationAuthority {
         throw domainError('authorization-denied', 'manager-required');
       }
       const revokedAt = canonicalNow(this.#clock);
-      const result = await write.transact(scope => scope.membership.revokeInvitation({
+      const result = await write.transact(scope => new ProjectMembershipAdmission(scope).revokeInvitation({
         actorMemberId: write.memberId,
         expectedInvitationRevision: request.expectedInvitationRevision,
         expectedManagerSetGeneration: request.expectedManagerSetGeneration,

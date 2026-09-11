@@ -1,9 +1,14 @@
+import { ProjectTransferredMembershipClaims } from '../../../src/project-authority/membership/ProjectTransferredMembershipClaims.js';
+import { ProjectMembershipAdmission, type CreateProjectInvitationInput } from '../../../src/project-authority/membership/ProjectMembershipAdmission.js';
+import type { ProjectScope } from '../../../src/coordination/ProjectCoordination.js';
+import { ProjectMembershipAdministration } from '../../../src/project-authority/membership/ProjectMembershipAdministration.js';
+import { ProjectMembershipSettlement } from '../../../src/project-authority/membership/ProjectMembershipSettlement.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { Client } from 'pg';
 
-import type { CreateProjectInvitationPersistenceInput, ProjectMembershipPersistence } from '../../../src/coordination/ProjectMembershipPersistence.js';
+import type { ProjectMembershipPersistence } from '../../../src/coordination/ProjectMembershipPersistence.js';
 import { PostgresCoordination } from '../../../src/coordination/postgres/PostgresCoordination.js';
 import { PostgresSchemaInitializer } from '../../../src/coordination/postgres/PostgresSchemaInitializer.js';
 import {
@@ -14,7 +19,7 @@ import {
 const PROJECT_ID = 'project_invitation_sql';
 const MEMBER_ID = 'member_invitation_manager';
 const CREATED = '2026-08-30T02:00:00.000Z';
-const INPUT: CreateProjectInvitationPersistenceInput = Object.freeze({
+const INPUT: CreateProjectInvitationInput = Object.freeze({
   createdAt: CREATED,
   envelope: Object.freeze({
     algorithm: 'xchacha20-poly1305',
@@ -134,7 +139,7 @@ function invitationInput(
   invitationId: string,
   idempotencyKey: string,
   digestCharacter: string,
-): CreateProjectInvitationPersistenceInput {
+): CreateProjectInvitationInput {
   return Object.freeze({
     ...INPUT,
     envelope: Object.freeze({
@@ -158,8 +163,8 @@ describe('Postgres Project invitation persistence', () => {
         const lease = await store.acquireProjectLease(PROJECT_ID);
         try {
           await lease.withProjectScope(async scope => {
-            assert.equal((await scope.membership.createInvitation(INPUT)).status, 'created');
-            assert.equal((await scope.membership.createManagerResponsibilityOffer({
+            assert.equal((await new ProjectMembershipAdmission(scope).createInvitation(INPUT)).status, 'created');
+            assert.equal((await new ProjectMembershipAdministration(scope, PROJECT_ID).createManagerResponsibilityOffer({
               actorMemberId: MEMBER_ID,
               expectedManagerSetGeneration: 1,
               expectedTargetMembershipRevision: 2,
@@ -182,18 +187,18 @@ describe('Postgres Project invitation persistence', () => {
               retainedOutgoingTransferId: 'outgoing_transfer_relinquishment',
             }), 'replayed');
 
-            const invitations = await scope.membership.listInvitations(
+            const invitations = await new ProjectMembershipAdmission(scope).listInvitations(
               '2026-08-30T03:00:00.000Z',
             );
             assert.equal(invitations.invitations[0]?.state, 'revoked');
             assert.equal(invitations.invitations[0].envelope, undefined);
-            assert.equal((await scope.membership.getManagerResponsibilityOffer({
+            assert.equal((await new ProjectMembershipAdministration(scope, PROJECT_ID).getManagerResponsibilityOffer({
               actorMemberId: MEMBER_ID,
               actorRole: 'manager',
               now: '2026-08-30T03:00:00.000Z',
               offerId: 'offer_relinquishment',
             }))?.state, 'cancelled');
-            assert.deepEqual(await scope.membership.listCurrentManagerResponsibilityOffers({
+            assert.deepEqual(await new ProjectMembershipAdministration(scope, PROJECT_ID).listCurrentManagerResponsibilityOffers({
               actorMemberId: MEMBER_ID,
               actorRole: 'manager',
               now: '2026-08-30T03:00:00.000Z',
@@ -217,7 +222,7 @@ describe('Postgres Project invitation persistence', () => {
         const lease = await store.acquireProjectLease(PROJECT_ID);
         try {
           const prepared = await lease.withProjectScope(scope => (
-            scope.membership.prepareRemoval({
+            new ProjectMembershipSettlement(scope, PROJECT_ID).prepareRemoval({
               actorMemberId: MEMBER_ID,
               expectedManagerSetGeneration: 1,
               expectedPersonalRefOid: 'a'.repeat(40),
@@ -236,7 +241,7 @@ describe('Postgres Project invitation persistence', () => {
           ));
           assert.equal(prepared.status, 'created');
           const settled = await lease.withProjectScope(scope => (
-            scope.membership.settleRemoval({
+            new ProjectMembershipSettlement(scope, PROJECT_ID).settleRemoval({
               operationId: 'remove_sql_operation',
               removedAt: '2026-08-30T03:01:00.000Z',
             })
@@ -301,7 +306,7 @@ describe('Postgres Project invitation persistence', () => {
         const lease = await store.acquireProjectLease(PROJECT_ID);
         try {
           const offer = await lease.withProjectScope(scope => (
-            scope.membership.createManagerResponsibilityOffer({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).createManagerResponsibilityOffer({
               actorMemberId: MEMBER_ID,
               expectedManagerSetGeneration: 1,
               expectedTargetMembershipRevision: 2,
@@ -317,7 +322,7 @@ describe('Postgres Project invitation persistence', () => {
           ));
           assert.equal(offer.status, 'created');
           const acknowledged = await lease.withProjectScope(scope => (
-            scope.membership.transitionManagerResponsibilityOffer({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).transitionManagerResponsibilityOffer({
               actorMemberId: 'member_admin_target',
               actorRole: 'member',
               expectedOfferRevision: 1,
@@ -355,7 +360,7 @@ describe('Postgres Project invitation persistence', () => {
             });
           });
           const settled = await lease.withProjectScope(scope => (
-            scope.portability.settleLeaveMembership({
+            new ProjectMembershipSettlement(scope, PROJECT_ID).settleLeaveMembership({
               expectedManagerSetGeneration: 1,
               expectedMembershipRevision: 2n,
               expectedOfferRevision: 2,
@@ -407,20 +412,20 @@ describe('Postgres Project invitation persistence', () => {
         const lease = await store.acquireProjectLease(PROJECT_ID);
         try {
           assert.equal(await lease.withProjectScope(async scope => (
-            await scope.membership.createInvitation(INPUT)
+            await new ProjectMembershipAdmission(scope).createInvitation(INPUT)
           )).then(value => value.status), 'created');
           const replay = await lease.withProjectScope(scope => (
-            scope.membership.createInvitation(INPUT)
+            new ProjectMembershipAdmission(scope).createInvitation(INPUT)
           ));
           assert.equal(replay.status, 'replayed');
           assert.deepEqual(replay.record?.envelope, INPUT.envelope);
           const listed = await lease.withProjectScope(scope => (
-            scope.membership.listInvitations(CREATED)
+            new ProjectMembershipAdmission(scope).listInvitations(CREATED)
           ));
           assert.equal(listed.invitations.length, 1);
           assert.equal(listed.invitations[0]?.state, 'active');
           const revoked = await lease.withProjectScope(scope => (
-            scope.membership.revokeInvitation({
+            new ProjectMembershipAdmission(scope).revokeInvitation({
               actorMemberId: MEMBER_ID,
               expectedInvitationRevision: 1,
               expectedManagerSetGeneration: 1,
@@ -435,11 +440,11 @@ describe('Postgres Project invitation persistence', () => {
           assert.ok(revoked.record);
           assert.equal(revoked.record.revision, 2);
           assert.equal(revoked.record.state, 'revoked');
-          await lease.withProjectScope(scope => scope.membership.listInvitations(
+          await lease.withProjectScope(scope => new ProjectMembershipAdmission(scope).listInvitations(
             '2026-09-29T02:00:00.000Z',
           ));
           const scrubbed = await lease.withProjectScope(scope => (
-            scope.membership.createInvitation(INPUT)
+            new ProjectMembershipAdmission(scope).createInvitation(INPUT)
           ));
           assert.equal(scrubbed.status, 'replay-expired');
         } finally {
@@ -460,10 +465,10 @@ describe('Postgres Project invitation persistence', () => {
         const lease = await store.acquireProjectLease(PROJECT_ID);
         try {
           assert.equal((await lease.withProjectScope(scope => (
-            scope.membership.createInvitation(INPUT)
+            new ProjectMembershipAdmission(scope).createInvitation(INPUT)
           ))).status, 'created');
           assert.equal((await lease.withProjectScope(scope => (
-            scope.membership.revokeInvitation({
+            new ProjectMembershipAdmission(scope).revokeInvitation({
               actorMemberId: MEMBER_ID,
               expectedInvitationRevision: 1,
               expectedManagerSetGeneration: 1,
@@ -517,8 +522,8 @@ describe('Postgres Project invitation persistence', () => {
       try {
         const lease = await store.acquireProjectLease(PROJECT_ID);
         try {
-          await lease.withProjectScope(scope => scope.membership.createInvitation(INPUT));
-          const prepared = await lease.withProjectScope(scope => scope.membership.prepareJoin({
+          await lease.withProjectScope(scope => new ProjectMembershipAdmission(scope).createInvitation(INPUT));
+          const prepared = await lease.withProjectScope(scope => new ProjectMembershipAdmission(scope).prepareJoin({
             displayName: 'Joined Member',
             expectedMainOid: 'a'.repeat(40),
             idempotencyKey: 'join_sql_key',
@@ -546,6 +551,11 @@ describe('Postgres Project invitation persistence', () => {
             operationId: 'join_sql_operation',
             updatedAt: '2026-08-30T04:00:00.000Z',
           }));
+          assert.ok(prepared.journal);
+          const originalJoin = prepared.journal;
+          assert.equal((await lease.withProjectScope(scope => new ProjectMembershipAdmission(scope).prepareJoin({
+            ...originalJoin, idempotencyKey: 'another-join-key', operationId: 'another-join-operation', requestFingerprint: '0'.repeat(64),
+          }))).status, 'already-bound');
           await lease.withProjectScope(scope => scope.membership.advanceJoin({
             expectedPhase: 'membership-pending',
             nextPhase: 'personal-ref-created',
@@ -648,8 +658,8 @@ describe('Postgres Project invitation persistence', () => {
       try {
         const lease = await store.acquireProjectLease(PROJECT_ID);
         try {
-          await lease.withProjectScope(scope => scope.membership.createInvitation(INPUT));
-          await lease.withProjectScope(scope => scope.membership.prepareJoin({
+          await lease.withProjectScope(scope => new ProjectMembershipAdmission(scope).createInvitation(INPUT));
+          await lease.withProjectScope(scope => new ProjectMembershipAdmission(scope).prepareJoin({
             displayName: 'Capacity Joined Member',
             expectedMainOid: 'a'.repeat(40),
             idempotencyKey: 'join_capacity_key',
@@ -677,10 +687,10 @@ describe('Postgres Project invitation persistence', () => {
           }));
 
           assert.equal((await lease.withProjectScope(scope => (
-            scope.membership.createInvitation(secondInvitation)
+            new ProjectMembershipAdmission(scope).createInvitation(secondInvitation)
           ))).status, 'created');
           assert.equal((await lease.withProjectScope(scope => (
-            scope.membership.createInvitation(thirdInvitation)
+            new ProjectMembershipAdmission(scope).createInvitation(thirdInvitation)
           ))).status, 'quota');
         } finally {
           await lease.close();
@@ -710,7 +720,7 @@ describe('Postgres Project invitation persistence', () => {
             targetMemberId: 'member_admin_second_manager',
           };
           const apply = (input: typeof request) => lease.withProjectScope(scope => (
-            scope.membership.demoteManager(input)
+            new ProjectMembershipAdministration(scope, PROJECT_ID).demoteManager(input)
           ));
           const committed = await apply(request);
           assert.equal(committed.status, 'created');
@@ -739,49 +749,49 @@ describe('Postgres Project invitation persistence', () => {
       const store = coordination(database);
       const lease = await store.acquireProjectLease(PROJECT_ID);
       try {
-        await lease.withProjectScope(scope => scope.membership.createInvitation(INPUT));
-        await lease.withProjectScope(scope => scope.membership.demoteManager({
+        await lease.withProjectScope(scope => new ProjectMembershipAdmission(scope).createInvitation(INPUT));
+        await lease.withProjectScope(scope => new ProjectMembershipAdministration(scope, PROJECT_ID).demoteManager({
           actorMemberId: MEMBER_ID, demotedAt: CREATED,
           expectedManagerSetGeneration: 1, expectedTargetMembershipRevision: 2,
           idempotencyKey: 'advance_generation', projectId: PROJECT_ID,
           requestFingerprint: 'a'.repeat(64), targetMemberId: 'member_admin_second_manager',
         }));
         const attempts: readonly [string, (membership: ProjectMembershipPersistence,
-          expectedManagerSetGeneration: number) => Promise<{ readonly status: string }>][] = [
-          ['create invitation', (membership, expectedManagerSetGeneration) => membership.createInvitation({
+          expectedManagerSetGeneration: number, scope: ProjectScope) => Promise<{ readonly status: string }>][] = [
+          ['create invitation', (_membership, expectedManagerSetGeneration, scope) => new ProjectMembershipAdmission(scope).createInvitation({
             ...invitationInput('new_invitation', 'new_invitation_key', 'd'), expectedManagerSetGeneration,
           })],
-          ['revoke invitation', (membership, expectedManagerSetGeneration) => membership.revokeInvitation({
+          ['revoke invitation', (_membership, expectedManagerSetGeneration, scope) => new ProjectMembershipAdmission(scope).revokeInvitation({
             actorMemberId: MEMBER_ID, expectedInvitationRevision: 1, expectedManagerSetGeneration,
             idempotencyKey: 'stale_revoke', invitationId: INPUT.invitationId, projectId: PROJECT_ID,
             requestFingerprint: 'e'.repeat(64), revokedAt: CREATED,
           })],
-          ['create offer', (membership, expectedManagerSetGeneration) => membership.createManagerResponsibilityOffer({
+          ['create offer', (_membership, expectedManagerSetGeneration, scope) => new ProjectMembershipAdministration(scope, PROJECT_ID).createManagerResponsibilityOffer({
             actorMemberId: MEMBER_ID, expectedManagerSetGeneration, expectedTargetMembershipRevision: 2,
             expiresAt: INPUT.expiresAt, idempotencyKey: 'stale_offer', offeredAt: CREATED,
             offerId: 'stale_offer', projectId: PROJECT_ID, purpose: 'manager-promotion',
             requestFingerprint: 'f'.repeat(64), targetMemberId: 'member_admin_target',
           })],
-          ['promote', (membership, expectedManagerSetGeneration) => membership.promoteManager({
+          ['promote', (_membership, expectedManagerSetGeneration, scope) => new ProjectMembershipAdministration(scope, PROJECT_ID).promoteManager({
             actorMemberId: MEMBER_ID, expectedManagerSetGeneration, expectedOfferRevision: 1,
             expectedTargetMembershipRevision: 2, idempotencyKey: 'stale_promote',
             managerResponsibilityOfferId: 'missing_offer', projectId: PROJECT_ID, promotedAt: CREATED,
             requestFingerprint: '1'.repeat(64), targetMemberId: 'member_admin_target',
           })],
-          ['remove', (membership, expectedManagerSetGeneration) => membership.prepareRemoval({
+          ['remove', (_membership, expectedManagerSetGeneration, scope) => new ProjectMembershipSettlement(scope, PROJECT_ID).prepareRemoval({
             actorMemberId: MEMBER_ID, expectedManagerSetGeneration, expectedPersonalRefOid: 'a'.repeat(40),
             expectedTargetMembershipRevision: 2, idempotencyKey: 'stale_remove', operationId: 'stale_remove',
             personalRef: 'refs/heads/members/member_admin_target', placementGeneration: 1,
             preparedAt: CREATED, projectId: PROJECT_ID, repositoryStorageKey: 'repo_invitation_sql',
             requestFingerprint: '2'.repeat(64), storageNodeId: 'node-a', targetMemberId: 'member_admin_target',
           })],
-          ['revoke claim', (membership, expectedManagerSetGeneration) => membership.revokeTransferredMembershipClaim({
+          ['revoke claim', (_membership, expectedManagerSetGeneration, scope) => new ProjectTransferredMembershipClaims(scope, PROJECT_ID).revokeTransferredMembershipClaim({
             actorMemberId: MEMBER_ID, expectedClaimGeneration: 0, expectedManagerSetGeneration,
             expectedMembershipRevision: 2, idempotencyKey: 'stale_claim_revoke',
             memberId: 'member_admin_target', projectId: PROJECT_ID,
             requestFingerprint: '3'.repeat(64), revokedAt: CREATED,
           })],
-          ['reissue claim', (membership, expectedManagerSetGeneration) => membership.reissueTransferredMembershipClaim({
+          ['reissue claim', (_membership, expectedManagerSetGeneration, scope) => new ProjectTransferredMembershipClaims(scope, PROJECT_ID).reissueTransferredMembershipClaim({
             actorMemberId: MEMBER_ID, claimGeneration: 1, claimSha256: '4'.repeat(64),
             createdAt: CREATED, envelope: { ...INPUT.envelope, claimGeneration: 1,
               memberId: 'member_admin_target', transferId: 'transfer_old' },
@@ -792,14 +802,14 @@ describe('Postgres Project invitation persistence', () => {
           })],
         ];
         for (const [name, attempt] of attempts) {
-          assert.equal((await lease.withProjectScope(scope => attempt(scope.membership, 1))).status,
+          assert.equal((await lease.withProjectScope(scope => attempt(scope.membership, 1, scope))).status,
             'permanently-stale', name);
-          assert.equal((await lease.withProjectScope(scope => attempt(scope.membership, 1))).status,
+          assert.equal((await lease.withProjectScope(scope => attempt(scope.membership, 1, scope))).status,
             'permanently-stale', `${name} delayed replay`);
-          assert.notEqual((await lease.withProjectScope(scope => attempt(scope.membership, 3))).status,
+          assert.notEqual((await lease.withProjectScope(scope => attempt(scope.membership, 3, scope))).status,
             'permanently-stale', `${name} future generation`);
         }
-        assert.equal((await lease.withProjectScope(scope => scope.membership.createInvitation(INPUT))).status,
+        assert.equal((await lease.withProjectScope(scope => new ProjectMembershipAdmission(scope).createInvitation(INPUT))).status,
           'replayed');
       } finally { await lease.close(); await store.close(); }
     });
@@ -813,18 +823,18 @@ describe('Postgres Project invitation persistence', () => {
       const lease = await store.acquireProjectLease(PROJECT_ID);
       try {
         await lease.withProjectScope(async scope => {
-          await scope.membership.createInvitation(INPUT);
+          await new ProjectMembershipAdmission(scope).createInvitation(INPUT);
           const revoke = { actorMemberId: MEMBER_ID, expectedInvitationRevision: 1,
             expectedManagerSetGeneration: 1, idempotencyKey: 'revision_revoke',
             invitationId: INPUT.invitationId, projectId: PROJECT_ID,
             requestFingerprint: 'a'.repeat(64), revokedAt: CREATED };
-          assert.equal((await scope.membership.revokeInvitation(revoke)).status, 'revoked');
-          assert.equal((await scope.membership.revokeInvitation(revoke)).status, 'replayed');
-          assert.equal((await scope.membership.revokeInvitation({ ...revoke,
+          assert.equal((await new ProjectMembershipAdmission(scope).revokeInvitation(revoke)).status, 'revoked');
+          assert.equal((await new ProjectMembershipAdmission(scope).revokeInvitation(revoke)).status, 'replayed');
+          assert.equal((await new ProjectMembershipAdmission(scope).revokeInvitation({ ...revoke,
             idempotencyKey: 'revision_delayed_revoke' })).status, 'permanently-stale');
-          assert.equal((await scope.membership.revokeInvitation({ ...revoke,
+          assert.equal((await new ProjectMembershipAdmission(scope).revokeInvitation({ ...revoke,
             idempotencyKey: 'revision_future_revoke', expectedInvitationRevision: 3 })).status, 'stale-invitation');
-          await scope.membership.createManagerResponsibilityOffer({
+          await new ProjectMembershipAdministration(scope, PROJECT_ID).createManagerResponsibilityOffer({
             actorMemberId: MEMBER_ID, expectedManagerSetGeneration: 1, expectedTargetMembershipRevision: 2,
             expiresAt: INPUT.expiresAt, idempotencyKey: 'revision_offer', offeredAt: CREATED,
             offerId: 'revision_offer', projectId: PROJECT_ID, purpose: 'manager-promotion',
@@ -834,14 +844,14 @@ describe('Postgres Project invitation persistence', () => {
             expectedOfferRevision: 1, idempotencyKey: 'revision_ack', nextState: 'acknowledged' as const,
             offerId: 'revision_offer', operation: 'acknowledgeManagerResponsibility' as const,
             requestFingerprint: 'c'.repeat(64), transitionedAt: CREATED };
-          assert.equal((await scope.membership.transitionManagerResponsibilityOffer(transition)).status, 'created');
-          assert.equal((await scope.membership.transitionManagerResponsibilityOffer(transition)).status, 'replayed');
+          assert.equal((await new ProjectMembershipAdministration(scope, PROJECT_ID).transitionManagerResponsibilityOffer(transition)).status, 'created');
+          assert.equal((await new ProjectMembershipAdministration(scope, PROJECT_ID).transitionManagerResponsibilityOffer(transition)).status, 'replayed');
           for (const expectedOfferRevision of [1, 3]) {
-            assert.equal((await scope.membership.transitionManagerResponsibilityOffer({ ...transition,
+            assert.equal((await new ProjectMembershipAdministration(scope, PROJECT_ID).transitionManagerResponsibilityOffer({ ...transition,
               actorMemberId: MEMBER_ID, actorRole: 'manager', expectedOfferRevision,
               idempotencyKey: 'revision_cancel', nextState: 'cancelled', operation: 'cancelManagerResponsibilityOffer',
             })).status, expectedOfferRevision === 1 ? 'permanently-stale' : 'stale');
-            assert.equal((await scope.membership.promoteManager({
+            assert.equal((await new ProjectMembershipAdministration(scope, PROJECT_ID).promoteManager({
               actorMemberId: MEMBER_ID, expectedManagerSetGeneration: 1, expectedOfferRevision,
               expectedTargetMembershipRevision: 2, idempotencyKey: 'revision_promote',
               managerResponsibilityOfferId: 'revision_offer', projectId: PROJECT_ID, promotedAt: CREATED,
@@ -862,7 +872,7 @@ describe('Postgres Project invitation persistence', () => {
         const lease = await store.acquireProjectLease(PROJECT_ID);
         try {
           const ordinary = await lease.withProjectScope(scope => (
-            scope.membership.listProjectMembers({ actorRole: 'member', now: CREATED })
+            new ProjectMembershipAdministration(scope, PROJECT_ID).listProjectMembers({ actorRole: 'member', now: CREATED })
           ));
           const target = ordinary.members.find(value => (
             value.memberId === 'member_admin_target'
@@ -872,7 +882,7 @@ describe('Postgres Project invitation persistence', () => {
           assert.equal(target.importedClaimState, 'hidden');
 
           const created = await lease.withProjectScope(scope => (
-            scope.membership.createManagerResponsibilityOffer({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).createManagerResponsibilityOffer({
               actorMemberId: MEMBER_ID,
               expectedManagerSetGeneration: 1,
               expectedTargetMembershipRevision: 2,
@@ -889,7 +899,7 @@ describe('Postgres Project invitation persistence', () => {
           assert.equal(created.status, 'created');
           assert.equal(created.response?.offer.state, 'offered');
           assert.equal((await lease.withProjectScope(scope => (
-            scope.membership.listCurrentManagerResponsibilityOffers({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).listCurrentManagerResponsibilityOffers({
               actorMemberId: 'member_admin_target',
               actorRole: 'member',
               now: CREATED,
@@ -897,7 +907,7 @@ describe('Postgres Project invitation persistence', () => {
           ))).length, 1);
 
           const acknowledged = await lease.withProjectScope(scope => (
-            scope.membership.transitionManagerResponsibilityOffer({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).transitionManagerResponsibilityOffer({
               actorMemberId: 'member_admin_target',
               actorRole: 'member',
               expectedOfferRevision: 1,
@@ -914,7 +924,7 @@ describe('Postgres Project invitation persistence', () => {
           assert.equal(acknowledged.response.offer.state, 'acknowledged');
 
           const promoted = await lease.withProjectScope(scope => (
-            scope.membership.promoteManager({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).promoteManager({
               actorMemberId: MEMBER_ID,
               expectedManagerSetGeneration: 1,
               expectedOfferRevision: 2,
@@ -935,7 +945,7 @@ describe('Postgres Project invitation persistence', () => {
             promotedMemberId: 'member_admin_target',
           });
           assert.equal((await lease.withProjectScope(scope => (
-            scope.membership.promoteManager({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).promoteManager({
               actorMemberId: MEMBER_ID,
               expectedManagerSetGeneration: 1,
               expectedOfferRevision: 2,
@@ -950,7 +960,7 @@ describe('Postgres Project invitation persistence', () => {
           ))).status, 'replayed');
 
           const demoted = await lease.withProjectScope(scope => (
-            scope.membership.demoteManager({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).demoteManager({
               actorMemberId: MEMBER_ID,
               demotedAt: '2026-08-30T02:03:00.000Z',
               expectedManagerSetGeneration: 2,
@@ -995,7 +1005,7 @@ describe('Postgres Project invitation persistence', () => {
             expectedTargetMembershipRevision: number,
             offeredAt = CREATED,
           ) => lease.withProjectScope(scope => (
-            scope.membership.createManagerResponsibilityOffer({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).createManagerResponsibilityOffer({
               actorMemberId: MEMBER_ID,
               expectedManagerSetGeneration,
               expectedTargetMembershipRevision,
@@ -1020,7 +1030,7 @@ describe('Postgres Project invitation persistence', () => {
             2,
           )).status, 'created');
           assert.equal((await lease.withProjectScope(scope => (
-            scope.membership.transitionManagerResponsibilityOffer({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).transitionManagerResponsibilityOffer({
               actorMemberId: 'member_admin_target',
               actorRole: 'member',
               expectedOfferRevision: 1,
@@ -1033,7 +1043,7 @@ describe('Postgres Project invitation persistence', () => {
             })
           ))).status, 'created');
           assert.equal((await lease.withProjectScope(scope => (
-            scope.membership.promoteManager({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).promoteManager({
               actorMemberId: MEMBER_ID,
               expectedManagerSetGeneration: 1,
               expectedOfferRevision: 2,
@@ -1047,7 +1057,7 @@ describe('Postgres Project invitation persistence', () => {
             })
           ))).status, 'created');
           assert.equal((await lease.withProjectScope(scope => (
-            scope.membership.demoteManager({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).demoteManager({
               actorMemberId: MEMBER_ID,
               demotedAt: terminalAt,
               expectedManagerSetGeneration: 2,
@@ -1068,7 +1078,7 @@ describe('Postgres Project invitation persistence', () => {
             terminalAt,
           )).status, 'created');
           assert.equal((await lease.withProjectScope(scope => (
-            scope.membership.transitionManagerResponsibilityOffer({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).transitionManagerResponsibilityOffer({
               actorMemberId: 'member_admin_target',
               actorRole: 'member',
               expectedOfferRevision: 1,
@@ -1090,7 +1100,7 @@ describe('Postgres Project invitation persistence', () => {
             terminalAt,
           )).status, 'created');
           assert.equal((await lease.withProjectScope(scope => (
-            scope.membership.transitionManagerResponsibilityOffer({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).transitionManagerResponsibilityOffer({
               actorMemberId: MEMBER_ID,
               actorRole: 'manager',
               expectedOfferRevision: 1,
@@ -1107,7 +1117,7 @@ describe('Postgres Project invitation persistence', () => {
             scope.membership.reconcileExpirations(retainedAt)
           ));
           assert.equal((await lease.withProjectScope(scope => (
-            scope.membership.getManagerResponsibilityOffer({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).getManagerResponsibilityOffer({
               actorMemberId: MEMBER_ID,
               actorRole: 'manager',
               now: retainedAt,
@@ -1128,7 +1138,7 @@ describe('Postgres Project invitation persistence', () => {
             scope.membership.reconcileExpirations(compactedAt)
           ));
           assert.equal(await lease.withProjectScope(scope => (
-            scope.membership.getManagerResponsibilityOffer({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).getManagerResponsibilityOffer({
               actorMemberId: MEMBER_ID,
               actorRole: 'manager',
               now: compactedAt,
@@ -1143,7 +1153,7 @@ describe('Postgres Project invitation persistence', () => {
             2,
           )).status, 'conflict');
           assert.equal((await lease.withProjectScope(scope => (
-            scope.membership.transitionManagerResponsibilityOffer({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).transitionManagerResponsibilityOffer({
               actorMemberId: 'member_admin_target',
               actorRole: 'member',
               expectedOfferRevision: 1,
@@ -1156,7 +1166,7 @@ describe('Postgres Project invitation persistence', () => {
             })
           ))).status, 'conflict');
           assert.equal((await lease.withProjectScope(scope => (
-            scope.membership.promoteManager({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).promoteManager({
               actorMemberId: MEMBER_ID,
               expectedManagerSetGeneration: 1,
               expectedOfferRevision: 2,
@@ -1170,7 +1180,7 @@ describe('Postgres Project invitation persistence', () => {
             })
           ))).status, 'conflict');
           assert.equal((await lease.withProjectScope(scope => (
-            scope.membership.transitionManagerResponsibilityOffer({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).transitionManagerResponsibilityOffer({
               actorMemberId: 'member_admin_target',
               actorRole: 'member',
               expectedOfferRevision: 1,
@@ -1183,7 +1193,7 @@ describe('Postgres Project invitation persistence', () => {
             })
           ))).status, 'conflict');
           assert.equal((await lease.withProjectScope(scope => (
-            scope.membership.transitionManagerResponsibilityOffer({
+            new ProjectMembershipAdministration(scope, PROJECT_ID).transitionManagerResponsibilityOffer({
               actorMemberId: MEMBER_ID,
               actorRole: 'manager',
               expectedOfferRevision: 1,
@@ -1257,7 +1267,7 @@ describe('Postgres Project invitation persistence', () => {
           idempotencyKey: string,
           requestFingerprint: string,
         ) => store.withProjectScope(PROJECT_ID, scope => (
-          scope.membership.createManagerResponsibilityOffer({
+          new ProjectMembershipAdministration(scope, PROJECT_ID).createManagerResponsibilityOffer({
             actorMemberId,
             expectedManagerSetGeneration: 1,
             expectedTargetMembershipRevision: 2,

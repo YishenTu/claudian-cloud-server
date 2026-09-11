@@ -1,3 +1,4 @@
+import { ProjectMembershipSettlement } from '../../../src/project-authority/membership/ProjectMembershipSettlement.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { describe, it } from 'node:test';
@@ -530,13 +531,13 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
                 kind: 'leave', operationId, phase: 'prepared', projectId: PROJECT_ID,
                 requestFingerprint: 'a'.repeat(64), scheduledAt: completed.updatedAt,
               }), 'created');
-              assert.equal((await scope.portability.settleLeaveMembership({
+              assert.equal((await new ProjectMembershipSettlement(scope, PROJECT_ID).settleLeaveMembership({
                 expectedManagerSetGeneration: 1, expectedMembershipRevision: 1n,
                 expectedOfferRevision: null, leftAt: completed.updatedAt,
                 managerResponsibilityOfferId: null, memberId: OFFLINE_ID, operationId,
               })).status, 'settled');
             } else {
-              assert.equal((await scope.membership.prepareRemoval({
+              assert.equal((await new ProjectMembershipSettlement(scope, PROJECT_ID).prepareRemoval({
                 actorMemberId: MANAGER_ID, expectedManagerSetGeneration: 1,
                 expectedPersonalRefOid: 'a'.repeat(40), expectedTargetMembershipRevision: 1,
                 idempotencyKey: operationId, operationId,
@@ -545,7 +546,7 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
                 repositoryStorageKey: 'repository_cloud_to_lan_real',
                 requestFingerprint: 'a'.repeat(64), storageNodeId: 'local', targetMemberId: OFFLINE_ID,
               })).status, 'created');
-              assert.equal((await scope.membership.settleRemoval({
+              assert.equal((await new ProjectMembershipSettlement(scope, PROJECT_ID).settleRemoval({
                 operationId, removedAt: completed.updatedAt,
               })).status, 'settled');
             }

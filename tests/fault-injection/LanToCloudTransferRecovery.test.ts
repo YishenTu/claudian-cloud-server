@@ -1,3 +1,4 @@
+import { ProjectMembershipAdministration } from '../../src/project-authority/membership/ProjectMembershipAdministration.js';
 import { EnvironmentProjectRecovery } from '../../src/environment-maintenance/recovery/EnvironmentProjectRecovery.js';
 import { DeletionCoordinator } from '../../src/project-authority/lifecycle/delete/DeletionCoordinator.js';
 import assert from 'node:assert/strict';
@@ -7,6 +8,7 @@ import { createReadStream } from 'node:fs';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { describe, it } from 'node:test';
 import { promisify } from 'node:util';
 
@@ -14,8 +16,14 @@ import type {
   CollabAuthorityRelinquishmentProof,
   CollabCheckpointBackupRecord,
   CollabProjectCheckpointManifest,
+  CollabTransferredMembershipClaimBatch,
 } from '@claudian-collab/protocol';
 import { Client } from 'pg';
+
+import { PostgresEnvironmentRestorePersistence } from '../../src/coordination/postgres/PostgresEnvironmentRestorePersistence.js';
+import { ProjectMemberRemovalCoordinator } from '../../src/project-authority/membership/ProjectMemberRemovalCoordinator.js';
+import { LeaveCoordinator } from '../../src/project-authority/lifecycle/leave/LeaveCoordinator.js';
+import { createVaultCredentialPrincipal } from '../../src/request-context/RequestPrincipal.js';
 
 import { PostgresCoordination } from '../../src/coordination/postgres/PostgresCoordination.js';
 import { PostgresSchemaInitializer } from '../../src/coordination/postgres/PostgresSchemaInitializer.js';
@@ -416,7 +424,7 @@ function sourceTrust(transfer: TransferFixture): LanToCloudSourceTrustPort {
 async function beginValidateAndPublish(
   coordinator: LanToCloudTransferCoordinator,
   transfer: TransferFixture,
-): Promise<Readonly<{ batchRevision: number; batchSha256: string; checkpointSha256: string }>> {
+): Promise<CollabTransferredMembershipClaimBatch> {
   const batch = await beginValidateAndRotate(coordinator, transfer);
   await acknowledgeBatch(coordinator, transfer, batch);
   return batch;
@@ -425,7 +433,7 @@ async function beginValidateAndPublish(
 async function beginValidateAndRotate(
   coordinator: LanToCloudTransferCoordinator,
   transfer: TransferFixture,
-): Promise<Readonly<{ batchRevision: number; batchSha256: string; checkpointSha256: string }>> {
+): Promise<CollabTransferredMembershipClaimBatch> {
   try {
     await coordinator.begin({
     principalId: transfer.principalId,
@@ -502,6 +510,34 @@ async function acknowledgeBatch(
   });
 }
 
+function createImporter(operationRoot: string, resourceAdmission: ResourceAdmission) {
+  const uploadAdmission = new BootstrapUploadAdmission({
+    maxConcurrentUploads: 1,
+    maxUploadsPerAttempt: 1,
+    queueMax: 2,
+    queueTimeoutMs: 1_000,
+    stagingFreeSpaceFloorBytes: 1,
+    stagingReservationBytes: 2 * 1024 * 1024,
+    stagingRoot: operationRoot,
+  });
+  const importer = new GitBundleImporter({
+    gitExecutable: GIT,
+    maximumBlobBytes: 1024 * 1024,
+    maximumBundleBytes: 2 * 1024 * 1024,
+    maximumExpandedTreeEntries: 100_000,
+    maximumMetadataOutputBytes: 8 * 1024 * 1024,
+    maximumRepositoryBytes: 2 * 1024 * 1024,
+    maximumTreeEntries: 2_000,
+    operationTimeoutMs: 5_000,
+    resourceAdmission,
+    stagingRoot: operationRoot,
+    uploadAdmission,
+    uploadIdleTimeoutMs: 1_000,
+    uploadTotalTimeoutMs: 5_000,
+  });
+  return { uploadAdmission, importer };
+}
+
 describe('LAN-to-Cloud cross-store recovery', () => {
   it('replays publication and cleanup after PostgreSQL CAS loss with real Git', async () => {
     await withPostgresTestDatabase(async database => {
@@ -517,30 +553,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
         queueMaxPerProject: 1,
         queueTimeoutMs: 1_000,
       });
-      const uploadAdmission = new BootstrapUploadAdmission({
-        maxConcurrentUploads: 1,
-        maxUploadsPerAttempt: 1,
-        queueMax: 2,
-        queueTimeoutMs: 1_000,
-        stagingFreeSpaceFloorBytes: 1,
-        stagingReservationBytes: 2 * 1024 * 1024,
-        stagingRoot: operationRoot,
-      });
-      const importer = new GitBundleImporter({
-        gitExecutable: GIT,
-        maximumBlobBytes: 1024 * 1024,
-        maximumBundleBytes: 2 * 1024 * 1024,
-        maximumExpandedTreeEntries: 100_000,
-        maximumMetadataOutputBytes: 8 * 1024 * 1024,
-        maximumRepositoryBytes: 2 * 1024 * 1024,
-        maximumTreeEntries: 2_000,
-        operationTimeoutMs: 5_000,
-        resourceAdmission,
-        stagingRoot: operationRoot,
-        uploadAdmission,
-        uploadIdleTimeoutMs: 1_000,
-        uploadTotalTimeoutMs: 5_000,
-      });
+      const { uploadAdmission, importer } = createImporter(operationRoot, resourceAdmission);
       const repository = new RepositoryCheckpointAuthority({
         gitExecutable: GIT,
         maximumBlobBytes: 1024 * 1024,
@@ -577,8 +590,9 @@ describe('LAN-to-Cloud cross-store recovery', () => {
       const createCoordinator = (
         transfer: TransferFixture,
         injected = false,
+        effectiveCoordination = coordination,
       ) => new LanToCloudTransferCoordinator({
-        deletion: new DeletionCoordinator({ coordination, repository }),
+        deletion: new DeletionCoordinator({ coordination: effectiveCoordination, repository }),
         activation,
         checkpoint: checkpointPort(transfer),
         claimFactory: () => {
@@ -591,9 +605,9 @@ describe('LAN-to-Cloud cross-store recovery', () => {
         clock: () => new Date(now += 1_000),
         coordination: injected
           ? new FaultInjectingCoordination(coordination, fault)
-          : coordination,
+          : effectiveCoordination,
         custodyReceiptIdFactory: () => `custody-${transfer.transferId}`,
-        receiptIdFactory: () => `redemption-${transfer.transferId}`,
+        receiptIdFactory: () => `redemption-${transfer.transferId}-${String(now)}`,
         receiptSigner: {
           activeKey: { publicKey: PUBLIC_KEY, receiptKeyId: 'receipt-key' },
           sign: () => Promise.resolve(SIGNATURE),
@@ -863,7 +877,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
             journal: await scope.portability.getLifecycleJournal(
               activationTransfer.transferId,
             ),
-            listedMembers: await scope.membership.listProjectMembers({
+            listedMembers: await new ProjectMembershipAdministration(scope, activationTransfer.projectId).listProjectMembers({
               actorRole: 'manager',
               now: '2026-08-27T00:00:00.000Z',
             }),
@@ -1087,6 +1101,172 @@ describe('LAN-to-Cloud cross-store recovery', () => {
           await incompleteCompletionLease.close();
         }
 
+        for (const settlement of ['remove-unclaimed', 'remove-redeemed', 'leave-redeemed']) {
+          const transfer = await importTransfer(root, importer,
+            `project-${settlement}`, `transfer-${settlement}`);
+          const coordinator = createCoordinator(transfer);
+          const batch = await beginValidateAndPublish(coordinator, transfer);
+          await coordinator.commitRelinquishment({
+            principalId: transfer.principalId,
+            request: {
+              projectId: transfer.projectId, transferId: transfer.transferId,
+              idempotencyKey: `relinquish-${settlement}`,
+              proof: {
+                batchRevision: batch.batchRevision, batchSha256: batch.batchSha256,
+                checkpointSha256: batch.checkpointSha256, certificate: SIGNATURE,
+                certificateAlgorithm: 'ed25519', committedAt: new Date(now += 1_000).toISOString(),
+                operationIntentId: `relinquish-${settlement}`, projectId: transfer.projectId,
+                sourceAuthority: { kind: 'lan', generation: 1 }, sourceHostMemberId: HOST_MEMBER_ID,
+                targetAuthority: { kind: 'cloud', generation: 2 }, transferId: transfer.transferId,
+              },
+            },
+          });
+          const removedClaim = batch.claims.find(item => item.memberId === OFFLINE_MEMBER_ID);
+          const survivingClaim = batch.claims.find(item => item.memberId === COLLATION_MEMBER_ID);
+          assert.ok(removedClaim);
+          assert.ok(survivingClaim);
+          const claimRequest = {
+            projectId: transfer.projectId, transferId: transfer.transferId,
+            claim: removedClaim.claim, idempotencyKey: `claim-${settlement}`,
+          };
+          const receipt = settlement === 'remove-unclaimed' ? undefined
+            : await coordinator.claimMembership({ principalId: 'principal:offline', request: claimRequest });
+          const member = await coordination.withProjectReadScope(transfer.projectId,
+            scope => scope.findMembership(OFFLINE_MEMBER_ID));
+          assert.ok(member);
+          const removal = new ProjectMemberRemovalCoordinator({
+            coordination, repository, clock: () => new Date('2026-08-27T00:00:00.000Z'),
+          });
+          const leave = new LeaveCoordinator({
+            coordination, repository, clock: () => new Date('2026-08-27T00:00:00.000Z'),
+          });
+          try {
+            if (settlement === 'leave-redeemed') {
+              await leave.leave(createVaultCredentialPrincipal({ principalId: 'principal:offline' }), {
+                projectId: transfer.projectId, idempotencyKey: `settle-${settlement}`,
+                expectedManagerSetGeneration: 1, expectedMembershipRevision: Number(member.revision),
+                expectedPersonalRefOid: transfer.checkpoint.manifest.expectedMainOid,
+                expectedOfferRevision: null, managerResponsibilityOfferId: null,
+              });
+            } else {
+              await removal.remove(createVaultCredentialPrincipal({ principalId: HOST_PRINCIPAL_ID }), {
+                projectId: transfer.projectId, idempotencyKey: `settle-${settlement}`,
+                targetMemberId: OFFLINE_MEMBER_ID, expectedManagerSetGeneration: 1,
+                expectedTargetMembershipRevision: Number(member.revision),
+              });
+            }
+            const metadata = {
+              authorityId: 'authority-real', authorityVolumeIdentity: 'volume-real',
+              coordinationSchemaVersion: 12, maximumServerBuild: 'cloud-build-real',
+              minimumServerBuild: 'cloud-build-real', repositoryFormatVersion: 1, restoreEpoch: 1,
+            };
+            const backup = await coordination.withProjectScope(transfer.projectId, async scope => ({
+              records: await scope.checkpoint.readProjectCheckpointRecords({
+                excludedOperationId: `backup-${settlement}`, maximumCoordinationBytes: 1024 * 1024,
+                metadata, profile: 'backup', snapshotAt: '2026-08-27T00:01:00.000Z',
+              }),
+              placement: await scope.getRepositoryPlacement(),
+            }));
+            const placement = backup.placement;
+            assert.ok(placement?.active);
+            const refs = await repository.inventoryRefs({
+              placement, memberIds: [HOST_MEMBER_ID, COLLATION_MEMBER_ID].sort((left, right) => left.localeCompare(right, 'en-US')),
+            });
+            assert.equal(refs.some(ref => ref.name === `refs/heads/members/${OFFLINE_MEMBER_ID}`), false);
+            const capture = await repository.capture({
+              operationId: `backup-${settlement}`, placement, refs,
+            });
+            const chunks: Buffer[] = [];
+            await repository.readCapture({ capture, onChunk: chunk => { chunks.push(Buffer.from(chunk)); } });
+            await withPostgresTestDatabase(async targetDatabase => {
+              const restoreId = `restore-${settlement}`;
+              const targetRoot = join(root, restoreId);
+              const targetRepositoryRoot = join(targetRoot, 'repositories');
+              const targetOperations = join(targetRoot, 'operations');
+              await Promise.all([mkdir(targetRepositoryRoot, { recursive: true }), mkdir(targetOperations, { recursive: true })]);
+              const targetRepository = new RepositoryCheckpointAuthority({
+                gitExecutable: GIT, maximumBlobBytes: 1024 * 1024,
+                maximumBundleBytes: 2 * 1024 * 1024, maximumExpandedTreeEntries: 100_000,
+                maximumRepositoryBytes: 2 * 1024 * 1024, maximumTreeEntries: 2_000,
+                operationRoot: targetOperations, operationTimeoutMs: 5_000, outputMaxBytes: 64 * 1024,
+                placementValidator: new CurrentPlacement(), repositoryRoot: targetRepositoryRoot,
+                resourceAdmission, storageNodeId: 'restore-node',
+              });
+              const { importer: targetImporter, uploadAdmission: targetUploads } = createImporter(targetOperations, resourceAdmission);
+              const targetCoordination = postgres(targetDatabase);
+              const persistence = new PostgresEnvironmentRestorePersistence({ connectionString: targetDatabase.migrationUrl });
+              const signal = new AbortController().signal;
+              const restoreEpoch = 2;
+              const project = {
+                authorityGeneration: 2, backupId: `backup-${settlement}`,
+                placementGeneration: placement.generation, projectId: transfer.projectId,
+              };
+              const restoredCoordinator = createCoordinator(transfer, false, targetCoordination);
+              try {
+                const verified = await targetImporter.importCheckpoint({
+                  body: Readable.from(chunks), expectedByteCount: capture.byteCount,
+                  expectedSha256: capture.sha256, objectFormat: capture.objectFormat,
+                  operationId: restoreId, projectId: transfer.projectId, refs,
+                });
+                const publication = await targetRepository.publishInactive({
+                  checkpoint: verified, placementGeneration: project.placementGeneration + 1,
+                  repositoryStorageKey: `restored_${settlement.replaceAll('-', '_')}`,
+                });
+                await persistence.createDatabase({
+                  authorityId: metadata.authorityId, authorityVolumeId: targetDatabase.authorityVolumeId,
+                  authorityVolumeIdentity: 'restored-volume', coordinationSchemaVersion: 12,
+                  operationId: restoreId, restoreEpoch, signal,
+                });
+                await persistence.importProject({ operationId: restoreId, project, records: backup.records, restoreEpoch, signal });
+                await persistence.publishAuthority({
+                  catalog: { ...metadata, createdAt: '2026-08-27T00:01:00.000Z', projects: [project] },
+                  operationId: restoreId, repositories: [publication], restoreEpoch, signal,
+                });
+                await persistence.verifyRestoredProject({
+                  operationId: restoreId, project, records: backup.records,
+                  repository: publication, restoreEpoch, signal,
+                });
+                const restored = await targetCoordination.withProjectScope(transfer.projectId, async scope => ({
+                  claim: await scope.portability.findTransferredMembershipClaimBySha256(transfer.transferId, sha256(removedClaim.claim)),
+                  binding: await scope.portability.findProjectPrincipalBinding('principal:offline'),
+                  placement: await scope.getRepositoryPlacement(),
+                }));
+                assert.equal(restored.claim?.state, 'revoked');
+                assert.equal(restored.binding, undefined);
+                const continuity = await persistence.readRestoredContinuity(project, signal);
+                assert.deepEqual(continuity.filter(record => record.kind === 'transfer-redemption-receipt')
+                  .find(record => record.value.receipt.memberId === OFFLINE_MEMBER_ID)?.value.receipt, receipt);
+                assert.ok(restored.placement?.active);
+                assert.deepEqual(await targetRepository.inventoryRefs({
+                  placement: restored.placement, memberIds: [HOST_MEMBER_ID, COLLATION_MEMBER_ID].sort((left, right) => left.localeCompare(right, 'en-US')),
+                }), refs);
+                await assert.rejects(restoredCoordinator.claimMembership({
+                  principalId: 'principal:offline', request: claimRequest,
+                }), error => error instanceof LanToCloudTransferCoordinatorError
+                  && error.code === 'authorization-denied');
+                const redeemed = await restoredCoordinator.claimMembership({
+                  principalId: 'principal:survivor', request: {
+                    projectId: transfer.projectId, transferId: transfer.transferId,
+                    claim: survivingClaim.claim, idempotencyKey: `survivor-${settlement}`,
+                  },
+                });
+                assert.equal(redeemed.memberId, COLLATION_MEMBER_ID);
+              } finally {
+                await restoredCoordinator.close();
+                await targetCoordination.close();
+                await targetRepository.close();
+                await targetImporter.close();
+                await targetUploads.close();
+              }
+            });
+            await repository.discardCapture(capture);
+          } finally {
+            await removal.close();
+            await leave.close();
+            await coordinator.close();
+          }
+        }
+
         const positiveGenerationTransfer = await importTransfer(
           root,
           importer,
@@ -1144,7 +1324,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
                 profile: 'backup',
                 snapshotAt: '2026-08-27T00:00:00.000Z',
               }),
-              listedMembers: await scope.membership.listProjectMembers({
+              listedMembers: await new ProjectMembershipAdministration(scope, positiveGenerationTransfer.projectId).listProjectMembers({
                 actorRole: 'manager',
                 now: '2026-08-27T00:00:00.000Z',
               }),

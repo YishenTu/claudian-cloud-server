@@ -459,18 +459,22 @@ class MemoryCoordination {
     const scope = {
       accept: undefined as never,
       collaboration: undefined as never,
-      ...(this.effectiveClaimOverride === undefined ? {} : {
-        membership: {
-          resolveEffectiveTransferredMembershipClaim: (
+      membership: {
+          expireClaimOverrides: () => Promise.resolve(),
+          readHighestClaimOverride: (transferId: string, memberId: string) => Promise.resolve(
+            this.effectiveClaimOverride?.transferId === transferId && this.effectiveClaimOverride.memberId === memberId ? this.effectiveClaimOverride : undefined,
+          ),
+          readTransferredClaimByDigest: (
             transferId: string,
             claimSha256: string,
-          ) => Promise.resolve(
-            this.effectiveClaimOverride?.transferId === transferId
-              && this.effectiveClaimOverride.claimSha256 === claimSha256
-              ? this.effectiveClaimOverride
-              : undefined,
-          ),
-          redeemTransferredMembershipClaimOverride: (input: {
+          ) => {
+            if (this.effectiveClaimOverride?.transferId === transferId && this.effectiveClaimOverride.claimSha256 === claimSha256) return Promise.resolve(this.effectiveClaimOverride);
+            return this.portability.findTransferredMembershipClaimBySha256(transferId, claimSha256).then(original => original === undefined ? undefined : {
+              ...original, claimGeneration: 0, kind: 'original', operationIntentId: original.operationIntentId ?? null,
+              redemptionReceiptId: original.redemptionReceiptId ?? null, targetPrincipalId: original.targetPrincipalId ?? null,
+            });
+          },
+          recordClaimOverrideRedemption: (input: {
             operationIntentId: string;
             receipt: CollabTransferredMembershipRedemptionReceipt;
             targetPrincipalId: string;
@@ -493,8 +497,7 @@ class MemoryCoordination {
             );
             return Promise.resolve(input.receipt);
           },
-        },
-      }),
+      },
       portability: this.portability as unknown as PortabilityLifecyclePersistence,
       getProject: () => Promise.resolve(this.targetOccupied || this.portability.staged
         ? Object.freeze({

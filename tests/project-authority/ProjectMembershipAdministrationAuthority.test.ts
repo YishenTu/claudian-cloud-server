@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 
 import { CollabError } from '@claudian-collab/protocol';
 
-import type { ProjectMembershipAdministrationPersistence } from '../../src/coordination/ProjectMembershipPersistence.js';
+import type { ProjectMembershipAdministrationPersistence, ProjectMembershipResultPersistence, ManagerRoleChangeInput, TransitionResponsibilityOfferInput } from '../../src/coordination/ProjectMembershipPersistence.js';
 import { ProjectMembershipAdministrationAuthority } from '../../src/project-authority/membership/ProjectMembershipAdministrationAuthority.js';
 import { createVaultCredentialPrincipal } from '../../src/request-context/RequestPrincipal.js';
 
@@ -30,95 +30,75 @@ function offer(state: 'acknowledged' | 'offered' = 'offered') {
   };
 }
 
-class MemoryAdministration implements ProjectMembershipAdministrationPersistence {
-  readonly calls: string[] = [];
-  status: 'created' | 'final-manager' | 'permanently-stale' | 'replayed' | 'stale' = 'created';
+class MemoryAdministration implements ProjectMembershipAdministrationPersistence, ProjectMembershipResultPersistence {
+  managerSetGeneration = 1;
+  targetRevision = 2n;
+  targetRole: 'member' | 'manager' = 'member';
+  managerCount = 2;
+  currentOffer: ReturnType<typeof offer> | undefined;
+  readonly results = new Map<string, { requestFingerprint: string; response: unknown }>();
 
-  listProjectMembers(input: Parameters<ProjectMembershipAdministrationPersistence['listProjectMembers']>[0]) {
-    this.calls.push(`members:${input.actorRole}`);
-    return Promise.resolve({
-      managerSetGeneration: 1,
-      members: [{
-        bindingState: input.actorRole === 'manager' ? 'unbound' as const : 'hidden' as const,
-        displayName: 'Target member',
-        importedClaimState: input.actorRole === 'manager'
-          ? 'original-active' as const : 'hidden' as const,
-        importedClaimGeneration: input.actorRole === 'manager' ? 0 : null,
-        memberId: 'member-target',
-        membershipRevision: 2,
-        role: 'member' as const,
-      }],
-      projectId: PROJECT_ID,
-    });
+  countActiveManagers() { return Promise.resolve(BigInt(this.managerCount)); }
+  async expireClaimOverrides() {}
+  async expireResponsibilityOffers() {}
+  findConflictingResponsibilityOffer() { return Promise.resolve(this.currentOffer?.offerId); }
+  insertResponsibilityOffer() { this.currentOffer = offer(); return Promise.resolve(this.currentOffer); }
+  transitionResponsibilityOffer(input: TransitionResponsibilityOfferInput) {
+    assert.equal(input.nextState, 'acknowledged');
+    this.currentOffer = offer('acknowledged');
+    return Promise.resolve(this.currentOffer);
   }
-
-  createManagerResponsibilityOffer() {
-    this.calls.push('create-offer');
-    return Promise.resolve({ response: { offer: offer() }, status: this.status });
+  readCurrentResponsibilityOffers() { return Promise.resolve(this.currentOffer ? [this.currentOffer] : []); }
+  readResponsibilityOffer() { return Promise.resolve(this.currentOffer); }
+  readMemberAdministrationFacts() {
+    return Promise.resolve([{
+      bindingState: 'unbound', claimExpiresAt: '2026-09-30T00:00:00.000Z', claimState: 'unclaimed',
+      displayName: 'Target member', memberId: 'member-target', overrideClaimGeneration: null,
+      overrideState: null, revision: Number(this.targetRevision), role: this.targetRole,
+    }]);
   }
-
-  listCurrentManagerResponsibilityOffers() {
-    this.calls.push('list-offers');
-    return Promise.resolve([offer()]);
+  applyManagerRoleChange(input: ManagerRoleChangeInput) {
+    this.targetRole = input.role;
+    this.targetRevision += 1n;
+    this.managerSetGeneration += 1;
+    return Promise.resolve();
   }
-
-  getManagerResponsibilityOffer() {
-    this.calls.push('get-offer');
-    return Promise.resolve(offer());
+  findMembershipResult(actor: string, operation: string, key: string) {
+    return Promise.resolve(this.results.get(`${actor}:${operation}:${key}`));
   }
-
-  transitionManagerResponsibilityOffer(input: Parameters<ProjectMembershipAdministrationPersistence['transitionManagerResponsibilityOffer']>[0]) {
-    this.calls.push(input.operation);
-    return Promise.resolve({ response: { offer: offer('acknowledged') }, status: this.status });
-  }
-
-  promoteManager() {
-    this.calls.push('promote');
-    return Promise.resolve({
-      response: {
-        managerSetGeneration: 2,
-        membershipRevision: 3,
-        offerRevision: 3,
-        projectId: PROJECT_ID,
-        promotedMemberId: 'member-target',
-      },
-      status: this.status,
-    });
-  }
-
-  demoteManager() {
-    this.calls.push('demote');
-    return Promise.resolve({
-      response: {
-        demotedMemberId: 'member-target',
-        managerSetGeneration: 2,
-        membershipRevision: 3,
-        projectId: PROJECT_ID,
-      },
-      status: this.status,
-    });
+  hasMembershipResultTombstone() { return Promise.resolve(false); }
+  storeMembershipResult(actor: string, operation: string, key: string, requestFingerprint: string, response: object) {
+    this.results.set(`${actor}:${operation}:${key}`, { requestFingerprint, response });
+    return Promise.resolve();
   }
 }
 
 function fixture(role: 'manager' | 'member' = 'manager') {
   const persistence = new MemoryAdministration();
   const writeAdmission = {
-    run: async <T>(_principal: unknown, _projectId: unknown, operation: (write: unknown) => Promise<T>) => (
-      operation({
-        memberId: role === 'manager' ? 'member-manager' : 'member-target',
-        role,
-        transact: <U>(transaction: (scope: { membership: ProjectMembershipAdministrationPersistence; appendProjectEvent(): Promise<unknown> }) => Promise<U>) => transaction({
+    run: async <T>(principal: { principalId: string }, _projectId: unknown, operation: (write: unknown) => Promise<T>) => {
+      const memberId = role === 'member' || principal.principalId === 'principal-target' ? 'member-target' : 'member-manager';
+      return operation({
+        memberId,
+        role: memberId === 'member-target' ? persistence.targetRole : 'manager',
+        transact: <U>(transaction: (scope: unknown) => Promise<U>) => transaction({
           appendProjectEvent: () => Promise.resolve({}),
+          findMembership: (id: string) => Promise.resolve({
+            displayName: id, memberId: id, revision: id === 'member-target' ? persistence.targetRevision : 1n,
+            role: id === 'member-target' ? persistence.targetRole : 'manager', status: 'active',
+          }),
+          getProject: () => Promise.resolve({ managerSetGeneration: persistence.managerSetGeneration }),
+          listMemberships: () => Promise.resolve(Array.from({ length: persistence.managerCount }, (_, i) => ({
+            memberId: `member-manager-${String(i)}`, revision: 1n, role: 'manager', status: 'active', displayName: 'Manager',
+          }))),
           membership: persistence,
         }),
-      })
-    ),
+      });
+    },
   };
   return {
     authority: new ProjectMembershipAdministrationAuthority({
-      clock: () => new Date(NOW),
-      offerIdFactory: () => 'offer-one',
-      writeAdmission: writeAdmission as never,
+      clock: () => new Date(NOW), offerIdFactory: () => 'offer-one', writeAdmission: writeAdmission as never,
     }),
     persistence,
   };
@@ -145,7 +125,7 @@ describe('ProjectMembershipAdministrationAuthority', () => {
       purpose: 'manager-promotion',
       targetMemberId: 'member-target',
     })).offer.state, 'offered');
-    assert.equal((await authority.acknowledgeOffer(PRINCIPAL, {
+    assert.equal((await authority.acknowledgeOffer(createVaultCredentialPrincipal({ principalId: 'principal-target' }), {
       expectedOfferRevision: 1,
       idempotencyKey: 'ack-key',
       offerId: 'offer-one',
@@ -166,7 +146,8 @@ describe('ProjectMembershipAdministrationAuthority', () => {
       projectId: PROJECT_ID,
       promotedMemberId: 'member-target',
     });
-    assert.deepEqual(persistence.calls, ['create-offer', 'acknowledgeManagerResponsibility', 'promote']);
+    assert.equal(persistence.targetRole, 'manager');
+    assert.equal(persistence.managerSetGeneration, 2);
   });
 
   it('preserves proven negative settlement without promoting ambiguous errors', async () => {
@@ -176,7 +157,10 @@ describe('ProjectMembershipAdministrationAuthority', () => {
     };
     for (const status of ['permanently-stale', 'stale', 'final-manager'] as const) {
       const { authority, persistence } = fixture();
-      persistence.status = status;
+      persistence.targetRole = 'manager';
+      if (status === 'permanently-stale') persistence.managerSetGeneration = 2;
+      if (status === 'stale') persistence.targetRevision = 1n;
+      if (status === 'final-manager') persistence.managerCount = 1;
       await assert.rejects(authority.demote(PRINCIPAL, request), {
         code: 'authority-not-synchronized',
         name: status === 'permanently-stale' ? 'ProjectMutationRejection' : 'CollabError',
@@ -186,7 +170,7 @@ describe('ProjectMembershipAdministrationAuthority', () => {
 
   it('maps stale state and final-Manager demotion to fixed canonical errors', async () => {
     const stale = fixture();
-    stale.persistence.status = 'stale';
+    stale.persistence.targetRevision = 1n;
     await assert.rejects(stale.authority.demote(PRINCIPAL, {
       expectedManagerSetGeneration: 1,
       expectedTargetMembershipRevision: 2,
@@ -196,7 +180,7 @@ describe('ProjectMembershipAdministrationAuthority', () => {
     }), (error: unknown) => error instanceof CollabError
       && error.code === 'authority-not-synchronized');
     const finalManager = fixture();
-    finalManager.persistence.status = 'final-manager';
+    finalManager.persistence.managerCount = 1;
     await assert.rejects(finalManager.authority.demote(PRINCIPAL, {
       expectedManagerSetGeneration: 1,
       expectedTargetMembershipRevision: 2,

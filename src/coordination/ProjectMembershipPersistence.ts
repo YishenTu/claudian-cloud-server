@@ -7,13 +7,7 @@ import type {
   CollabProjectInvitationState,
   CollabManagerResponsibilityOffer,
   CollabManagerResponsibilityPurpose,
-  CollabRole,
-  ListProjectMembersResponse,
-  CollabManagerResponsibilityOfferResponse,
-  DemoteManagerResponse,
-  PromoteManagerResponse,
   RemoveMemberResponse,
-  RevokeTransferredMembershipClaimResponse,
   CollabTransferredMembershipRedemptionReceipt,
   JoinCloudProjectResponse,
 } from '@claudian-collab/protocol';
@@ -44,20 +38,12 @@ export interface ProjectInvitationRecord {
   readonly terminalAt: CollabIsoTimestamp | null;
 }
 
-export interface CreateProjectInvitationPersistenceInput
-  extends Omit<ProjectInvitationRecord, 'revision' | 'state'> {
+export interface InsertProjectInvitationInput extends Omit<ProjectInvitationRecord, 'revision' | 'state'> {
   readonly envelope: ProtectedInvitationEnvelope;
-  readonly expectedManagerSetGeneration: number;
 }
-
-export interface RevokeProjectInvitationPersistenceInput {
-  readonly actorMemberId: CollabMemberId;
-  readonly expectedInvitationRevision: number;
-  readonly expectedManagerSetGeneration: number;
-  readonly idempotencyKey: CollabIdempotencyKey;
+export interface RevokeInvitationRowInput {
   readonly invitationId: string;
-  readonly projectId: CollabProjectId;
-  readonly requestFingerprint: string;
+  readonly expectedInvitationRevision: number;
   readonly revokedAt: CollabIsoTimestamp;
 }
 
@@ -131,51 +117,19 @@ export interface ProjectJoinPersistence {
     operationId: string,
   ): Promise<ProjectJoinJournal | undefined>;
   getNonterminalJoin(): Promise<ProjectJoinJournal | undefined>;
-  prepareJoin(
-    input: PrepareProjectJoinInput,
-  ): Promise<Readonly<{
-    readonly journal?: ProjectJoinJournal;
-    readonly status:
-      | 'already-bound'
-      | 'conflict'
-      | 'created'
-      | 'invitation-invalid'
-      | 'quota'
-      | 'replayed'
-      | 'revoked';
-  }>>;
+  readPrincipalBindingState(principalId: string): Promise<string | undefined>;
+  insertJoin(input: PrepareProjectJoinInput): Promise<ProjectJoinJournal>;
 }
 
 export interface ProjectInvitationPersistence {
-  createInvitation(
-    input: CreateProjectInvitationPersistenceInput,
-  ): Promise<Readonly<{
-    readonly record?: ProjectInvitationRecord;
-    readonly status:
-      | 'conflict'
-      | 'created'
-      | 'permanently-stale'
-      | 'quota'
-      | 'replayed'
-      | 'replay-expired'
-      | 'stale-generation';
-  }>>;
-  listInvitations(now: CollabIsoTimestamp): Promise<Readonly<{
-    readonly invitations: readonly ProjectInvitationRecord[];
-    readonly managerSetGeneration: number;
-  }>>;
-  revokeInvitation(
-    input: RevokeProjectInvitationPersistenceInput,
-  ): Promise<Readonly<{
-    readonly record?: ProjectInvitationRecord;
-    readonly status:
-      | 'conflict'
-      | 'permanently-stale'
-      | 'replayed'
-      | 'revoked'
-      | 'stale-generation'
-      | 'stale-invitation';
-  }>>;
+  expireInvitations(now: CollabIsoTimestamp): Promise<void>;
+  findSecretReplayTombstone(actorMemberId: CollabMemberId, operation: string, idempotencyKey: CollabIdempotencyKey): Promise<string | undefined>;
+  insertInvitation(input: InsertProjectInvitationInput): Promise<ProjectInvitationRecord>;
+  readInvitationIssuance(actorMemberId: CollabMemberId, idempotencyKey: CollabIdempotencyKey): Promise<ProjectInvitationRecord | undefined>;
+  readInvitationRecord(invitationId: string): Promise<ProjectInvitationRecord | undefined>;
+  readInvitations(): Promise<readonly ProjectInvitationRecord[]>;
+  readMembershipReservationCount(): Promise<bigint>;
+  revokeInvitationRow(input: RevokeInvitationRowInput): Promise<ProjectInvitationRecord>;
 }
 
 export interface ProjectMembershipExpiryPersistence {
@@ -189,92 +143,59 @@ export interface ProjectCloudMembershipRelinquishmentPersistence {
   }>): Promise<'advanced' | 'replayed'>;
 }
 
-export type MembershipAdministrationStatus =
-  | 'authorization-denied'
-  | 'conflict'
-  | 'created'
-  | 'final-manager'
-  | 'permanently-stale'
-  | 'replayed'
-  | 'stale';
-
+export interface InsertResponsibilityOfferInput {
+  readonly actorMemberId: CollabMemberId;
+  readonly targetMemberId: CollabMemberId;
+  readonly expectedManagerSetGeneration: number;
+  readonly expectedTargetMembershipRevision: number;
+  readonly expiresAt: CollabIsoTimestamp;
+  readonly offeredAt: CollabIsoTimestamp;
+  readonly idempotencyKey: CollabIdempotencyKey;
+  readonly offerId: string;
+  readonly purpose: CollabManagerResponsibilityPurpose;
+  readonly requestFingerprint: string;
+}
+export interface TransitionResponsibilityOfferInput {
+  readonly expectedOfferRevision: number;
+  readonly nextState: 'acknowledged' | 'cancelled' | 'declined';
+  readonly offerId: string;
+  readonly transitionedAt: CollabIsoTimestamp;
+}
+export interface ManagerRoleChangeInput {
+  readonly changedAt: CollabIsoTimestamp;
+  readonly consumeOffer?: Readonly<{ readonly offerId: string; readonly revision: number }>;
+  readonly expectedManagerSetGeneration: number;
+  readonly expectedMembershipRevision: number;
+  readonly memberId: CollabMemberId;
+  readonly role: 'manager' | 'member';
+}
+export interface MemberAdministrationFacts {
+  readonly bindingState: string;
+  readonly claimExpiresAt: CollabIsoTimestamp | null;
+  readonly claimState: string | null;
+  readonly displayName: string;
+  readonly memberId: CollabMemberId;
+  readonly overrideClaimGeneration: number | null;
+  readonly overrideState: string | null;
+  readonly revision: number;
+  readonly role: string;
+}
 export interface ProjectMembershipAdministrationPersistence {
-  createManagerResponsibilityOffer(input: Readonly<{
-    readonly actorMemberId: CollabMemberId;
-    readonly expectedManagerSetGeneration: number;
-    readonly expectedTargetMembershipRevision: number;
-    readonly expiresAt: CollabIsoTimestamp;
-    readonly idempotencyKey: CollabIdempotencyKey;
-    readonly offerId: string;
-    readonly offeredAt: CollabIsoTimestamp;
-    readonly projectId: CollabProjectId;
-    readonly purpose: CollabManagerResponsibilityPurpose;
-    readonly requestFingerprint: string;
-    readonly targetMemberId: CollabMemberId;
-  }>): Promise<Readonly<{
-    readonly response?: CollabManagerResponsibilityOfferResponse;
-    readonly status: MembershipAdministrationStatus;
-  }>>;
-  demoteManager(input: Readonly<{
-    readonly actorMemberId: CollabMemberId;
-    readonly demotedAt: CollabIsoTimestamp;
-    readonly expectedManagerSetGeneration: number;
-    readonly expectedTargetMembershipRevision: number;
-    readonly idempotencyKey: CollabIdempotencyKey;
-    readonly projectId: CollabProjectId;
-    readonly requestFingerprint: string;
-    readonly targetMemberId: CollabMemberId;
-  }>): Promise<Readonly<{
-    readonly response?: DemoteManagerResponse;
-    readonly status: MembershipAdministrationStatus;
-  }>>;
-  getManagerResponsibilityOffer(input: Readonly<{
-    readonly actorMemberId: CollabMemberId;
-    readonly actorRole: CollabRole;
-    readonly now: CollabIsoTimestamp;
-    readonly offerId: string;
-  }>): Promise<CollabManagerResponsibilityOffer | undefined>;
-  listCurrentManagerResponsibilityOffers(input: Readonly<{
-    readonly actorMemberId: CollabMemberId;
-    readonly actorRole: CollabRole;
-    readonly now: CollabIsoTimestamp;
-  }>): Promise<readonly CollabManagerResponsibilityOffer[]>;
-  listProjectMembers(input: Readonly<{
-    readonly actorRole: CollabRole;
-    readonly now: CollabIsoTimestamp;
-  }>): Promise<ListProjectMembersResponse>;
-  promoteManager(input: Readonly<{
-    readonly actorMemberId: CollabMemberId;
-    readonly expectedManagerSetGeneration: number;
-    readonly expectedOfferRevision: number;
-    readonly expectedTargetMembershipRevision: number;
-    readonly idempotencyKey: CollabIdempotencyKey;
-    readonly managerResponsibilityOfferId: string;
-    readonly projectId: CollabProjectId;
-    readonly promotedAt: CollabIsoTimestamp;
-    readonly requestFingerprint: string;
-    readonly targetMemberId: CollabMemberId;
-  }>): Promise<Readonly<{
-    readonly response?: PromoteManagerResponse;
-    readonly status: MembershipAdministrationStatus;
-  }>>;
-  transitionManagerResponsibilityOffer(input: Readonly<{
-    readonly actorMemberId: CollabMemberId;
-    readonly actorRole: CollabRole;
-    readonly expectedOfferRevision: number;
-    readonly idempotencyKey: CollabIdempotencyKey;
-    readonly nextState: 'acknowledged' | 'cancelled' | 'declined';
-    readonly offerId: string;
-    readonly operation:
-      | 'acknowledgeManagerResponsibility'
-      | 'cancelManagerResponsibilityOffer'
-      | 'declineManagerResponsibility';
-    readonly requestFingerprint: string;
-    readonly transitionedAt: CollabIsoTimestamp;
-  }>): Promise<Readonly<{
-    readonly response?: CollabManagerResponsibilityOfferResponse;
-    readonly status: MembershipAdministrationStatus;
-  }>>;
+  countActiveManagers(): Promise<bigint>;
+  applyManagerRoleChange(input: ManagerRoleChangeInput): Promise<void>;
+  expireClaimOverrides(now: CollabIsoTimestamp): Promise<void>;
+  expireResponsibilityOffers(now: CollabIsoTimestamp): Promise<void>;
+  findConflictingResponsibilityOffer(input: Readonly<{ readonly actorMemberId: CollabMemberId; readonly targetMemberId: CollabMemberId }>): Promise<string | undefined>;
+  insertResponsibilityOffer(input: InsertResponsibilityOfferInput): Promise<CollabManagerResponsibilityOffer>;
+  readCurrentResponsibilityOffers(): Promise<readonly CollabManagerResponsibilityOffer[]>;
+  readMemberAdministrationFacts(): Promise<readonly MemberAdministrationFacts[]>;
+  readResponsibilityOffer(offerId: string): Promise<CollabManagerResponsibilityOffer | undefined>;
+  transitionResponsibilityOffer(input: TransitionResponsibilityOfferInput): Promise<CollabManagerResponsibilityOffer>;
+}
+export interface ProjectMembershipResultPersistence {
+  findMembershipResult(actorMemberId: CollabMemberId, operation: string, idempotencyKey: CollabIdempotencyKey): Promise<Readonly<{ readonly requestFingerprint: string; readonly response: unknown }> | undefined>;
+  hasMembershipResultTombstone(actorMemberId: CollabMemberId, operation: string, idempotencyKey: CollabIdempotencyKey): Promise<boolean>;
+  storeMembershipResult(actorMemberId: CollabMemberId, operation: string, idempotencyKey: CollabIdempotencyKey, requestFingerprint: string, response: object, createdAt: CollabIsoTimestamp): Promise<void>;
 }
 
 export interface ProtectedClaimOverrideEnvelope
@@ -330,70 +251,54 @@ export interface EffectiveTransferredMembershipClaim {
   readonly updatedAt: CollabIsoTimestamp;
 }
 
+export type InsertClaimOverrideInput = Readonly<{
+    readonly managerMemberId: CollabMemberId;
+    readonly claimGeneration: number;
+    readonly claimSha256: string;
+    readonly createdAt: CollabIsoTimestamp;
+    readonly envelope: ProtectedClaimOverrideEnvelope;
+    readonly expectedClaimGeneration: number;
+    readonly expiresAt: CollabIsoTimestamp;
+    readonly idempotencyKey: CollabIdempotencyKey;
+    readonly memberId: CollabMemberId;
+    readonly requestFingerprint: string;
+    readonly secretReplayExpiresAt: CollabIsoTimestamp;
+    readonly supersededClaimSha256: string;
+    readonly transferId: string;
+  }>;
+export interface ImportedTransferClaimRecord {
+  readonly claimSha256: string;
+  readonly expiresAt: CollabIsoTimestamp;
+  readonly state: string;
+  readonly transferId: string;
+}
+export interface TransferredMembershipClaimRecord extends Omit<EffectiveTransferredMembershipClaim, 'state'> {
+  readonly state: string;
+}
+export interface RevokeClaimRowInput {
+  readonly claimGeneration: number;
+  readonly claimSha256: string;
+  readonly memberId: CollabMemberId;
+  readonly revokedAt: CollabIsoTimestamp;
+  readonly transferId: string;
+}
 export interface ProjectTransferredMembershipClaimAdministrationPersistence {
-  getImportedMembershipClaimFacts(
-    memberId: CollabMemberId,
-    now: CollabIsoTimestamp,
-  ): Promise<ImportedMembershipClaimFacts | undefined>;
-  redeemTransferredMembershipClaimOverride(input: Readonly<{
+  hasLiveMemberBinding(memberId: CollabMemberId): Promise<boolean>;
+  insertClaimOverride(input: InsertClaimOverrideInput): Promise<TransferredMembershipClaimOverrideRecord>;
+  readClaimOverrideIssuance(actorMemberId: CollabMemberId, idempotencyKey: CollabIdempotencyKey): Promise<TransferredMembershipClaimOverrideRecord | undefined>;
+  readClaimOverride(transferId: string, memberId: CollabMemberId, claimGeneration: number): Promise<TransferredMembershipClaimOverrideRecord | undefined>;
+  readHighestClaimOverride(transferId: string, memberId: CollabMemberId): Promise<TransferredMembershipClaimOverrideRecord | undefined>;
+  readCurrentTransferClaim(memberId: CollabMemberId): Promise<ImportedTransferClaimRecord | undefined>;
+  readTransferredClaimByDigest(transferId: string, claimSha256: string): Promise<TransferredMembershipClaimRecord | undefined>;
+  revokeClaimRow(input: RevokeClaimRowInput): Promise<void>;
+  scrubClaimOverrideEnvelopes(now: CollabIsoTimestamp): Promise<void>;
+  recordClaimOverrideRedemption(input: Readonly<{
     readonly claim: EffectiveTransferredMembershipClaim;
     readonly operationIntentId: string;
     readonly receipt: CollabTransferredMembershipRedemptionReceipt;
     readonly targetPrincipalId: string;
     readonly updatedAt: CollabIsoTimestamp;
   }>): Promise<CollabTransferredMembershipRedemptionReceipt>;
-  reissueTransferredMembershipClaim(input: Readonly<{
-    readonly actorMemberId: CollabMemberId;
-    readonly claimGeneration: number;
-    readonly claimSha256: string;
-    readonly createdAt: CollabIsoTimestamp;
-    readonly envelope: ProtectedClaimOverrideEnvelope;
-    readonly expectedClaimGeneration: number;
-    readonly expectedManagerSetGeneration: number;
-    readonly expectedMembershipRevision: number;
-    readonly expiresAt: CollabIsoTimestamp;
-    readonly idempotencyKey: CollabIdempotencyKey;
-    readonly memberId: CollabMemberId;
-    readonly projectId: CollabProjectId;
-    readonly requestFingerprint: string;
-    readonly secretReplayExpiresAt: CollabIsoTimestamp;
-    readonly transferId: string;
-  }>): Promise<Readonly<{
-    readonly record?: TransferredMembershipClaimOverrideRecord;
-    readonly status:
-      | 'authorization-denied'
-      | 'conflict'
-      | 'created'
-      | 'permanently-stale'
-      | 'replayed'
-      | 'replay-expired'
-      | 'stale';
-  }>>;
-  resolveEffectiveTransferredMembershipClaim(
-    transferId: string,
-    claimSha256: string,
-    now: CollabIsoTimestamp,
-  ): Promise<EffectiveTransferredMembershipClaim | undefined>;
-  revokeTransferredMembershipClaim(input: Readonly<{
-    readonly actorMemberId: CollabMemberId;
-    readonly expectedClaimGeneration: number;
-    readonly expectedManagerSetGeneration: number;
-    readonly expectedMembershipRevision: number;
-    readonly idempotencyKey: CollabIdempotencyKey;
-    readonly memberId: CollabMemberId;
-    readonly projectId: CollabProjectId;
-    readonly requestFingerprint: string;
-    readonly revokedAt: CollabIsoTimestamp;
-  }>): Promise<Readonly<{
-    readonly response?: RevokeTransferredMembershipClaimResponse;
-    readonly status:
-      | 'authorization-denied'
-      | 'conflict'
-      | 'created'
-      | 'permanently-stale'
-      | 'replayed'
-      | 'stale';
-  }>>;
 }
 
 export type ProjectMemberRemovalPhase =
@@ -441,27 +346,15 @@ export interface ProjectMemberRemovalPersistence {
   }>): Promise<RemoveMemberResponse>;
   getNonterminalRemoval(): Promise<ProjectMemberRemovalJournal | undefined>;
   getRemoval(operationId: string): Promise<ProjectMemberRemovalJournal | undefined>;
-  prepareRemoval(input: Omit<
+  insertRemoval(input: Omit<
     ProjectMemberRemovalJournal,
     'phase' | 'response' | 'updatedAt'
-  >): Promise<Readonly<{
-    readonly journal?: ProjectMemberRemovalJournal;
-    readonly status:
-      | 'authorization-denied'
-      | 'conflict'
-      | 'created'
-      | 'final-manager'
-      | 'permanently-stale'
-      | 'replayed'
-      | 'stale';
-  }>>;
-  settleRemoval(input: Readonly<{
+  >, authorityGeneration: number): Promise<ProjectMemberRemovalJournal>;
+  recordRemovalSettlement(input: Readonly<{
     readonly operationId: string;
-    readonly removedAt: CollabIsoTimestamp;
-  }>): Promise<Readonly<{
-    readonly response?: RemoveMemberResponse;
-    readonly status: 'replayed' | 'settled' | 'stale';
-  }>>;
+    readonly response: RemoveMemberResponse;
+  }>): Promise<void>;
+
 }
 
 export interface ProjectMembershipPersistence
@@ -469,6 +362,38 @@ export interface ProjectMembershipPersistence
   ProjectCloudMembershipRelinquishmentPersistence,
   ProjectJoinPersistence,
   ProjectMembershipAdministrationPersistence,
+  ProjectMembershipResultPersistence,
   ProjectMembershipExpiryPersistence,
   ProjectMemberRemovalPersistence,
+  ProjectMemberExitPersistence,
   ProjectTransferredMembershipClaimAdministrationPersistence {}
+
+export interface MemberExitFacts {
+  readonly activeManagerCount: bigint;
+  readonly leftAt: CollabIsoTimestamp | null;
+  readonly managerSetGeneration: number;
+  readonly openRequestId: string | null;
+  readonly revision: bigint;
+  readonly role: 'manager' | 'member';
+  readonly status: 'active' | 'left' | 'pending' | 'revoked';
+}
+
+export interface ApplyMemberExitInput {
+  readonly advanceManagerSet: boolean;
+  readonly exitedAt: CollabIsoTimestamp;
+  readonly expectedManagerSetGeneration: number;
+  readonly expectedMembershipRevision: bigint;
+  readonly memberId: CollabMemberId;
+  readonly status: 'left' | 'revoked';
+  readonly successor?: Readonly<{
+    readonly memberId: CollabMemberId;
+    readonly membershipRevision: number;
+    readonly offerId: string;
+    readonly offerRevision: number;
+  }>;
+}
+
+export interface ProjectMemberExitPersistence {
+  applyMemberExit(input: ApplyMemberExitInput): Promise<void>;
+  readMemberExitFacts(memberId: CollabMemberId): Promise<MemberExitFacts | undefined>;
+}

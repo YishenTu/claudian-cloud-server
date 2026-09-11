@@ -1,3 +1,4 @@
+import { ProjectMembershipAdmission } from './ProjectMembershipAdmission.js';
 import {
   createHash,
   randomUUID,
@@ -227,7 +228,7 @@ export class CloudProjectJoinCoordinator {
           || project.expectedMainOid.length === 0
         ) throw domainError('authorization-denied', 'join-not-authorized');
         const memberId = this.#memberIdFactory();
-        const result = await lease.withProjectScope(scope => scope.membership.prepareJoin({
+        const result = await lease.withProjectScope(scope => new ProjectMembershipAdmission(scope).prepareJoin({
           displayName: request.displayName,
           expectedMainOid: project.expectedMainOid,
           idempotencyKey: request.idempotencyKey,

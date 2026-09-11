@@ -1,3 +1,4 @@
+import { ProjectMembershipSettlement } from './ProjectMembershipSettlement.js';
 import { createHash } from 'node:crypto';
 
 import {
@@ -187,26 +188,14 @@ implements ProjectRecoveryPort, ProjectLifecycleRecoveryOwner {
           );
         }
         const facts = await lease.withProjectScope(async scope => {
-          const actor = await scope.findMembership(binding.memberId);
-          const target = await scope.findMembership(request.targetMemberId);
-          const placement = await scope.getRepositoryPlacement();
-          const project = await scope.getProject();
-          if (actor?.status !== 'active' || actor.role !== 'manager') {
-            return mapStatus('authorization-denied');
-          }
-          if (
-            binding.memberId !== request.targetMemberId
-            && target !== undefined
-            && project !== undefined
-            && (project.managerSetGeneration > request.expectedManagerSetGeneration
-              || target.revision > BigInt(request.expectedTargetMembershipRevision))
-          ) return mapStatus('permanently-stale');
-          if (
-            target?.status !== 'active'
-            || placement?.active !== true
-            || project?.serviceState !== 'active'
-          ) return mapStatus('stale');
-          return Object.freeze({ placement });
+          const admitted = await new ProjectMembershipSettlement(scope, request.projectId).admitRemoval({
+            actorMemberId: binding.memberId,
+            expectedManagerSetGeneration: request.expectedManagerSetGeneration,
+            expectedTargetMembershipRevision: request.expectedTargetMembershipRevision,
+            targetMemberId: request.targetMemberId,
+          });
+          if (admitted.status !== 'accepted') return mapStatus(admitted.status);
+          return admitted;
         }, options);
         const expectedPersonalRefOid = await this.#repository.readExactPersonalRef(
           reservation,
@@ -218,7 +207,7 @@ implements ProjectRecoveryPort, ProjectLifecycleRecoveryOwner {
         );
         const preparedAt = canonicalNow(this.#clock);
         const result = await lease.withProjectScope(scope => (
-          scope.membership.prepareRemoval({
+          new ProjectMembershipSettlement(scope, request.projectId).prepareRemoval({
             actorMemberId: binding.memberId,
             expectedManagerSetGeneration: request.expectedManagerSetGeneration,
             expectedPersonalRefOid,
@@ -360,7 +349,7 @@ implements ProjectRecoveryPort, ProjectLifecycleRecoveryOwner {
         ...(signal === undefined ? {} : { signal }),
       });
       const settled = await lease.withProjectScope<RemoveMemberResponse>(async scope => {
-        const result = await scope.membership.settleRemoval({
+        const result = await new ProjectMembershipSettlement(scope, journal.projectId).settleRemoval({
           operationId: journal.operationId,
           removedAt: canonicalNow(this.#clock, journal.updatedAt),
         });
