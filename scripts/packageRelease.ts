@@ -23,7 +23,7 @@ async function packageRelease() {
     await mkdir(join(bundle, 'deploy'), { recursive: true });
     for (const path of [
       'README.md', 'LICENSE', '.env.example',
-      'deploy/compose.yaml', 'deploy/bootstrap-postgres.sh',
+      'deploy/README.md', 'deploy/compose.yaml', 'deploy/bootstrap-postgres.sh',
       'deploy/configure.sh', 'deploy/initializeConfig.ts',
     ]) {
       await copyFile(join(root, path), join(bundle, path));
