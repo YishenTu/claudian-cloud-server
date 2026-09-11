@@ -29,6 +29,7 @@ import type {
 } from '../../src/coordination/ProjectCoordination.js';
 import {
   CloudToLanTransferCoordinator,
+  type CloudToLanTransferCoordinatorOptions,
 } from '../../src/project-authority/lifecycle/cloud-to-lan/CloudToLanTransferCoordinator.js';
 import { XChaCha20ClaimCustody } from '../../src/project-authority/lifecycle/cloud-to-lan/XChaCha20ClaimCustody.js';
 import type { PostgresTestDatabase } from './PostgresTestDatabase.js';
@@ -188,7 +189,7 @@ class FaultInjectingCoordination {
       handoffToDevelopmentBootstrapUpload: attemptId => (
         lease.handoffToDevelopmentBootstrapUpload(attemptId)
       ),
-      withProjectScope: operation => lease.withProjectScope(scope => {
+      withProjectScope: (operation, options) => lease.withProjectScope(scope => {
         const portability = new Proxy(scope.portability, {
           get: (target, property): unknown => {
             if (property === 'advanceLifecycleJournal') {
@@ -220,7 +221,7 @@ class FaultInjectingCoordination {
           },
         });
         return operation(projectScope);
-      }),
+      }, options),
     };
   }
 }
@@ -306,9 +307,12 @@ export async function seedCloudToLanProject(
 }
 
 export function cloudToLanCoordinator(input: Readonly<{
+  readonly checkpoint?: CloudToLanTransferCoordinatorOptions['checkpoint'];
   readonly durableRoot?: string;
   readonly fault?: CloudToLanJournalFault;
   readonly projectId: string;
+  readonly repository?: CloudToLanTransferCoordinatorOptions['repository'];
+  readonly sourceFence?: CloudToLanTransferCoordinatorOptions['sourceFence'];
   readonly store: PostgresCoordination;
 }>): CloudToLanTransferCoordinator {
   let tick = Date.parse(CLOUD_TO_LAN_CREATED_AT) - 1_000;
@@ -528,7 +532,14 @@ export function cloudToLanCoordinator(input: Readonly<{
     },
   };
   return new CloudToLanTransferCoordinator({
-    checkpoint,
+    checkpoint: input.checkpoint ?? {
+      ...checkpoint,
+      reserve: projectId => Promise.resolve({
+        projectId, maximumCoordinationBytes: 1048576,
+        repositoryReservation: { projectId, close: () => Promise.resolve() },
+        close: () => Promise.resolve(),
+      }),
+    },
     clock: () => new Date(tick += 1_000),
     coordination,
     custody: new XChaCha20ClaimCustody({
@@ -556,7 +567,7 @@ export function cloudToLanCoordinator(input: Readonly<{
       })),
       sign: () => Promise.resolve(SIGNATURE),
     },
-    repository: {
+    repository: input.repository ?? {
       reserveExactRepositoryOperation: projectId => Promise.resolve(Object.freeze({
         async close() {},
         projectId,
@@ -567,7 +578,7 @@ export function cloudToLanCoordinator(input: Readonly<{
         }
       },
     },
-    sourceFence,
+    sourceFence: input.sourceFence ?? sourceFence,
     targetTrust,
   });
 }

@@ -489,6 +489,11 @@ class Harness {
   constructor(singleMember = false) {
     this.state = new MemoryState(singleMember);
     this.checkpoint = {
+      reserve: async projectId => ({
+        projectId, maximumCoordinationBytes: 1048576,
+        repositoryReservation: { projectId, close: async () => undefined },
+        close: async () => undefined,
+      }),
       capture: async input => {
         if (this.captureFailures > 0) {
           this.captureFailures -= 1;
@@ -1134,14 +1139,14 @@ describe('CloudToLanTransferCoordinator', () => {
 
     coordinator = harness.coordinator();
     const relinquishedJournal = harness.state.journal as ProjectLifecycleJournalRecord;
-    assert.equal(
-      await coordinator.reserveRecovery(PROJECT_ID, relinquishedJournal),
-      undefined,
-    );
+    const checkpointReservation = await coordinator.reserveRecovery(PROJECT_ID, relinquishedJournal);
+    assert.ok(checkpointReservation);
     assert.equal(await coordinator.recover({
       journal: relinquishedJournal,
       lease: new MemoryLease(harness.state),
+      repositoryReservation: checkpointReservation,
     }), 'waiting-for-external-proof');
+    await checkpointReservation.close();
     assert.equal(harness.state.journal?.phase, 'checkpoint-captured');
 
     harness.relinquishFailures = 1;

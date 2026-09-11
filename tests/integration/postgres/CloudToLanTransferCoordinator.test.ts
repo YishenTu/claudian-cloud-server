@@ -187,6 +187,11 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
       let tick = Date.parse(T0) - 1_000;
       const coordinator = new CloudToLanTransferCoordinator({
         checkpoint: {
+          reserve: projectId => Promise.resolve({
+            projectId, maximumCoordinationBytes: 1048576,
+            repositoryReservation: { projectId, close: () => Promise.resolve() },
+            close: () => Promise.resolve(),
+          }),
           capture: input => Promise.resolve(Object.freeze({
             checkpointSha256: CHECKPOINT_SHA,
             expiresAt: input.expiresAt,
@@ -654,6 +659,11 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
       let tick = Date.parse(T0) - 1_000;
       const coordinator = new CloudToLanTransferCoordinator({
         checkpoint: {
+          reserve: projectId => Promise.resolve({
+            projectId, maximumCoordinationBytes: 1048576,
+            repositoryReservation: { projectId, close: () => Promise.resolve() },
+            close: () => Promise.resolve(),
+          }),
           capture: input => Promise.resolve(Object.freeze({
             checkpointSha256: CHECKPOINT_SHA,
             expiresAt: input.expiresAt,

@@ -335,16 +335,25 @@ describe('Cloud-to-LAN cross-store recovery', () => {
             cloudToLan: recoveryCoordinator,
             repository: {} as never,
           });
+          const observed = await store.withProjectScope(projectId, scope => (
+            scope.portability.getLifecycleJournal(begun.transferId)
+          ));
+          assert.ok(observed);
+          const reservation = await maintenance.owner.reserveRecovery(projectId, observed);
           const lease = await store.acquireProjectLease(projectId);
           try {
             const journal = await lease.withProjectScope(scope => (
               scope.portability.getLifecycleJournal(begun.transferId)
             ));
             assert.ok(journal);
-            assert.equal(await maintenance.owner.recover({ journal, lease }),
-              'waiting-for-external-proof');
+            assert.equal(await maintenance.owner.recover({
+              journal,
+              lease,
+              ...(reservation === undefined ? {} : { repositoryReservation: reservation }),
+            }), 'waiting-for-external-proof');
           } finally {
             await lease.close();
+            await reservation?.close();
             await maintenance.close();
           }
           assert.equal(

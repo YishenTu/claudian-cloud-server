@@ -53,6 +53,7 @@ import type {
   ExactRepositoryOperationReservation,
   ExactRepositoryPresencePort,
 } from '../../../repositories/RepositoryCheckpointAuthority.js';
+import type { OutboundProjectCheckpointReservation } from '../../checkpoint/ProjectCheckpointCoordinator.js';
 import type {
   ProjectLifecycleRecoveryOutcome,
   ProjectLifecycleRecoveryOwner,
@@ -107,6 +108,7 @@ export interface CapturedCloudToLanCheckpoint {
 }
 
 export interface CloudToLanCheckpointCapturePort {
+  reserve(projectId: CollabProjectId): Promise<OutboundProjectCheckpointReservation>;
   capture(input: Readonly<{
     readonly expiresAt: CollabIsoTimestamp;
     readonly lease: PinnedProjectLease;
@@ -114,7 +116,7 @@ export interface CloudToLanCheckpointCapturePort {
     readonly projectId: CollabProjectId;
     readonly sourceAuthority: CollabCheckpointAuthority & { readonly kind: 'cloud' };
     readonly targetAuthority: CollabCheckpointAuthority & { readonly kind: 'lan' };
-  }>): Promise<CapturedCloudToLanCheckpoint>;
+  }>, reservation: OutboundProjectCheckpointReservation): Promise<CapturedCloudToLanCheckpoint>;
   discard(input: CapturedCloudToLanCheckpoint): Promise<'removed' | 'replayed'>;
 }
 
@@ -475,6 +477,24 @@ function exactRepositoryReservation(
     && reservation.projectId === projectId;
 }
 
+function outboundCheckpointReservation(
+  reservation: ProjectLifecycleRecoveryReservation | undefined,
+  projectId: CollabProjectId,
+): reservation is OutboundProjectCheckpointReservation {
+  return exactRepositoryReservation(reservation, projectId)
+    && 'maximumCoordinationBytes' in reservation
+    && typeof reservation.maximumCoordinationBytes === 'number'
+    && Number.isSafeInteger(reservation.maximumCoordinationBytes)
+    && reservation.maximumCoordinationBytes > 0
+    && 'repositoryReservation' in reservation
+    && typeof reservation.repositoryReservation === 'object'
+    && reservation.repositoryReservation !== null
+    && 'close' in reservation.repositoryReservation
+    && typeof reservation.repositoryReservation.close === 'function'
+    && 'projectId' in reservation.repositoryReservation
+    && reservation.repositoryReservation.projectId === projectId;
+}
+
 function sameAuthority(
   left: CollabCheckpointAuthority,
   right: CollabCheckpointAuthority,
@@ -680,62 +700,80 @@ implements ProjectLifecycleRecoveryOwner {
     input: AcceptCloudToLanTargetInput,
   ): Promise<CollabAuthorityTransferStatus> {
     const request = decodeRequest('acceptCloudToLanTransferTarget', input.request);
-    return this.#run(request.projectId, async lease => {
-      let exact = await this.#exactTransfer(lease, request.transferId);
-      if (exact.recovery.targetHostMemberId !== request.targetHostMemberId) {
-        return fail('state-conflict');
-      }
-      await this.#authorizeTarget(lease, exact, input.principalId);
-      const verified = await this.#targetTrust.verifyAcceptance({
-        principalId: input.principalId,
-        request,
-        sourceAuthority: exact.recovery.sourceAuthority as CollabCheckpointAuthority & {
-          readonly kind: 'cloud';
-        },
-        targetAuthority: exact.recovery.targetAuthority as CollabCheckpointAuthority & {
-          readonly kind: 'lan';
-        },
-        targetUrl: exact.recovery.targetUrl,
+    return this.#track(async () => {
+      const needsCapture = await this.#run(request.projectId, async lease => {
+        const exact = await this.#exactTransfer(lease, request.transferId);
+        if (exact.recovery.targetHostMemberId !== request.targetHostMemberId) {
+          return fail('state-conflict');
+        }
+        await this.#authorizeTarget(lease, exact, input.principalId);
+        return exact.journal.phase === 'collecting-readiness'
+          || exact.journal.phase === 'cloud-quiesced';
       });
-      if (!exactTarget(verified, {
-        principalId: input.principalId,
-        projectId: request.projectId,
-        targetAuthority: exact.recovery.targetAuthority,
-        targetHostMemberId: request.targetHostMemberId,
-        targetUrl: exact.recovery.targetUrl,
-        transferId: request.transferId,
-      })) return fail('authorization-denied');
-      const evidence = Object.freeze({
-        acceptanceIntentId: request.idempotencyKey,
-        principalId: input.principalId,
-        proof: request.targetProof,
-        receiptKeyId: verified.receiptKeyId,
-        receiptPublicKey: verified.receiptPublicKey,
-        schemaVersion: 1 as const,
-      });
-      if (exact.evidence === undefined) {
-        const updatedAt = timestamp(this.#clock, exact.recovery.updatedAt);
-        await lease.withProjectScope(async scope => {
-          await scope.portability.advanceAuthorityTransferRecoveryEvidence({
-            expectedUpdatedAt: exact.recovery.updatedAt,
-            targetProof: encodeTargetEvidence(evidence),
-            transferId: request.transferId,
-            updatedAt,
+      const reservation = needsCapture
+        ? await this.#checkpoint.reserve(request.projectId)
+        : undefined;
+      try {
+        return await this.#run(request.projectId, async lease => {
+          let exact = await this.#exactTransfer(lease, request.transferId);
+          if (exact.recovery.targetHostMemberId !== request.targetHostMemberId) {
+            return fail('state-conflict');
+          }
+          await this.#authorizeTarget(lease, exact, input.principalId);
+          const verified = await this.#targetTrust.verifyAcceptance({
+            principalId: input.principalId,
+            request,
+            sourceAuthority: exact.recovery.sourceAuthority as CollabCheckpointAuthority & {
+              readonly kind: 'cloud';
+            },
+            targetAuthority: exact.recovery.targetAuthority as CollabCheckpointAuthority & {
+              readonly kind: 'lan';
+            },
+            targetUrl: exact.recovery.targetUrl,
           });
-          await scope.portability.putTransferReceiptKey({
-            createdAt: updatedAt,
-            publicKey: evidence.receiptPublicKey,
-            receiptKeyId: evidence.receiptKeyId,
+          if (!exactTarget(verified, {
+            principalId: input.principalId,
+            projectId: request.projectId,
+            targetAuthority: exact.recovery.targetAuthority,
+            targetHostMemberId: request.targetHostMemberId,
+            targetUrl: exact.recovery.targetUrl,
             transferId: request.transferId,
+          })) return fail('authorization-denied');
+          const evidence = Object.freeze({
+            acceptanceIntentId: request.idempotencyKey,
+            principalId: input.principalId,
+            proof: request.targetProof,
+            receiptKeyId: verified.receiptKeyId,
+            receiptPublicKey: verified.receiptPublicKey,
+            schemaVersion: 1 as const,
           });
+          if (exact.evidence === undefined) {
+            const updatedAt = timestamp(this.#clock, exact.recovery.updatedAt);
+            await lease.withProjectScope(async scope => {
+              await scope.portability.advanceAuthorityTransferRecoveryEvidence({
+                expectedUpdatedAt: exact.recovery.updatedAt,
+                targetProof: encodeTargetEvidence(evidence),
+                transferId: request.transferId,
+                updatedAt,
+              });
+              await scope.portability.putTransferReceiptKey({
+                createdAt: updatedAt,
+                publicKey: evidence.receiptPublicKey,
+                receiptKeyId: evidence.receiptKeyId,
+                transferId: request.transferId,
+              });
+            });
+          } else if (!isDeepStrictEqual(exact.evidence, evidence)) {
+            return fail('state-conflict');
+          }
+          exact = await this.#exactTransfer(lease, request.transferId);
+          await this.#captureIfNeeded(lease, exact, reservation);
+          return this.#requireStatus(lease, request.transferId);
         });
-      } else if (!isDeepStrictEqual(exact.evidence, evidence)) {
-        return fail('state-conflict');
+      } finally {
+        await reservation?.close();
       }
-      exact = await this.#exactTransfer(lease, request.transferId);
-      await this.#captureIfNeeded(lease, exact);
-      return this.#requireStatus(lease, request.transferId);
-    });
+    }).catch((error: unknown) => dependency(error));
   }
 
   reportTargetStaged(
@@ -1272,7 +1310,7 @@ implements ProjectLifecycleRecoveryOwner {
   reserveRecovery(
     projectId: CollabProjectId,
     journal: ProjectLifecycleJournalRecord,
-  ): Promise<ExactRepositoryOperationReservation | undefined> {
+  ): Promise<OutboundProjectCheckpointReservation | ExactRepositoryOperationReservation | undefined> {
     if (this.#closed) {
       return Promise.reject(new CloudToLanTransferCoordinatorError('closed'));
     }
@@ -1285,10 +1323,15 @@ implements ProjectLifecycleRecoveryOwner {
         new CloudToLanTransferCoordinatorError('state-conflict'),
       );
     }
-    if (journal.state !== 'active' || journal.phase !== 'lan-activated') {
+    if (journal.state !== 'active') {
       return Promise.resolve(undefined);
     }
-    return this.#repository.reserveExactRepositoryOperation(projectId);
+    if (journal.phase === 'collecting-readiness' || journal.phase === 'cloud-quiesced') {
+      return this.#checkpoint.reserve(projectId);
+    }
+    return journal.phase === 'lan-activated'
+      ? this.#repository.reserveExactRepositoryOperation(projectId)
+      : Promise.resolve(undefined);
   }
 
   close(): Promise<void> {
@@ -1302,7 +1345,7 @@ implements ProjectLifecycleRecoveryOwner {
   async #recoverExact(
     lease: PinnedProjectLease,
     initial: ExactTransfer,
-    repositoryReservation: ExactRepositoryOperationReservation | undefined,
+    reservation: ProjectLifecycleRecoveryReservation | undefined,
   ): Promise<ProjectLifecycleRecoveryOutcome> {
     let exact = initial;
     if (exact.journal.state === 'completed' || exact.journal.state === 'cancelled') {
@@ -1363,11 +1406,11 @@ implements ProjectLifecycleRecoveryOwner {
     }
     if (exact.journal.phase === 'collecting-readiness') {
       if (exact.evidence === undefined) return 'waiting-for-external-proof';
-      await this.#captureIfNeeded(lease, exact);
+      await this.#captureIfNeeded(lease, exact, reservation);
       exact = await this.#exactTransfer(lease, exact.journal.operationId);
     }
     if (exact.journal.phase === 'cloud-quiesced') {
-      await this.#captureIfNeeded(lease, exact);
+      await this.#captureIfNeeded(lease, exact, reservation);
       exact = await this.#exactTransfer(lease, exact.journal.operationId);
     }
     if (exact.journal.phase === 'checkpoint-captured') {
@@ -1390,7 +1433,12 @@ implements ProjectLifecycleRecoveryOwner {
       return 'waiting-for-external-proof';
     }
     if (exact.journal.phase === 'lan-activated') {
-      if (repositoryReservation === undefined) return fail('recovery-required');
+      const repositoryReservation = outboundCheckpointReservation(reservation, exact.journal.projectId)
+        ? reservation.repositoryReservation
+        : reservation;
+      if (!exactRepositoryReservation(repositoryReservation, exact.journal.projectId)) {
+        return fail('recovery-required');
+      }
       await this.#completeIfNeeded(lease, exact, repositoryReservation);
       return 'settled';
     }
@@ -1398,7 +1446,11 @@ implements ProjectLifecycleRecoveryOwner {
     return fail('recovery-required');
   }
 
-  async #captureIfNeeded(lease: PinnedProjectLease, initial: ExactTransfer): Promise<void> {
+  async #captureIfNeeded(
+    lease: PinnedProjectLease,
+    initial: ExactTransfer,
+    reservation: ProjectLifecycleRecoveryReservation | undefined,
+  ): Promise<void> {
     let exact = initial;
     this.#assertNotExpired(exact);
     if (exact.journal.phase === 'collecting-readiness') {
@@ -1436,6 +1488,9 @@ implements ProjectLifecycleRecoveryOwner {
       exact = await this.#exactTransfer(lease, exact.journal.operationId);
     }
     if (exact.journal.phase === 'cloud-quiesced') {
+      if (!outboundCheckpointReservation(reservation, exact.journal.projectId)) {
+        return fail('recovery-required');
+      }
       const captured = await this.#checkpoint.capture({
         expiresAt: exact.recovery.expiresAt,
         lease,
@@ -1447,7 +1502,7 @@ implements ProjectLifecycleRecoveryOwner {
         targetAuthority: exact.recovery.targetAuthority as CollabCheckpointAuthority & {
           readonly kind: 'lan';
         },
-      });
+      }, reservation);
       if (
         captured.projectId !== exact.journal.projectId
         || captured.operationId !== exact.journal.operationId
