@@ -13,6 +13,7 @@ import { SafeLogger } from '../../src/observability/SafeLogger.js';
 import { acquirePostgresTestDatabase } from './PostgresTestDatabase.js';
 
 const clientRoot = process.argv[2];
+const publishedLan = process.argv[3] === '--published-lan';
 let overlappingQueryWarning = false;
 const observeWarning = (warning: Error): void => {
   if (warning.message.startsWith('Calling client.query() when the client is already executing')) {
@@ -56,7 +57,9 @@ try {
     logger: new SafeLogger({ now: () => new Date(), write: () => undefined }),
   });
   const address = await app.start();
-  const result = await promisify(execFile)('npm', [
+  const result = await promisify(execFile)('npm', publishedLan ? [
+    'run', 'test:lan-compatibility',
+  ] : [
     'run', 'test:unit', '--', '--runInBand', '--runTestsByPath',
     'tests/integration/app/collab/gates/CloudAuthorityRoundtripGate.test.ts',
   ], {
