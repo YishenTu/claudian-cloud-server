@@ -509,7 +509,7 @@ async function preparePersonalPush(
         '-c',
         `http.extraHeader=X-Claudian-Development-Actor: ${MEMBER_ID}`,
         'push',
-        `${baseUrl}/v8/projects/${fixture.projectId}/repository.git`,
+        `${baseUrl}/v9/projects/${fixture.projectId}/repository.git`,
         `HEAD:${personalRef}`,
       ]);
     },

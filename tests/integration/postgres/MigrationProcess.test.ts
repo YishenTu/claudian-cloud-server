@@ -88,7 +88,7 @@ describe('migration process', () => {
       assert.deepEqual(await runMigration(database.migrationUrl, 'preflight'), {
         exitCode: 0,
         stderr: '',
-        stdout: '13\n',
+        stdout: '14\n',
       });
     });
   });

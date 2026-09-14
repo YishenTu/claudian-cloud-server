@@ -619,7 +619,7 @@ describe('PostgresCoordination', () => {
         );
         await replaceSchemaChecksum(
           database,
-          '889ce8b82580c5428522baf761050023a2a8a68b4c9e204f5c9f9ebcd7d5642a',
+          '0e4d70b95b2e7a12a377af09dcb9f5e58241ca828d02a95b977f48e515b029bb',
         );
         await coordination.verifySchemaCompatibility();
 

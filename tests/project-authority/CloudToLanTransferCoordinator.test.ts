@@ -155,6 +155,7 @@ class MemoryState {
   portability(): PortabilityLifecyclePersistence {
     const state = this;
     return {
+      getCloudToLanPreparation: async () => undefined,
       async putLifecycleJournal(input: PutProjectLifecycleJournalInput) {
         const record = Object.freeze({
           ...input,
@@ -406,6 +407,7 @@ class MemoryState {
         },
       },
       portability: this.portability(),
+      appendProjectEvent: async () => undefined,
       async getProject() {
         return state.project;
       },

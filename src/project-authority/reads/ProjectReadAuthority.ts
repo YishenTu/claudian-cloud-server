@@ -473,26 +473,24 @@ export class ProjectReadAuthority {
     if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
       return fail('state-conflict');
     }
-    return this.#repository.withReadSession(projectId, async repository => {
-      const initial = await this.#readAdmission(principal, projectId, signal);
-      await this.#verifyRepository(repository, initial, signal, 'projection');
-      const observed = await this.#coordination.withProjectReadScope(
-        projectId,
-        async scope => {
-          const current = await this.#admit(scope, principal, projectId);
-          if (!sameAdmission(initial, current)) return fail('state-conflict');
-          return Object.freeze({
-            current,
-            result: await scope.readProjectEvents({
-              afterSequence,
-              limit: COLLAB_CLOUD_BINDING_LIMITS.maxEventReplay,
-            }),
-          });
-        },
-        signal === undefined ? {} : { signal },
-      );
-      await this.#verifyRepository(repository, observed.current, signal, 'projection');
-      const { result } = observed;
+    return this.#coordination.withProjectReadScope(projectId, async scope => {
+      const memberId = await resolvePrincipalMember(scope, principal);
+      const member = memberId === undefined ? undefined : await scope.findMembership(memberId);
+      const project = await scope.getProject();
+      if (member?.status !== 'active' || project?.projectId !== projectId) {
+        return fail('project-not-found');
+      }
+      if (await scope.getNonterminalDevelopmentBootstrapAttempt() !== undefined
+        || await scope.membership.getNonterminalJoin() !== undefined) return fail('recovery-required');
+      const lifecycle = await scope.portability.getNonterminalLifecycleJournal();
+      if (lifecycle !== undefined && lifecycle.kind !== 'authority-transfer') return fail('recovery-required');
+      if (project.serviceState !== 'active'
+        && !(lifecycle?.kind === 'authority-transfer' && project.serviceState === 'read-only-transition')) {
+        return fail('recovery-required');
+      }
+      const result = await scope.readProjectEvents({
+        afterSequence, limit: COLLAB_CLOUD_BINDING_LIMITS.maxEventReplay,
+      });
       const needsSnapshot = afterSequence > result.latestSequence
         || afterSequence + 1 < result.retainedFromSequence
         || result.latestSequence - afterSequence

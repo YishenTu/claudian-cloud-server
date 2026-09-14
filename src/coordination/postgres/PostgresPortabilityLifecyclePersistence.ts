@@ -12,6 +12,7 @@ import {
   isCollabMemberId,
   isCollabOpaqueId,
   isCollabProjectId,
+  type CollabCloudToLanPreparation,
   type CollabIsoTimestamp,
   type CollabMemberId,
   type CollabAuthorityRelinquishmentProof,
@@ -1147,6 +1148,76 @@ implements PortabilityLifecyclePersistence {
       [this.#projectId, operationId],
     );
     return rows[0] === undefined ? undefined : lifecycleJournal(rows[0]);
+  }
+
+  async getCloudToLanPreparation(preparationId: string): Promise<Readonly<{
+    preparation: CollabCloudToLanPreparation;
+    requestFingerprint: string;
+  }> | undefined> {
+    const rows = await this.#query<{ preparation_json: unknown; request_fingerprint: string }>(
+      `SELECT preparation_json, request_fingerprint FROM claudian_cloud.cloud_to_lan_preparations
+       WHERE project_id = $1 AND preparation_id = $2`, [this.#projectId, preparationId],
+    );
+    const row = rows[0];
+    if (!row) return undefined;
+    const preparation = collabControlOperationCodec('registerCloudToLanPreparation').decodeResponse(row.preparation_json);
+    if (preparation.projectId !== this.#projectId || preparation.preparationId !== preparationId) stateConflict();
+    return { preparation, requestFingerprint: row.request_fingerprint };
+  }
+
+  async listCloudToLanPreparations(sourceAuthorityGeneration: number, now: CollabIsoTimestamp): Promise<readonly CollabCloudToLanPreparation[]> {
+    const rows = await this.#query<{ preparation_json: unknown }>(
+      `SELECT p.preparation_json FROM claudian_cloud.cloud_to_lan_preparations p
+       WHERE p.project_id = $1 AND p.source_authority_generation = $2
+         AND p.withdrawn_at IS NULL AND p.expires_at > $3::timestamptz
+         AND NOT EXISTS (SELECT 1 FROM claudian_cloud.project_lifecycle_journals j
+           WHERE j.project_id = p.project_id AND j.direction = 'cloud-to-lan'
+             AND j.idempotency_key = p.preparation_id AND j.expected_authority_generation = p.source_authority_generation)
+       ORDER BY p.preparation_id LIMIT 101`, [this.#projectId, sourceAuthorityGeneration, now],
+    );
+    return collabControlOperationCodec('listCloudToLanPreparations').decodeResponse({
+      preparations: rows.map(row => row.preparation_json),
+    }).preparations;
+  }
+
+  async putCloudToLanPreparation(preparation: CollabCloudToLanPreparation, requestFingerprint: string): Promise<void> {
+    await this.#query(`DELETE FROM claudian_cloud.cloud_to_lan_preparations
+      WHERE project_id = $1 AND expires_at <= $2::timestamptz`, [this.#projectId, preparation.createdAt]);
+    await this.#query(`INSERT INTO claudian_cloud.cloud_to_lan_preparations
+      (project_id, preparation_id, source_authority_generation, target_member_id, request_fingerprint, expires_at, preparation_json)
+      VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::jsonb)`,
+    [this.#projectId, preparation.preparationId, preparation.sourceAuthorityGeneration, preparation.targetHostMemberId,
+      requestFingerprint, preparation.expiresAt, JSON.stringify(preparation)]);
+  }
+
+  async approveCloudToLanPreparation(preparationId: string, approvedAt: CollabIsoTimestamp): Promise<void> {
+    await this.#query(`UPDATE claudian_cloud.cloud_to_lan_preparations
+      SET approved_at = $3::timestamptz WHERE project_id = $1 AND preparation_id = $2 AND approved_at IS NULL`,
+    [this.#projectId, preparationId, approvedAt]);
+  }
+
+  async withdrawCloudToLanPreparation(preparationId: string, withdrawnAt: CollabIsoTimestamp): Promise<void> {
+    await this.#query(`UPDATE claudian_cloud.cloud_to_lan_preparations
+      SET withdrawn_at = $3::timestamptz, preparation_json = jsonb_set(preparation_json, '{withdrawnAt}', to_jsonb($4::text))
+      WHERE project_id = $1 AND preparation_id = $2 AND withdrawn_at IS NULL`, [this.#projectId, preparationId, withdrawnAt, withdrawnAt]);
+  }
+
+  async findCloudToLanPreparationTransferId(
+    preparationId: string,
+    sourceAuthorityGeneration: number,
+  ): Promise<string | undefined> {
+    positiveInteger(sourceAuthorityGeneration);
+    const rows = await this.#query<{ readonly operation_id: string }>(
+      `SELECT operation_id
+         FROM claudian_cloud.project_lifecycle_journals
+        WHERE project_id = $1 AND kind = 'authority-transfer'
+          AND direction = 'cloud-to-lan' AND idempotency_key = $2
+          AND expected_authority_generation = $3
+        LIMIT 2`,
+      [this.#projectId, preparationId, sourceAuthorityGeneration],
+    );
+    if (rows.length > 1) stateConflict();
+    return rows[0]?.operation_id;
   }
 
   async findCompletedCloudToLanTransferId(

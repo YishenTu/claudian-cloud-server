@@ -15,6 +15,10 @@ import {
   type ConfirmCloudToLanTargetActiveRequest,
   type ConfirmCloudToLanTargetInvalidatedRequest,
   type GetProjectAuthorityTransferRequest,
+  type RegisterCloudToLanPreparationRequest,
+  type ListCloudToLanPreparationsRequest,
+  type WithdrawCloudToLanPreparationRequest,
+  type GetCloudToLanPreparationApprovalRequest,
   type GetProjectAuthoritySuccessorRequest,
   type GetAuthorityTransferReceiptVerifierRequest,
   type GetTransferredMembershipClaimRequest,
@@ -62,6 +66,10 @@ type CloudToLanControl = Pick<
   | 'confirmTargetActive'
   | 'confirmTargetInvalidated'
   | 'getClaim'
+  | 'registerPreparation'
+  | 'listPreparations'
+  | 'withdrawPreparation'
+  | 'getPreparationApproval'
   | 'getSuccessor'
   | 'getReceiptVerifier'
   | 'reportTargetStaged'
@@ -256,6 +264,17 @@ export class CloudLifecycleControlAdapter implements CloudLifecycleControl {
         return this.#cloudToLan.acknowledgeRedemption({
           principalId,
           request: context.request as AcknowledgeTransferredMembershipClaimRedemptionRequest,
+        });
+      case 'registerCloudToLanPreparation':
+        return this.#cloudToLan.registerPreparation({ principalId, request: context.request as RegisterCloudToLanPreparationRequest });
+      case 'listCloudToLanPreparations':
+        return this.#cloudToLan.listPreparations({ principalId, request: context.request as ListCloudToLanPreparationsRequest });
+      case 'withdrawCloudToLanPreparation':
+        return this.#cloudToLan.withdrawPreparation({ principalId, request: context.request as WithdrawCloudToLanPreparationRequest });
+      case 'getCloudToLanPreparationApproval':
+        return this.#cloudToLan.getPreparationApproval({
+          principalId,
+          request: context.request as GetCloudToLanPreparationApprovalRequest,
         });
       case 'getProjectAuthoritySuccessor':
         return this.#cloudToLan.getSuccessor({

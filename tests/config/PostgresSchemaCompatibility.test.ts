@@ -9,7 +9,7 @@ import { CURRENT_POSTGRES_SCHEMA } from '../../src/coordination/postgres/Postgre
 
 describe('Postgres schema compatibility', () => {
   it('declares one exact current schema', () => {
-    assert.equal(CURRENT_POSTGRES_SCHEMA_VERSION, 13);
+    assert.equal(CURRENT_POSTGRES_SCHEMA_VERSION, 14);
     assert.equal(
       CURRENT_POSTGRES_SCHEMA.version,
       CURRENT_POSTGRES_SCHEMA_VERSION,
@@ -17,8 +17,8 @@ describe('Postgres schema compatibility', () => {
   });
 
   it('accepts only the current safe-integer version', () => {
-    assert.equal(supportsPostgresSchemaVersion(13), true);
-    for (const value of [12, 14, 13.5, Number.NaN, '13', undefined]) {
+    assert.equal(supportsPostgresSchemaVersion(14), true);
+    for (const value of [13, 15, 14.5, Number.NaN, '14', undefined]) {
       assert.equal(supportsPostgresSchemaVersion(value), false);
     }
   });

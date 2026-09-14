@@ -1,4 +1,5 @@
 import type {
+  CollabCloudToLanPreparation,
   CollabAuthorityRelinquishmentProof,
   CollabAuthorityTransferStatus,
   CollabCheckpointAuthority,
@@ -485,6 +486,15 @@ export interface PortabilityLifecyclePersistenceReader {
   getLifecycleJournal(
     operationId: string,
   ): Promise<ProjectLifecycleJournalRecord | undefined>;
+  getCloudToLanPreparation(preparationId: string): Promise<Readonly<{
+    preparation: CollabCloudToLanPreparation;
+    requestFingerprint: string;
+  }> | undefined>;
+  listCloudToLanPreparations(sourceAuthorityGeneration: number, now: CollabIsoTimestamp): Promise<readonly CollabCloudToLanPreparation[]>;
+  findCloudToLanPreparationTransferId(
+    preparationId: string,
+    sourceAuthorityGeneration: number,
+  ): Promise<string | undefined>;
   findCompletedCloudToLanTransferId(
     sourceAuthorityGeneration: number,
   ): Promise<string | undefined>;
@@ -529,6 +539,10 @@ export interface PortabilityLifecyclePersistenceReader {
 
 export interface PortabilityLifecyclePersistence
   extends PortabilityLifecyclePersistenceReader {
+  putCloudToLanPreparation(preparation: CollabCloudToLanPreparation, requestFingerprint: string): Promise<void>;
+  approveCloudToLanPreparation(preparationId: string, approvedAt: CollabIsoTimestamp): Promise<void>;
+  withdrawCloudToLanPreparation(preparationId: string, withdrawnAt: CollabIsoTimestamp): Promise<void>;
+
   activateLanToCloudProject(
     input: LanToCloudProjectActivationInput,
   ): Promise<PersistencePutResult>;

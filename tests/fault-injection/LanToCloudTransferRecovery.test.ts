@@ -241,7 +241,7 @@ async function importTransfer(
     operationId: transferId,
     profile: 'authority-transfer',
     projectId,
-    protocolVersion: 12,
+    protocolVersion: 13,
     refs,
     sourceAuthority: Object.freeze({ generation: 1, kind: 'lan' }),
     targetAuthority: Object.freeze({ generation: 2, kind: 'cloud' }),
@@ -722,7 +722,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
             coordination,
             metadata: { read: () => Promise.resolve({
               authorityId: 'authority-real', authorityVolumeIdentity: 'volume-real',
-              coordinationSchemaVersion: 13, repositoryFormatVersion: 1, restoreEpoch: 1,
+              coordinationSchemaVersion: 14, repositoryFormatVersion: 1, restoreEpoch: 1,
               serverBuild: 'cloud-build-real',
             }) },
             verifier: new ClaimCustodyKeyReferenceVerifier({
@@ -984,7 +984,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
             coordination: restartedCoordination,
             metadata: { read: () => Promise.resolve({
               authorityId: 'authority-real', authorityVolumeIdentity: 'volume-real',
-              coordinationSchemaVersion: 13, repositoryFormatVersion: 1, restoreEpoch: 1,
+              coordinationSchemaVersion: 14, repositoryFormatVersion: 1, restoreEpoch: 1,
               serverBuild: 'cloud-build-real',
             }) },
             verifier: new ClaimCustodyKeyReferenceVerifier({
@@ -1010,7 +1010,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
               metadata: {
                 authorityId: 'authority-real',
                 authorityVolumeIdentity: 'volume-real',
-                coordinationSchemaVersion: 13,
+                coordinationSchemaVersion: 14,
                 maximumServerBuild: 'cloud-build-real',
                 minimumServerBuild: 'cloud-build-real',
                 repositoryFormatVersion: 1,
@@ -1232,7 +1232,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
                 metadata: {
                   authorityId: 'authority-real',
                   authorityVolumeIdentity: 'volume-real',
-                  coordinationSchemaVersion: 13,
+                  coordinationSchemaVersion: 14,
                   maximumServerBuild: 'cloud-build-real',
                   minimumServerBuild: 'cloud-build-real',
                   repositoryFormatVersion: 1,
@@ -1314,7 +1314,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
             }
             const metadata = {
               authorityId: 'authority-real', authorityVolumeIdentity: 'volume-real',
-              coordinationSchemaVersion: 13, maximumServerBuild: 'cloud-build-real',
+              coordinationSchemaVersion: 14, maximumServerBuild: 'cloud-build-real',
               minimumServerBuild: 'cloud-build-real', repositoryFormatVersion: 1, restoreEpoch: 1,
             };
             const backup = await coordination.withProjectScope(transfer.projectId, async scope => ({
@@ -1371,7 +1371,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
                 });
                 await persistence.createDatabase({
                   authorityId: metadata.authorityId, authorityVolumeId: targetDatabase.authorityVolumeId,
-                  authorityVolumeIdentity: 'restored-volume', coordinationSchemaVersion: 13,
+                  authorityVolumeIdentity: 'restored-volume', coordinationSchemaVersion: 14,
                   operationId: restoreId, restoreEpoch, signal,
                 });
                 await persistence.importProject({ operationId: restoreId, project, records: backup.records, restoreEpoch, signal });
@@ -1472,7 +1472,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
                 metadata: {
                   authorityId: 'authority-real',
                   authorityVolumeIdentity: 'volume-real',
-                  coordinationSchemaVersion: 13,
+                  coordinationSchemaVersion: 14,
                   maximumServerBuild: 'cloud-build-real',
                   minimumServerBuild: 'cloud-build-real',
                   repositoryFormatVersion: 1,

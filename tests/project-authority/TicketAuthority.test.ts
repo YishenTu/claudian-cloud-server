@@ -287,7 +287,7 @@ class MemoryCoordination implements ProjectTicketAuthorityCoordination {
         const event = {
           ...input,
           projectId: 'project-a',
-          protocolVersion: 12 as const,
+          protocolVersion: 13 as const,
           sequence: this.state.events.length + 1,
         } as CollabCloudProjectEvent;
         this.state.events.push(event);

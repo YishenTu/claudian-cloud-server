@@ -421,6 +421,7 @@ CREATE TABLE claudian_cloud.project_events (
       'ticket.comment-added',
       'main.updated',
       'authority-transfer.updated',
+      'authority-transfer.preparation-updated',
       'membership.claimed',
       'project.retired'
     ))
@@ -3193,3 +3194,31 @@ CREATE POLICY project_member_recovery_credentials_project_scope ON claudian_clou
   USING (project_id = current_setting('claudian_cloud.project_id', true))
   WITH CHECK (project_id = current_setting('claudian_cloud.project_id', true));
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE claudian_cloud.project_member_recovery_credentials TO claudian_cloud_runtime;
+
+-- Unapproved receiving-device requests are local to this Cloud generation.
+-- Durable transfer journals take over on approval; clients retain preparation consent.
+CREATE TABLE claudian_cloud.cloud_to_lan_preparations (
+  project_id varchar(64) NOT NULL REFERENCES claudian_cloud.projects(project_id) ON DELETE CASCADE,
+  preparation_id varchar(128) NOT NULL,
+  source_authority_generation bigint NOT NULL CHECK (source_authority_generation > 0),
+  target_member_id varchar(64) NOT NULL,
+  request_fingerprint char(64) NOT NULL CHECK (request_fingerprint ~ '^[0-9a-f]{64}$'),
+  expires_at timestamptz NOT NULL,
+  withdrawn_at timestamptz,
+  approved_at timestamptz,
+  preparation_json jsonb NOT NULL CHECK (jsonb_typeof(preparation_json) = 'object'
+    AND octet_length(preparation_json::text) <= 32768),
+  PRIMARY KEY (project_id, preparation_id),
+  FOREIGN KEY (project_id, target_member_id)
+    REFERENCES claudian_cloud.project_memberships(project_id, member_id) ON DELETE CASCADE,
+  CHECK (preparation_id ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
+);
+CREATE UNIQUE INDEX cloud_to_lan_preparations_active_member
+  ON claudian_cloud.cloud_to_lan_preparations(project_id, source_authority_generation, target_member_id)
+  WHERE withdrawn_at IS NULL AND approved_at IS NULL;
+ALTER TABLE claudian_cloud.cloud_to_lan_preparations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE claudian_cloud.cloud_to_lan_preparations FORCE ROW LEVEL SECURITY;
+CREATE POLICY cloud_to_lan_preparations_project_scope ON claudian_cloud.cloud_to_lan_preparations
+  USING (project_id = current_setting('claudian_cloud.project_id', true))
+  WITH CHECK (project_id = current_setting('claudian_cloud.project_id', true));
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE claudian_cloud.cloud_to_lan_preparations TO claudian_cloud_runtime;

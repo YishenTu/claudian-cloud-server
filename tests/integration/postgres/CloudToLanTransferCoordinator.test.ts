@@ -185,6 +185,7 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
       const store = coordination(database);
       const claims = new Map<string, string>();
       let tick = Date.parse(T0) - 1_000;
+      let targetFingerprint = 'b'.repeat(64);
       const coordinator = new CloudToLanTransferCoordinator({
         checkpoint: {
           reserve: projectId => Promise.resolve({
@@ -232,7 +233,7 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
         },
         targetTrust: {
           verifyAcceptance: input => Promise.resolve(Object.freeze({
-          authorityFingerprint: 'f'.repeat(64),
+          authorityFingerprint: targetFingerprint,
             caCertificatePem: '-----BEGIN CERTIFICATE-----\nQUJDRA==\n-----END CERTIFICATE-----',
             principalId: input.principalId,
             projectId: input.request.projectId,
@@ -254,6 +255,46 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
           principalId: MANAGER_PRINCIPAL,
           request: { projectId: PROJECT_ID, sourceAuthorityGeneration: 4 },
         }), { successor: null });
+        const preparationRequest = {
+          caCertificatePem: '-----BEGIN CERTIFICATE-----\nQUJDRA==\n-----END CERTIFICATE-----\n',
+          caFingerprint: 'f'.repeat(64), expectedAuthorityGeneration: 4, expiresAt: EXPIRES_AT,
+          idempotencyKey: 'begin-intent-real', projectId: PROJECT_ID,
+          targetUrl: 'https://lan.example.test',
+        };
+        const withdrawnRequest = { ...preparationRequest, idempotencyKey: 'withdrawn-preparation' };
+        await coordinator.registerPreparation({ principalId: OFFLINE_PRINCIPAL, request: withdrawnRequest });
+        await assert.rejects(coordinator.withdrawPreparation({ principalId: TARGET_PRINCIPAL,
+          request: { projectId: PROJECT_ID, preparationId: 'withdrawn-preparation', idempotencyKey: 'withdraw' } }));
+        const withdrawn = await coordinator.withdrawPreparation({ principalId: OFFLINE_PRINCIPAL,
+          request: { projectId: PROJECT_ID, preparationId: 'withdrawn-preparation', idempotencyKey: 'withdraw' } });
+        assert.ok(withdrawn.withdrawnAt);
+        assert.deepEqual(await coordinator.registerPreparation({ principalId: OFFLINE_PRINCIPAL, request: withdrawnRequest }), withdrawn);
+        await assert.rejects(coordinator.begin({ principalId: MANAGER_PRINCIPAL,
+          request: { projectId: PROJECT_ID, expectedAuthorityGeneration: 4, idempotencyKey: 'withdrawn-preparation',
+            targetHostMemberId: OFFLINE_ID, targetUrl: withdrawnRequest.targetUrl } }));
+        const preparation = await coordinator.registerPreparation({
+          principalId: TARGET_PRINCIPAL, request: preparationRequest,
+        });
+        assert.equal(preparation.targetHostMemberId, TARGET_ID);
+        assert.deepEqual(await coordinator.registerPreparation({
+          principalId: TARGET_PRINCIPAL, request: preparationRequest,
+        }), preparation);
+        assert.deepEqual(await coordinator.listPreparations({
+          principalId: MANAGER_PRINCIPAL, request: { projectId: PROJECT_ID },
+        }), { preparations: [preparation] });
+        assert.deepEqual(await coordinator.listPreparations({
+          principalId: OFFLINE_PRINCIPAL, request: { projectId: PROJECT_ID },
+        }), { preparations: [] });
+        await assert.rejects(coordinator.registerPreparation({
+          principalId: TARGET_PRINCIPAL, request: { ...preparationRequest, targetUrl: 'https://other.invalid' },
+        }));
+        const approvalRequest = {
+          projectId: PROJECT_ID, preparationId: 'begin-intent-real', sourceAuthorityGeneration: 4,
+        };
+        assert.deepEqual(await coordinator.getPreparationApproval({
+          principalId: TARGET_PRINCIPAL, request: approvalRequest,
+        }), { approval: null });
+        tick = Date.parse(T0) - 1_000;
         const begun = await coordinator.begin({
           principalId: MANAGER_PRINCIPAL,
           request: {
@@ -264,6 +305,33 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
             targetUrl: 'https://lan.example.test',
           },
         });
+        assert.deepEqual(await coordinator.begin({ principalId: MANAGER_PRINCIPAL,
+          request: { expectedAuthorityGeneration: 4, idempotencyKey: 'begin-intent-real', projectId: PROJECT_ID,
+            targetHostMemberId: TARGET_ID, targetUrl: preparationRequest.targetUrl } }), begun);
+        await assert.rejects(coordinator.withdrawPreparation({ principalId: TARGET_PRINCIPAL,
+          request: { preparationId: preparation.preparationId, projectId: PROJECT_ID, idempotencyKey: 'late-withdraw' } }));
+        assert.deepEqual(await coordinator.getPreparationApproval({
+          principalId: TARGET_PRINCIPAL, request: approvalRequest,
+        }), { approval: begun });
+        for (const principalId of [MANAGER_PRINCIPAL, OFFLINE_PRINCIPAL]) {
+          await assert.rejects(coordinator.getPreparationApproval({ principalId, request: approvalRequest }),
+            (error: unknown) => error instanceof CloudToLanTransferCoordinatorError
+              && error.code === 'authorization-denied');
+        }
+        assert.deepEqual(await coordinator.getPreparationApproval({
+          principalId: TARGET_PRINCIPAL, request: { ...approvalRequest, preparationId: 'other-preparation' },
+        }), { approval: null });
+        await assert.rejects(coordinator.getPreparationApproval({
+          principalId: TARGET_PRINCIPAL, request: { ...approvalRequest, sourceAuthorityGeneration: 3 },
+        }));
+        await assert.rejects(coordinator.acceptTarget({
+          principalId: TARGET_PRINCIPAL,
+          request: { idempotencyKey: 'accept-intent-real', projectId: PROJECT_ID,
+            targetHostMemberId: TARGET_ID, targetProof: Buffer.alloc(32, 1).toString('base64url'),
+            transferId: begun.transferId },
+        }), (error: unknown) => error instanceof CloudToLanTransferCoordinatorError
+          && error.code === 'authorization-denied');
+        targetFingerprint = 'f'.repeat(64);
         assert.equal((await coordinator.acceptTarget({
           principalId: TARGET_PRINCIPAL,
           request: {

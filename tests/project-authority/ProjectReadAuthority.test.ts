@@ -25,12 +25,13 @@ interface MemoryState {
   activeAttempt: boolean;
   activeJoin: boolean;
   activeLifecycle: boolean;
+  activeTransfer: boolean;
   eventSequence: number;
   expectedMainOid: string;
   membershipStatus: 'active' | 'left';
   placementAvailable: boolean;
   projectAvailable: boolean;
-  serviceState: 'active' | 'recovery-required';
+  serviceState: 'active' | 'recovery-required' | 'read-only-transition';
 }
 
 class MemoryCoordination implements ProjectReadAuthorityCoordination {
@@ -38,6 +39,7 @@ class MemoryCoordination implements ProjectReadAuthorityCoordination {
     activeAttempt: false,
     activeJoin: false,
     activeLifecycle: false,
+    activeTransfer: false,
     eventSequence: 2,
     expectedMainOid: MAIN_OID,
     membershipStatus: 'active',
@@ -129,7 +131,8 @@ class MemoryCoordination implements ProjectReadAuthorityCoordination {
       },
       portability: {
         getNonterminalLifecycleJournal: () => Promise.resolve(
-          this.state.activeLifecycle ? ({ kind: 'remove-member' } as never) : undefined,
+          this.state.activeTransfer ? ({ kind: 'authority-transfer' } as never)
+            : this.state.activeLifecycle ? ({ kind: 'remove-member' } as never) : undefined,
         ),
       },
       readProjectEvents: ({ afterSequence }) => Promise.resolve({
@@ -139,7 +142,7 @@ class MemoryCoordination implements ProjectReadAuthorityCoordination {
             occurredAt: CREATED,
             payload: { memberId: 'member-001' },
             projectId,
-            protocolVersion: 12,
+            protocolVersion: 13,
             sequence: 1,
           },
           {
@@ -147,7 +150,7 @@ class MemoryCoordination implements ProjectReadAuthorityCoordination {
             occurredAt: CREATED,
             payload: { mainOid: MAIN_OID, requestId: 'request-001' },
             projectId,
-            protocolVersion: 12,
+            protocolVersion: 13,
             sequence: 2,
           },
         ] : [],
@@ -439,7 +442,7 @@ describe('ProjectReadAuthority', () => {
           occurredAt: CREATED,
           payload: { memberId: 'member-001' },
           projectId: 'project-a',
-          protocolVersion: 12,
+          protocolVersion: 13,
           sequence: 1,
         },
         {
@@ -447,7 +450,7 @@ describe('ProjectReadAuthority', () => {
           occurredAt: CREATED,
           payload: { mainOid: MAIN_OID, requestId: 'request-001' },
           projectId: 'project-a',
-          protocolVersion: 12,
+          protocolVersion: 13,
           sequence: 2,
         },
       ],
@@ -464,27 +467,33 @@ describe('ProjectReadAuthority', () => {
       kind: 'snapshot-required',
       latestSequence: 501,
     });
-    assert.equal(repository.checks.length, 6);
+    assert.equal(repository.checks.length, 0);
   });
 
-  it('fails event replay when final repository revalidation changes', async () => {
-    const { read, repository } = authority();
-    let checks = 0;
-    const original = repository.verifyProjectRead.bind(repository);
-    repository.verifyProjectRead = async input => {
-      checks += 1;
-      await original(input);
-      if (checks === 1) repository.mainOid = 'b'.repeat(40);
-    };
-    await expectReadError(
-      read.getProjectEvents(
-        createDevelopmentPrincipal('member-001'),
-        'project-a',
-        0,
-      ),
-      'dependency-failed',
-    );
-    assert.equal(checks, 2);
+  it('delivers coordination events while Git is unavailable and enforces current membership', async () => {
+    const { coordination, read, repository } = authority();
+    repository.mainOid = 'b'.repeat(40);
+    coordination.state.placementAvailable = false;
+    const principal = createDevelopmentPrincipal('member-001');
+    assert.equal((await read.getProjectEvents(principal, 'project-a', 0)).kind, 'events');
+    coordination.state.membershipStatus = 'left';
+    await expectReadError(read.getProjectEvents(principal, 'project-a', 0), 'project-not-found');
+  });
+
+  it('replays transfer events while quiesced but fences other unfinished lifecycle work', async () => {
+    const { coordination, read, repository } = authority();
+    const principal = createDevelopmentPrincipal('member-001');
+    coordination.state.activeTransfer = true;
+    coordination.state.serviceState = 'read-only-transition';
+    assert.equal((await read.getProjectEvents(principal, 'project-a', 0)).kind, 'events');
+    assert.deepEqual(repository.checks, []);
+    coordination.state.activeTransfer = false;
+    coordination.state.activeLifecycle = true;
+    await expectReadError(read.getProjectEvents(principal, 'project-a', 0), 'recovery-required');
+    coordination.state.activeLifecycle = false;
+    coordination.state.serviceState = 'active';
+    coordination.state.activeJoin = true;
+    await expectReadError(read.getProjectEvents(principal, 'project-a', 0), 'recovery-required');
   });
 
   it('revalidates explicit upload-pack authority immediately before Git proceeds', async () => {

@@ -32,6 +32,13 @@ import {
   type ConfirmCloudToLanTargetActiveRequest,
   type ConfirmCloudToLanTargetInvalidatedRequest,
   type GetProjectAuthorityTransferRequest,
+  type CollabCloudToLanPreparation,
+  type RegisterCloudToLanPreparationRequest,
+  type ListCloudToLanPreparationsRequest,
+  type ListCloudToLanPreparationsResponse,
+  type WithdrawCloudToLanPreparationRequest,
+  type GetCloudToLanPreparationApprovalRequest,
+  type GetCloudToLanPreparationApprovalResponse,
   type GetProjectAuthoritySuccessorRequest,
   type GetProjectAuthoritySuccessorResponse,
   type GetTransferredMembershipClaimRequest,
@@ -307,6 +314,10 @@ type CloudToLanControlOperation =
   | 'confirmCloudToLanTargetInvalidated'
   | 'getAuthorityTransferReceiptVerifier'
   | 'getProjectAuthorityTransfer'
+  | 'registerCloudToLanPreparation'
+  | 'listCloudToLanPreparations'
+  | 'withdrawCloudToLanPreparation'
+  | 'getCloudToLanPreparationApproval'
   | 'getProjectAuthoritySuccessor'
   | 'getTransferredMembershipClaim'
   | 'reportCloudToLanTargetStaged';
@@ -665,6 +676,14 @@ implements ProjectLifecycleRecoveryOwner {
           || target?.status !== 'active'
           || placement === undefined
         ) return fail('state-conflict');
+        const preparation = await scope.portability.getCloudToLanPreparation(request.idempotencyKey);
+        if (preparation && (preparation.preparation.withdrawnAt !== null
+          || preparation.preparation.expiresAt <= createdAt
+          || preparation.preparation.sourceAuthorityGeneration !== request.expectedAuthorityGeneration
+          || preparation.preparation.targetHostMemberId !== request.targetHostMemberId
+          || preparation.preparation.targetUrl !== request.targetUrl)) return fail('state-conflict');
+        if (preparation && await scope.portability.findCloudToLanPreparationTransferId(
+          request.idempotencyKey, request.expectedAuthorityGeneration) !== undefined) return fail('state-conflict');
         await scope.portability.putLifecycleJournal({
           actorMemberId: actor.membership.memberId,
           createdAt,
@@ -694,6 +713,9 @@ implements ProjectLifecycleRecoveryOwner {
           targetUrl: request.targetUrl,
           transferId: operationId,
         });
+        if (preparation) await scope.portability.approveCloudToLanPreparation(request.idempotencyKey, createdAt);
+        await scope.appendProjectEvent({ kind: 'authority-transfer.updated', occurredAt: createdAt,
+          payload: { transferId: operationId } });
         return operationId;
       });
       return this.#requireStatus(lease, transferId);
@@ -743,6 +765,12 @@ implements ProjectLifecycleRecoveryOwner {
             targetUrl: exact.recovery.targetUrl,
             transferId: request.transferId,
           })) return fail('authorization-denied');
+          const preparation = await lease.withProjectScope(scope =>
+            scope.portability.getCloudToLanPreparation(exact.journal.idempotencyKey));
+          if (preparation && (preparation.preparation.caFingerprint !== verified.authorityFingerprint
+            || preparation.preparation.caCertificatePem.trim() !== verified.caCertificatePem.trim())) {
+            return fail('authorization-denied');
+          }
           const evidence = Object.freeze({
             acceptanceIntentId: request.idempotencyKey,
             principalId: input.principalId,
@@ -1081,6 +1109,102 @@ implements ProjectLifecycleRecoveryOwner {
         input.principalId,
       );
       return this.#requireStatus(lease, request.transferId);
+    });
+  }
+
+  registerPreparation(input: Readonly<{
+    principalId: string; request: RegisterCloudToLanPreparationRequest;
+  }>): Promise<CollabCloudToLanPreparation> {
+    const request = decodeRequest('registerCloudToLanPreparation', input.request);
+    return this.#run(request.projectId, lease => lease.withProjectScope(async scope => {
+      const actor = await this.#activeActor(scope, input.principalId);
+      const requestFingerprint = sha256(JSON.stringify(request));
+      const existing = await scope.portability.getCloudToLanPreparation(request.idempotencyKey);
+      if (existing) {
+        if (existing.preparation.targetHostMemberId !== actor.membership.memberId
+          || existing.requestFingerprint !== requestFingerprint) return fail('state-conflict');
+        return existing.preparation;
+      }
+      const project = await scope.getProject();
+      if (project?.serviceState !== 'active' || project.authorityGeneration !== request.expectedAuthorityGeneration
+        || await scope.portability.getNonterminalLifecycleJournal() !== undefined
+        || await scope.getNonterminalDevelopmentBootstrapAttempt() !== undefined
+        || await scope.membership.getNonterminalJoin() !== undefined) return fail('state-conflict');
+      const createdAt = timestamp(this.#clock);
+      if (request.expiresAt <= createdAt || request.expiresAt > defaultAuthorityTransferExpiresAt(createdAt)) return fail('expired');
+      const preparation = decodeCollabAuthorityTransferOperationResponse('registerCloudToLanPreparation', {
+        caCertificatePem: request.caCertificatePem, caFingerprint: request.caFingerprint,
+        createdAt, expiresAt: request.expiresAt, preparationId: request.idempotencyKey,
+        projectId: request.projectId, sourceAuthorityGeneration: request.expectedAuthorityGeneration,
+        targetHostMemberId: actor.membership.memberId, targetUrl: request.targetUrl, withdrawnAt: null,
+      });
+      await scope.portability.putCloudToLanPreparation(preparation, requestFingerprint);
+      await scope.appendProjectEvent({ kind: 'authority-transfer.preparation-updated', occurredAt: createdAt,
+        payload: { preparationId: preparation.preparationId } });
+      return preparation;
+    }));
+  }
+
+  listPreparations(input: Readonly<{
+    principalId: string; request: ListCloudToLanPreparationsRequest;
+  }>): Promise<ListCloudToLanPreparationsResponse> {
+    const request = decodeRequest('listCloudToLanPreparations', input.request);
+    return this.#run(request.projectId, lease => lease.withProjectScope(async scope => {
+      const actor = await this.#activeActor(scope, input.principalId);
+      const project = await scope.getProject();
+      if (!project || project.serviceState !== 'active') return fail('state-conflict');
+      const preparations = await scope.portability.listCloudToLanPreparations(project.authorityGeneration, timestamp(this.#clock));
+      return { preparations: preparations.filter(item => actor.membership.role === 'manager'
+        || item.targetHostMemberId === actor.membership.memberId) };
+    }));
+  }
+
+  withdrawPreparation(input: Readonly<{
+    principalId: string; request: WithdrawCloudToLanPreparationRequest;
+  }>): Promise<CollabCloudToLanPreparation> {
+    const request = decodeRequest('withdrawCloudToLanPreparation', input.request);
+    return this.#run(request.projectId, lease => lease.withProjectScope(async scope => {
+      const actor = await this.#activeActor(scope, input.principalId);
+      const existing = await scope.portability.getCloudToLanPreparation(request.preparationId);
+      if (!existing || (existing.preparation.targetHostMemberId !== actor.membership.memberId
+        && actor.membership.role !== 'manager')) return fail('authorization-denied');
+      if (existing.preparation.withdrawnAt !== null) return existing.preparation;
+      if (await scope.portability.findCloudToLanPreparationTransferId(request.preparationId,
+        existing.preparation.sourceAuthorityGeneration) !== undefined) return fail('state-conflict');
+      const withdrawnAt = timestamp(this.#clock);
+      await scope.portability.withdrawCloudToLanPreparation(request.preparationId, withdrawnAt);
+      await scope.appendProjectEvent({ kind: 'authority-transfer.preparation-updated', occurredAt: withdrawnAt,
+        payload: { preparationId: request.preparationId } });
+      return { ...existing.preparation, withdrawnAt };
+    }));
+  }
+
+  getPreparationApproval(input: Readonly<{
+    principalId: string;
+    request: GetCloudToLanPreparationApprovalRequest;
+  }>): Promise<GetCloudToLanPreparationApprovalResponse> {
+    const request = decodeRequest('getCloudToLanPreparationApproval', input.request);
+    return this.#run(request.projectId, async lease => {
+      const transferId = await lease.withProjectScope(scope => (
+        scope.portability.findCloudToLanPreparationTransferId(
+          request.preparationId, request.sourceAuthorityGeneration,
+        )
+      ));
+      if (transferId === undefined) {
+        await lease.withProjectScope(async scope => {
+          await this.#activeActor(scope, input.principalId);
+          if ((await scope.getProject())?.authorityGeneration !== request.sourceAuthorityGeneration) {
+            return fail('authorization-denied');
+          }
+        });
+        return { approval: null };
+      }
+      const exact = await this.#exactTransfer(lease, transferId);
+      const memberId = await this.#authorizeCurrentOrTerminal(lease, transferId, input.principalId, true);
+      if (memberId !== exact.recovery.targetHostMemberId) return fail('authorization-denied');
+      return decodeCollabAuthorityTransferOperationResponse('getCloudToLanPreparationApproval', {
+        approval: await this.#requireStatus(lease, transferId),
+      });
     });
   }
 

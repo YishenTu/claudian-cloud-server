@@ -122,7 +122,7 @@ function fixture(
     operationId: 'operation-transfer',
     profile: 'authority-transfer',
     projectId: 'project-a',
-    protocolVersion: 12,
+    protocolVersion: 13,
     refs: Object.freeze([
       Object.freeze({ name: 'refs/heads/main', oid: MAIN_OID }),
       Object.freeze({

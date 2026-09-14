@@ -52,6 +52,10 @@ const expectedOperations = [
   'getAuthorityTransferReceiptVerifier',
   'getManagerResponsibilityOffer',
   'getProjectAuthoritySuccessor',
+  'getCloudToLanPreparationApproval',
+  'registerCloudToLanPreparation',
+  'listCloudToLanPreparations',
+  'withdrawCloudToLanPreparation',
   'getProjectAuthorityTransfer',
   'getRequest',
   'getTicket',
@@ -83,9 +87,9 @@ const expectedOperations = [
 const repositoryRoot = resolve(import.meta.dirname, '../..');
 
 describe('canonical Collab protocol consumer contract', () => {
-  it('loads wire version 12, Cloud binding 8, and one operation inventory from the package root', () => {
-    assert.equal(COLLAB_PROTOCOL_VERSION, 12);
-    assert.equal(COLLAB_CLOUD_BINDING_VERSION, 8);
+  it('loads wire version 13, Cloud binding 9, and one operation inventory from the package root', () => {
+    assert.equal(COLLAB_PROTOCOL_VERSION, 13);
+    assert.equal(COLLAB_CLOUD_BINDING_VERSION, 9);
     assert.deepEqual(
       Object.keys(COLLAB_CONTROL_OPERATION_CODECS).sort(),
       [...expectedOperations].sort(),
@@ -104,19 +108,19 @@ describe('canonical Collab protocol consumer contract', () => {
     });
     assert.equal(
       collabCloudProjectOperationRoute('project-a', 'getProjectSnapshot').target,
-      '/v8/projects/project-a/operations/getProjectSnapshot',
+      '/v9/projects/project-a/operations/getProjectSnapshot',
     );
     assert.equal(
       collabCloudProjectEventsRoute('project-a', 12).target,
-      '/v8/projects/project-a/events?afterSequence=12',
+      '/v9/projects/project-a/events?afterSequence=12',
     );
     assert.equal(
       collabCloudGitRoute('project-a', 'info-refs', 'git-upload-pack').target,
-      '/v8/projects/project-a/repository.git/info/refs?service=git-upload-pack',
+      '/v9/projects/project-a/repository.git/info/refs?service=git-upload-pack',
     );
     assert.equal(
       collabDevelopmentBootstrapRoute('activateDevelopmentBootstrap', 'attempt-a').target,
-      '/v8/development/bootstrap/attempts/attempt-a/activate',
+      '/v9/development/bootstrap/attempts/attempt-a/activate',
     );
   });
 
@@ -143,10 +147,10 @@ describe('canonical Collab protocol consumer contract', () => {
       limits,
     );
     assert.deepEqual(document, {
-      bindingVersions: [8],
+      bindingVersions: [9],
       capabilities: [...COLLAB_CLOUD_CAPABILITIES],
       limits,
-      protocolVersions: [12],
+      protocolVersions: [13],
       schemaVersion: 2,
     });
     assert.throws(
@@ -174,7 +178,7 @@ describe('canonical Collab protocol consumer contract', () => {
   it('decodes the accepted envelope and rejects unknown envelope fields', () => {
     const accepted = {
       data: { projectId: 'project-a' },
-      protocolVersion: 12,
+      protocolVersion: 13,
       requestId: 'request-a',
     };
 
