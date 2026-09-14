@@ -74,6 +74,7 @@ const HOST_MEMBER_ID = 'member-host';
 const OFFLINE_MEMBER_ID = 'member-a';
 const COLLATION_MEMBER_ID = 'member_a';
 const REVOKED_MEMBER_ID = 'member-revoked';
+const LEFT_MEMBER_ID = 'member-left';
 const HOST_PRINCIPAL_ID = 'principal:host';
 const SIGNATURE = Buffer.alloc(64, 7).toString('base64url');
 const PUBLIC_KEY = Buffer.alloc(32, 8).toString('base64url');
@@ -292,6 +293,23 @@ async function importTransfer(
         revokedAt: '2026-08-26T00:01:00.000Z',
         role: 'member' as const,
         status: 'revoked' as const,
+        updatedAt: '2026-08-26T00:01:00.000Z',
+      }),
+    }),
+    Object.freeze({
+      kind: 'member' as const,
+      recordId: LEFT_MEMBER_ID,
+      revision: 3,
+      value: Object.freeze({
+        activatedAt: CREATED_AT,
+        createdAt: CREATED_AT,
+        displayName: 'Former Member',
+        memberId: LEFT_MEMBER_ID,
+        personalRef: `refs/heads/members/${LEFT_MEMBER_ID}`,
+        projectId,
+        revokedAt: '2026-08-26T00:01:00.000Z',
+        role: 'member' as const,
+        status: 'left' as const,
         updatedAt: '2026-08-26T00:01:00.000Z',
       }),
     }),
@@ -1021,6 +1039,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
               OFFLINE_MEMBER_ID,
               COLLATION_MEMBER_ID,
               REVOKED_MEMBER_ID,
+              LEFT_MEMBER_ID,
             ].sort(),
           );
           assert.equal(activated.hostBinding?.memberId, HOST_MEMBER_ID);
@@ -1079,8 +1098,9 @@ describe('LAN-to-Cloud cross-store recovery', () => {
             readonly activated_at: Date;
             readonly member_id: string;
             readonly revoked_at: Date | null;
+            readonly left_at: Date | null;
           }>(
-            `SELECT member_id, activated_at, revoked_at
+            `SELECT member_id, activated_at, revoked_at, left_at
                FROM claudian_cloud.project_memberships
               WHERE project_id = $1
               ORDER BY member_id`,
@@ -1096,16 +1116,19 @@ describe('LAN-to-Cloud cross-store recovery', () => {
                 activatedAt: row.activated_at.toISOString(),
                 memberId: row.member_id,
                 revokedAt: row.revoked_at?.toISOString() ?? null,
+                leftAt: row.left_at?.toISOString() ?? null,
               })),
             [
               HOST_MEMBER_ID,
               OFFLINE_MEMBER_ID,
               COLLATION_MEMBER_ID,
               REVOKED_MEMBER_ID,
+              LEFT_MEMBER_ID,
             ].sort((left, right) => left.localeCompare(right, 'en-US'))
               .map(memberId => ({
               activatedAt: CREATED_AT,
               memberId,
+              leftAt: memberId === LEFT_MEMBER_ID ? '2026-08-26T00:01:00.000Z' : null,
               revokedAt: memberId === REVOKED_MEMBER_ID
                 ? '2026-08-26T00:01:00.000Z'
                 : null,

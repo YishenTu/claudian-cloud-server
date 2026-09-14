@@ -658,8 +658,8 @@ implements PortabilityLifecyclePersistence {
       await this.#query(
         `INSERT INTO claudian_cloud.project_memberships (
            project_id, member_id, display_name, role, status, revision,
-           created_at, updated_at, activated_at, revoked_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+           created_at, updated_at, activated_at, revoked_at, left_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
         [
           this.#projectId,
           member.value.memberId,
@@ -670,7 +670,8 @@ implements PortabilityLifecyclePersistence {
           member.value.createdAt,
           member.value.updatedAt,
           member.value.activatedAt,
-          member.value.revokedAt,
+          member.value.status === 'revoked' ? member.value.revokedAt : null,
+          member.value.status === 'left' ? member.value.revokedAt : null,
         ],
       );
     }
