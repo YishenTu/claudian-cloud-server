@@ -60,6 +60,7 @@ const MIGRATION_ROLE = 'claudian_cloud_migration';
 const MAXIMUM_RESTORE_COORDINATION_BYTES =
   COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxCoordinationBytes;
 const CONTINUITY_KINDS = new Set<CollabProjectBackupRecord['kind']>([
+  'project-recovery-link',
   'protected-claim-envelope',
   'terminal-principal',
   'terminal-responder',
@@ -380,6 +381,7 @@ implements EnvironmentRestorePersistence {
       'member',
       'principal-binding',
       'project-invitation',
+      'project-recovery-link',
       'project-membership-recovery',
       'project',
       'protected-claim-override-envelope',
@@ -606,6 +608,11 @@ implements EnvironmentRestorePersistence {
                   : null,
               ],
             );
+            for (const hash of record.value.recoveryCredentialHashes ?? []) {
+              await client.query(`INSERT INTO claudian_cloud.project_member_recovery_credentials
+                (project_id, member_id, credential_sha256) VALUES ($1,$2,$3)
+                ON CONFLICT (project_id, credential_sha256) DO NOTHING`, [record.value.projectId, record.value.memberId, hash]);
+            }
           } else if (record.kind === 'request') {
             await client.query(
               `INSERT INTO claudian_cloud.change_requests (
@@ -1067,6 +1074,20 @@ implements EnvironmentRestorePersistence {
                 response.value.responseJson,
               ],
             );
+          } else if (record.kind === 'project-recovery-link') {
+            const link = record.value;
+            const envelope = link.envelope === null ? null : {
+              algorithm: 'xchacha20-poly1305', associatedDataSha256: link.envelope.associatedDataSha256,
+              ...unframeBackupProtectedSecretEnvelope(link.envelope.ciphertext), keyId: link.envelope.keyId, nonce: link.envelope.nonce,
+            };
+            await client.query(`INSERT INTO claudian_cloud.project_recovery_links
+              (project_id, recovery_link_id, authority_generation, issued_by_member_id, idempotency_key,
+               request_fingerprint, token_sha256, created_at, expires_at, secret_replay_expires_at, envelope_json, redemption_json)
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+              ON CONFLICT (project_id, recovery_link_id) DO NOTHING`, [link.projectId, link.recoveryLinkId, link.authorityGeneration,
+              link.issuedByMemberId, link.idempotencyKey, link.requestFingerprint, link.tokenSha256, link.createdAt,
+              link.expiresAt, link.secretReplayExpiresAt, envelope === null ? null : JSON.stringify(envelope),
+              link.redemption === null ? null : JSON.stringify(link.redemption)]);
           } else if (record.kind === 'project-invitation') {
             await client.query(
               `INSERT INTO claudian_cloud.project_invitations (

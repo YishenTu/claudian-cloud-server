@@ -1,3 +1,4 @@
+import { PostgresProjectRecoveryLinkPersistence } from './PostgresProjectRecoveryLinkPersistence.js';
 import {
   COLLAB_LIMITS,
   COLLAB_CLOUD_BINDING_LIMITS,
@@ -593,6 +594,7 @@ class PostgresProjectScope
   readonly portability: PostgresPortabilityLifecyclePersistence;
   readonly checkpoint: PostgresProjectCheckpointPersistence;
   readonly membership: PostgresProjectMembershipPersistence;
+  readonly membershipRecovery: PostgresProjectRecoveryLinkPersistence;
   readonly #client: PoolClient;
   readonly #markBroken: MarkBroken;
   readonly #projectId: CollabProjectId;
@@ -630,6 +632,7 @@ class PostgresProjectScope
       query,
     );
     this.membership = new PostgresProjectMembershipPersistence(projectId, query);
+    this.membershipRecovery = new PostgresProjectRecoveryLinkPersistence(projectId, query);
     this.#client = client;
     this.#projectId = projectId;
     this.#markBroken = markBroken;

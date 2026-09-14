@@ -1,3 +1,4 @@
+import type { ProjectRecoveryLinkPersistence } from './ProjectRecoveryLinkPersistence.js';
 import type {
   CollabMemberId,
   CollabProjectId,
@@ -75,6 +76,7 @@ export interface ProjectScope
   readonly collaboration: CollaborationProjectPersistence;
   readonly checkpoint: ProjectCheckpointPersistence;
   readonly membership: ProjectMembershipPersistence;
+  readonly membershipRecovery: ProjectRecoveryLinkPersistence;
   readonly portability: PortabilityLifecyclePersistence;
   findMembership(memberId: CollabMemberId): Promise<ProjectMembershipRecord | undefined>;
   getRepositoryPlacement(): Promise<RepositoryPlacementLease | undefined>;

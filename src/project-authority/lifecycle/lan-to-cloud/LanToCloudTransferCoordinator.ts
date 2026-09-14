@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { isDeepStrictEqual } from 'node:util';
 
 import {
+  COLLAB_PROJECT_RECOVERY_LIMITS,
   collabControlOperationCodec,
   decodeCollabAuthorityTransferStatus,
   decodeCollabTransferredMembershipClaimBatch,
@@ -1101,6 +1102,20 @@ implements ProjectLifecycleRecoveryOwner {
       if (!facts.activeMembers.some(member => (
         member.value.memberId === current.proof.sourceHostMemberId
       ))) return fail('invalid-checkpoint');
+      if (facts.activeMembers.some(member => member.value.memberId !== current.proof.sourceHostMemberId
+        && (member.value.recoveryCredentialHashes?.length ?? 0) >= COLLAB_PROJECT_RECOVERY_LIMITS.maxCredentialVerifiersPerMember)) {
+        return fail('invalid-checkpoint');
+      }
+      if (/^vault-[a-f0-9]{64}$/u.test(current.evidence.principalId)) {
+        const digest = current.evidence.principalId.slice(6);
+        const host = facts.activeMembers.find(member => member.value.memberId === current.proof.sourceHostMemberId);
+        if (!host) return fail('invalid-checkpoint');
+        const members = (checkpoint.records as readonly CollabCheckpointPortableRecord[]).filter(record => record.kind === 'member');
+        if (members.some(member => member.value.memberId !== host.value.memberId && member.value.recoveryCredentialHashes?.includes(digest))
+          || new Set([...(host.value.recoveryCredentialHashes ?? []), digest]).size > COLLAB_PROJECT_RECOVERY_LIMITS.maxCredentialVerifiersPerMember) {
+          return fail('invalid-checkpoint');
+        }
+      }
       const batch = this.#newBatch(
         current,
         facts.activeMembers,

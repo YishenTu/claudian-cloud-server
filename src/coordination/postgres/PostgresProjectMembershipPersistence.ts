@@ -39,6 +39,7 @@ import type {
   TransferredMembershipClaimOverrideRecord,
 } from '../ProjectMembershipPersistence.js';
 import { CoordinationError } from '../CoordinationError.js';
+import { assertProjectCredentialBinding } from './projectCredentialBinding.js';
 
 type ProjectQuery = <Row extends QueryResultRow>(
   text: string,
@@ -1010,6 +1011,7 @@ export class PostgresProjectMembershipPersistence
       throw new CoordinationError('state-conflict');
     }
     if (input.nextPhase === 'membership-pending') {
+      await assertProjectCredentialBinding(this.#query, this.#projectId, journal.memberId, journal.principalId);
       await this.#query(
         `INSERT INTO claudian_cloud.project_memberships (
            project_id, member_id, display_name, role, status, revision,
@@ -1221,6 +1223,8 @@ export class PostgresProjectMembershipPersistence
   }
 
   async reconcileExpirations(now: string): Promise<void> {
+    await this.#query(`UPDATE claudian_cloud.project_recovery_links SET envelope_json = NULL
+      WHERE project_id = $1 AND secret_replay_expires_at <= $2::timestamptz AND envelope_json IS NOT NULL`, [this.#projectId, now]);
     if (Number.isNaN(Date.parse(now))) throw new CoordinationError('invalid-record');
     await this.expireInvitations(now);
     await this.expireClaimOverrides(now);
@@ -1656,6 +1660,7 @@ export class PostgresProjectMembershipPersistence
       [this.#projectId, input.targetPrincipalId],
     );
     const binding = bindingRows[0];
+    await assertProjectCredentialBinding(this.#query, this.#projectId, input.claim.memberId, input.targetPrincipalId);
     if (binding === undefined) {
       await this.#query(
         `INSERT INTO claudian_cloud.project_principal_bindings (

@@ -319,6 +319,7 @@ function allFixtureRecords() {
         status: 'active' as const,
         revokedAt: null,
         updatedAt: CREATED_AT,
+        recoveryCredentialHashes: ['a'.repeat(64)],
       }),
     }),
     Object.freeze({
@@ -1055,6 +1056,24 @@ function allFixtureRecords() {
       }),
     }),
     Object.freeze({
+      kind: 'project-recovery-link' as const, recordId: 'recovery-restored', revision: 1,
+      value: {
+        authorityGeneration: 5, createdAt: CREATED_AT, expiresAt: '2026-08-29T00:15:00.000Z',
+        idempotencyKey: 'create-recovery-restored', issuedByMemberId: 'member-manager', projectId: PROJECT_ID,
+        recoveryLinkId: 'recovery-restored', requestFingerprint: 'b'.repeat(64),
+        secretReplayExpiresAt: '2026-08-29T00:10:00.000Z', tokenSha256: 'c'.repeat(64),
+        envelope: { associatedDataSha256: 'd'.repeat(64), ciphertext: frameBackupProtectedSecretEnvelope({
+          ciphertext: Buffer.from('encrypted-recovery').toString('base64url'), keyVersion: 3, tag: Buffer.alloc(16, 7).toString('base64url'),
+        }), createdAt: CREATED_AT, expiresAt: '2026-08-29T00:10:00.000Z', keyId: 'membership-custody-key',
+        nonce: Buffer.alloc(24, 8).toString('base64url'), projectId: PROJECT_ID },
+        redemption: { idempotencyKey: 'redeem-recovery-restored', proofCredentialSha256: 'a'.repeat(64),
+          requestFingerprint: 'e'.repeat(64), targetPrincipalId: 'principal:offline', response: {
+            projectId: PROJECT_ID, recoveryLinkId: 'recovery-restored', authorityGeneration: 5,
+            memberId: 'member-offline', personalRef: 'refs/heads/members/member-offline', receiptId: 'recovery-receipt', recoveredAt: CREATED_AT,
+          } },
+      },
+    }),
+    Object.freeze({
       kind: 'protected-invitation-envelope' as const,
       recordId: 'invitation-join-restored',
       revision: 1,
@@ -1735,7 +1754,8 @@ describe('PostgresEnvironmentRestorePersistence', () => {
       assert.deepEqual(
         await persistence.readRestoredContinuity(project, signal),
         records.filter(record => (
-          record.kind === 'protected-claim-envelope'
+          record.kind === 'project-recovery-link'
+          || record.kind === 'protected-claim-envelope'
           || record.kind === 'terminal-principal'
           || record.kind === 'terminal-responder'
           || record.kind === 'terminal-responder-replay'

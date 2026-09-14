@@ -1,3 +1,4 @@
+import type { ProjectRecoveryLinkAuthority } from '../../project-authority/membership/ProjectRecoveryLinkAuthority.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import {
@@ -37,6 +38,7 @@ export interface CloudProjectMembershipRoutesOptions
     | 'listOffers'
     | 'promote'
   >;
+  readonly recoveryLinks?: Pick<ProjectRecoveryLinkAuthority, 'create' | 'redeem'>;
   readonly claims?: Pick<TransferredMembershipClaimAuthority, 'reissue' | 'revoke'>;
   readonly invitation?: Pick<ProjectInvitationAuthority, 'create' | 'list' | 'revoke'>;
   readonly join?: Pick<CloudProjectJoinCoordinator, 'join'>;
@@ -54,6 +56,7 @@ function decodedCreate(data: unknown): CreateCloudProjectRequest {
 
 export class CloudProjectMembershipRoutes {
   readonly #administration: CloudProjectMembershipRoutesOptions['administration'];
+  readonly #recoveryLinks: CloudProjectMembershipRoutesOptions['recoveryLinks'];
   readonly #claims: CloudProjectMembershipRoutesOptions['claims'];
   readonly #creation: Pick<CloudProjectCreationCoordinator, 'create'>;
   readonly #invitation: Pick<
@@ -68,6 +71,7 @@ export class CloudProjectMembershipRoutes {
   constructor(options: CloudProjectMembershipRoutesOptions) {
     this.#administration = options.administration;
     this.#claims = options.claims;
+    this.#recoveryLinks = options.recoveryLinks;
     this.#creation = options.creation;
     this.#invitation = options.invitation;
     this.#join = options.join;
@@ -90,6 +94,7 @@ export class CloudProjectMembershipRoutes {
   #owns(
     operation: CollabControlOperation | 'getProjectSnapshot',
   ): operation is CollabControlOperation {
+    if (this.#recoveryLinks && (operation === 'createProjectRecoveryLink' || operation === 'redeemProjectRecoveryLink')) return true;
     if (operation === 'createCloudProject') return true;
     if (operation === 'joinCloudProject') return this.#join !== undefined;
     if (operation === 'removeMember') return this.#removal !== undefined;
@@ -129,6 +134,14 @@ export class CloudProjectMembershipRoutes {
     }
     const request = decoded.value as { readonly projectId: string };
     if (request.projectId !== pathProjectId) throw projectProtocolFailure('projectId');
+    if (operation === 'createProjectRecoveryLink' && this.#recoveryLinks) {
+      return this.#recoveryLinks.create(context.principal,
+        decoded.value as Parameters<ProjectRecoveryLinkAuthority['create']>[1], { signal: context.signal });
+    }
+    if (operation === 'redeemProjectRecoveryLink' && this.#recoveryLinks) {
+      return this.#recoveryLinks.redeem(context.principal,
+        decoded.value as Parameters<ProjectRecoveryLinkAuthority['redeem']>[1], { signal: context.signal });
+    }
     if (operation === 'createProjectInvitation' && this.#invitation !== undefined) {
       return this.#invitation.create(
         context.principal,

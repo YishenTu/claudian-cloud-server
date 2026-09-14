@@ -45,6 +45,7 @@ export interface EnvironmentRestoreContinuityVerifierOptions {
 
 type ContinuityRecord = Extract<CollabProjectBackupRecord, {
   readonly kind:
+    | 'project-recovery-link'
     | 'protected-claim-envelope'
     | 'terminal-principal'
     | 'terminal-responder'
@@ -56,6 +57,7 @@ type ContinuityRecord = Extract<CollabProjectBackupRecord, {
 }>;
 
 const CONTINUITY_KINDS = new Set<CollabProjectBackupRecord['kind']>([
+  'project-recovery-link',
   'protected-claim-envelope',
   'terminal-principal',
   'terminal-responder',

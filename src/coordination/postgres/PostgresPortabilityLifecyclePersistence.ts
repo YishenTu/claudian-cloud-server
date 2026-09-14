@@ -25,6 +25,7 @@ import {
 import type { QueryResultRow } from 'pg';
 
 import { CoordinationError } from '../CoordinationError.js';
+import { assertProjectCredentialBinding } from './projectCredentialBinding.js';
 import type {
   AcknowledgeTerminalResponderInput,
   AuthorityTransferRecoveryEvidenceInput,
@@ -675,6 +676,12 @@ implements PortabilityLifecyclePersistence {
         ],
       );
     }
+    for (const member of members) {
+      for (const credentialSha256 of member.value.recoveryCredentialHashes ?? []) {
+        await this.#query(`INSERT INTO claudian_cloud.project_member_recovery_credentials
+          (project_id, member_id, credential_sha256) VALUES ($1,$2,$3)`, [this.#projectId, member.value.memberId, credentialSha256]);
+      }
+    }
     const insertionOrder = [
       'request',
       'ticket',
@@ -1027,6 +1034,8 @@ implements PortabilityLifecyclePersistence {
       'request_comments',
       'tickets',
       'change_requests',
+      'project_recovery_links',
+      'project_member_recovery_credentials',
       'project_memberships',
       'projects',
     ]) {
@@ -1283,6 +1292,7 @@ implements PortabilityLifecyclePersistence {
       [this.#projectId, canonical.memberId],
     );
     if (membership.length !== 1) stateConflict();
+    await assertProjectCredentialBinding(this.#query, this.#projectId, canonical.memberId, canonical.principalId);
     const rows = await this.#query<{ readonly principal_id: string }>(
       `INSERT INTO claudian_cloud.project_principal_bindings (
          project_id, principal_id, member_id, state, bound_at, revoked_at

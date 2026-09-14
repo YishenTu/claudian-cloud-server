@@ -1,3 +1,4 @@
+import { ProjectRecoveryLinkAuthority } from '../project-authority/membership/ProjectRecoveryLinkAuthority.js';
 import {
   COLLAB_CHECKPOINT_ARTIFACT_LIMITS,
   COLLAB_CLOUD_BINDING_LIMITS,
@@ -183,6 +184,7 @@ class CloudApplication implements Application {
   readonly #acceptCoordinator: ProjectAcceptCoordinator;
   readonly #creationCoordinator: CloudProjectCreationCoordinator;
   readonly #joinCoordinator: CloudProjectJoinCoordinator;
+  readonly #recoveryLinkAuthority: ProjectRecoveryLinkAuthority | undefined;
   readonly #invitationAuthority: ProjectInvitationAuthority | undefined;
   readonly #membershipAdministrationAuthority: ProjectMembershipAdministrationAuthority;
   readonly #memberRemovalCoordinator: ProjectMemberRemovalCoordinator;
@@ -425,6 +427,9 @@ class CloudApplication implements Application {
         custody: protectedSecretCustody,
         writeAdmission: this.#membershipWriteAdmission,
       });
+    this.#recoveryLinkAuthority = protectedSecretCustody === undefined ? undefined : new ProjectRecoveryLinkAuthority({
+      coordination: this.#coordination, custody: protectedSecretCustody, writeAdmission: this.#membershipWriteAdmission,
+    });
     this.#transferredMembershipClaimAuthority = protectedSecretCustody === undefined
       ? undefined
       : new TransferredMembershipClaimAuthority({
@@ -531,6 +536,7 @@ class CloudApplication implements Application {
       enabledCapabilities.add('cloud-project-leave');
       enabledCapabilities.add('cloud-project-manager-responsibility');
       enabledCapabilities.add('cloud-project-membership');
+      if (this.#recoveryLinkAuthority !== undefined) enabledCapabilities.add('project-recovery');
       if (this.#invitationAuthority !== undefined) {
         enabledCapabilities.add('cloud-project-invitations');
       }
@@ -604,6 +610,7 @@ class CloudApplication implements Application {
         maximumJsonBytes: COLLAB_LIMITS.maxJsonPayloadUtf8Bytes,
         operationTimeoutMs: options.config.repository.operationTimeoutMs,
         removal: this.#memberRemovalCoordinator,
+        ...(this.#recoveryLinkAuthority === undefined ? {} : { recoveryLinks: this.#recoveryLinkAuthority }),
         ...(this.#invitationAuthority === undefined
           ? {}
           : { invitation: this.#invitationAuthority }),
@@ -814,6 +821,7 @@ class CloudApplication implements Application {
     const joinClose = this.#joinCoordinator.close();
     const memberRemovalClose = this.#memberRemovalCoordinator.close();
     const leaveClose = this.#leaveCoordinator.close();
+    const recoveryLinkClose = this.#recoveryLinkAuthority?.close() ?? Promise.resolve();
     const membershipWriteClose = this.#membershipWriteAdmission.close();
     const personalRefClose = this.#projectPersonalRefAuthority.close();
     const ticketClose = this.#projectTicketAuthority.close();
@@ -826,6 +834,7 @@ class CloudApplication implements Application {
     results.push(await settleBefore(joinClose, deadline));
     results.push(await settleBefore(memberRemovalClose, deadline));
     results.push(await settleBefore(leaveClose, deadline));
+    results.push(await settleBefore(recoveryLinkClose, deadline));
     results.push(await settleBefore(membershipWriteClose, deadline));
     results.push(await settleBefore(personalRefClose, deadline));
     results.push(await settleBefore(ticketClose, deadline));

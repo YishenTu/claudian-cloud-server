@@ -1,9 +1,11 @@
+import { decodeProjectRecoveryLinkRow, type RecoveryLinkRow } from './PostgresProjectRecoveryLinkPersistence.js';
 import { createHash } from 'node:crypto';
 
 import {
   COLLAB_CHECKPOINT_PORTABLE_RECORD_KINDS,
   COLLAB_PROJECT_BACKUP_RECORD_KINDS,
   COLLAB_PROTOCOL_VERSION,
+  COLLAB_PROJECT_RECOVERY_LIMITS,
   collabControlOperationCodec,
   collabMemberRef,
   collabProjectBackupIdempotencyRecordId,
@@ -398,6 +400,7 @@ implements ProjectCheckpointPersistence {
       readonly created_at: Date;
       readonly display_name: string;
       readonly left_at: Date | null;
+      readonly recovery_hashes: readonly string[];
       readonly member_id: string;
       readonly revision: string;
       readonly revoked_at: Date | null;
@@ -406,8 +409,15 @@ implements ProjectCheckpointPersistence {
       readonly updated_at: Date;
     }>(
       `SELECT activated_at, created_at, display_name, left_at, member_id,
-              revision, revoked_at, role, status, updated_at
-         FROM claudian_cloud.project_memberships
+              revision, revoked_at, role, status, updated_at,
+              ARRAY(SELECT hash FROM (
+                SELECT credential_sha256 AS hash FROM claudian_cloud.project_member_recovery_credentials AS credential
+                 WHERE credential.project_id = membership.project_id AND credential.member_id = membership.member_id
+                UNION SELECT substring(principal_id from 7) AS hash FROM claudian_cloud.project_principal_bindings AS binding
+                 WHERE binding.project_id = membership.project_id AND binding.member_id = membership.member_id
+                   AND binding.principal_id ~ '^vault-[a-f0-9]{64}$'
+              ) AS hashes ORDER BY hash LIMIT ${String(COLLAB_PROJECT_RECOVERY_LIMITS.maxCredentialVerifiersPerMember + 1)}) AS recovery_hashes
+         FROM claudian_cloud.project_memberships AS membership
         WHERE project_id = $1 AND status <> 'pending'
         ORDER BY member_id`,
       [this.#projectId],
@@ -433,6 +443,7 @@ implements ProjectCheckpointPersistence {
               ? dependencyFailure()
               : iso(member.revoked_at),
         updatedAt: iso(member.updated_at),
+        ...(member.recovery_hashes.length > 0 ? { recoveryCredentialHashes: member.recovery_hashes } : {}),
       }),
     }));
 
@@ -820,6 +831,7 @@ implements ProjectCheckpointPersistence {
     await this.#readTerminalResponders(records);
     await this.#readLeaveReplays(records, input.excludedOperationId);
     await this.#readInvitations(records);
+    await this.#readRecoveryLinks(records, input.snapshotAt);
     await this.#readTransferredClaimOverrides(records);
     await this.#readManagerResponsibilityOffers(records);
     await this.#readSecretReplayTombstones(records);
@@ -925,6 +937,26 @@ implements ProjectCheckpointPersistence {
           requestFingerprint: row.request_fingerprint,
         }),
       }));
+    }
+  }
+
+  async #readRecoveryLinks(records: BoundedCheckpointRecords, snapshotAt: string): Promise<void> {
+    for await (const row of this.#queryRows<RecoveryLinkRow>(
+      'SELECT * FROM claudian_cloud.project_recovery_links WHERE project_id = $1 ORDER BY recovery_link_id',
+      [this.#projectId], records,
+    )) {
+      const link = decodeProjectRecoveryLinkRow(row);
+      const envelope = Date.parse(snapshotAt) < Date.parse(link.secretReplayExpiresAt) ? link.envelope : undefined;
+      records.push({ kind: 'project-recovery-link', recordId: link.recoveryLinkId, revision: 1, value: {
+        authorityGeneration: link.authorityGeneration, createdAt: link.createdAt, expiresAt: link.expiresAt,
+        idempotencyKey: link.idempotencyKey, issuedByMemberId: link.issuedByMemberId, projectId: this.#projectId,
+        recoveryLinkId: link.recoveryLinkId, requestFingerprint: link.requestFingerprint,
+        secretReplayExpiresAt: link.secretReplayExpiresAt, tokenSha256: link.tokenSha256,
+        envelope: envelope ? { associatedDataSha256: envelope.associatedDataSha256,
+          ciphertext: frameBackupProtectedSecretEnvelope(envelope), createdAt: link.createdAt,
+          expiresAt: link.secretReplayExpiresAt, keyId: envelope.keyId, nonce: envelope.nonce, projectId: this.#projectId } : null,
+        redemption: link.redemption ?? null,
+      } });
     }
   }
 

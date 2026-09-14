@@ -646,7 +646,7 @@ describe('Accept journal persistence', () => {
                 requestId: 'request-shared',
               },
               projectId: 'project-complete',
-              protocolVersion: 11,
+              protocolVersion: 12,
               sequence: 1,
             }],
             latestSequence: 1,

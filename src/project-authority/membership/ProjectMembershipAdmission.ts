@@ -123,6 +123,10 @@ export class ProjectMembershipAdmission implements ProjectInvitationOperations, 
     const binding = await persistence.readPrincipalBindingState(input.principalId);
     if (binding === 'revoked') return { status: 'revoked' };
     if (binding !== undefined) return { status: 'already-bound' };
+    if (/^vault-[a-f0-9]{64}$/u.test(input.principalId)
+      && (await this.scope.membershipRecovery.findCredentialMembers(input.principalId.slice(6))).length !== 0) {
+      return { status: 'already-bound' };
+    }
     const project = await this.scope.getProject();
     const placement = await this.scope.getRepositoryPlacement();
     if (project === undefined || project.serviceState !== 'active' || placement === undefined

@@ -1,3 +1,4 @@
+import { encodeRecoveryLinkAssociatedData } from '../../project-authority/membership/ProjectRecoveryLinkAuthority.js';
 import { createPublicKey, verify } from 'node:crypto';
 
 import {
@@ -265,6 +266,9 @@ export class ClaimCustodyKeyReferenceVerifier {
         const existing = terminalTargetReceiptKeys.get(transferId);
         if (existing !== undefined && existing !== receiptKeyId) return invalid();
         terminalTargetReceiptKeys.set(transferId, receiptKeyId);
+      } else if (item.kind === 'project-recovery-link') {
+        const value = record(item.value);
+        if (value.envelope !== null) encryption.add(keyId(record(value.envelope), 'keyId'));
       } else if (
         item.kind === 'protected-invitation-envelope'
         || item.kind === 'protected-claim-override-envelope'
@@ -354,6 +358,25 @@ export class ClaimCustodyKeyReferenceVerifier {
         record(item.value) as unknown as
           CollabCheckpointProtectedClaimEnvelopeRecord['value'],
       );
+    }
+    for (const item of records) {
+      if (item.kind !== 'project-recovery-link') continue;
+      const link = record(item.value);
+      if (link.envelope === null) continue;
+      if (this.#membershipCustody === undefined) return invalid();
+      const value = record(link.envelope);
+      const authorityGeneration = link.authorityGeneration;
+      if (!Number.isSafeInteger(authorityGeneration) || Number(authorityGeneration) < 1
+        || typeof link.createdAt !== 'string' || typeof link.secretReplayExpiresAt !== 'string'
+        || typeof value.ciphertext !== 'string' || typeof value.associatedDataSha256 !== 'string'
+        || typeof value.nonce !== 'string') return invalid();
+      const framed = unframeBackupProtectedSecretEnvelope(value.ciphertext);
+      await this.#membershipCustody.open({ associatedData: encodeRecoveryLinkAssociatedData({
+        projectId: keyId(link, 'projectId'), recoveryLinkId: keyId(link, 'recoveryLinkId'),
+        authorityGeneration: Number(authorityGeneration), createdAt: link.createdAt,
+        secretReplayExpiresAt: link.secretReplayExpiresAt,
+      }), envelope: { algorithm: 'xchacha20-poly1305', associatedDataSha256: value.associatedDataSha256,
+        ciphertext: framed.ciphertext, keyId: keyId(value, 'keyId'), keyVersion: framed.keyVersion, nonce: value.nonce, tag: framed.tag } });
     }
     for (const item of records) {
       if (

@@ -12,7 +12,7 @@ import {
   withPostgresTestDatabase,
 } from '../../helpers/PostgresTestDatabase.js';
 
-const CURRENT_CHECKSUM = 'fb19a46a46b4d6ae644cb05d6b2df9d2c21afe0353cb4fc107231d469ee65c94';
+const CURRENT_CHECKSUM = '889ce8b82580c5428522baf761050023a2a8a68b4c9e204f5c9f9ebcd7d5642a';
 
 async function execute(connectionString: string, sql: string): Promise<void> {
   const client = new Client({ connectionString });
@@ -81,7 +81,7 @@ async function verifyCurrentSchema(database: PostgresTestDatabase): Promise<void
     await client.connect();
     const metadata = await client.query<{ readonly singleton: boolean; readonly version: number; readonly checksum: string; readonly transaction: string }>('SELECT singleton, version, checksum, xmin::text AS transaction FROM claudian_cloud.schema_metadata');
     const transaction = metadata.rows[0]?.transaction;
-    assert.deepEqual(metadata.rows, [{ singleton: true, version: 12, checksum: CURRENT_CHECKSUM, transaction }]);
+    assert.deepEqual(metadata.rows, [{ singleton: true, version: 13, checksum: CURRENT_CHECKSUM, transaction }]);
     await migrator.preflight();
     await migrator.apply();
     assert.deepEqual((await client.query('SELECT xmin::text AS transaction FROM claudian_cloud.schema_metadata')).rows, [{ transaction }]);
@@ -119,10 +119,12 @@ async function verifyCurrentSchema(database: PostgresTestDatabase): Promise<void
         'project_events',
         'project_invitations',
         'project_lifecycle_journals',
+        'project_member_recovery_credentials',
         'project_member_removal_journals',
         'project_membership_idempotency_tombstones',
         'project_memberships',
         'project_principal_bindings',
+        'project_recovery_links',
         'project_terminal_acknowledgements',
         'project_terminal_continuity_catalog',
         'project_terminal_responder_catalog',
@@ -177,16 +179,16 @@ async function verifyCurrentSchema(database: PostgresTestDatabase): Promise<void
     for (const update of [
       "SET checksum = repeat('0', 64)",
       'SET version = 10',
-      'SET version = 13',
+      'SET version = 14',
     ]) {
       await client.query(`UPDATE claudian_cloud.schema_metadata ${update}`);
       await expectMigrationError(migrator, 'schema-incompatible');
       await assert.rejects(migrator.preflight(), { code: 'schema-incompatible' });
-      await client.query('UPDATE claudian_cloud.schema_metadata SET version = 12, checksum = $1', [CURRENT_CHECKSUM]);
+      await client.query('UPDATE claudian_cloud.schema_metadata SET version = 13, checksum = $1', [CURRENT_CHECKSUM]);
     }
     await client.query('DELETE FROM claudian_cloud.schema_metadata');
     await expectMigrationError(migrator, 'schema-incompatible');
-    await client.query('INSERT INTO claudian_cloud.schema_metadata VALUES (true, 12, $1)', [CURRENT_CHECKSUM]);
+    await client.query('INSERT INTO claudian_cloud.schema_metadata VALUES (true, 13, $1)', [CURRENT_CHECKSUM]);
   } finally {
     await client.end();
   }
@@ -310,10 +312,12 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       { owner: 'claudian_cloud_migration', relation: 'project_events' },
       { owner: 'claudian_cloud_migration', relation: 'project_invitations' },
       { owner: 'claudian_cloud_migration', relation: 'project_lifecycle_journals' },
+      { owner: 'claudian_cloud_migration', relation: 'project_member_recovery_credentials' },
       { owner: 'claudian_cloud_migration', relation: 'project_member_removal_journals' },
       { owner: 'claudian_cloud_migration', relation: 'project_membership_idempotency_tombstones' },
       { owner: 'claudian_cloud_migration', relation: 'project_memberships' },
       { owner: 'claudian_cloud_migration', relation: 'project_principal_bindings' },
+      { owner: 'claudian_cloud_migration', relation: 'project_recovery_links' },
       { owner: 'claudian_cloud_migration', relation: 'project_terminal_acknowledgements' },
       { owner: 'claudian_cloud_migration', relation: 'project_terminal_continuity_catalog' },
       { owner: 'claudian_cloud_migration', relation: 'project_terminal_responder_catalog' },
@@ -437,10 +441,12 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       project_events: ['DELETE', 'INSERT', 'SELECT'],
       project_invitations: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       project_lifecycle_journals: ['INSERT', 'SELECT'],
+      project_member_recovery_credentials: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       project_member_removal_journals: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       project_membership_idempotency_tombstones: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       project_memberships: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       project_principal_bindings: ['INSERT', 'SELECT'],
+      project_recovery_links: ['DELETE', 'INSERT', 'SELECT', 'UPDATE'],
       project_terminal_acknowledgements: ['INSERT', 'SELECT'],
       project_terminal_continuity_catalog: ['SELECT'],
       project_terminal_responder_catalog: ['DELETE', 'INSERT', 'SELECT'],
@@ -629,6 +635,10 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
         relation: 'project_lifecycle_journals',
       },
       {
+        policy_name: 'project_member_recovery_credentials_project_scope',
+        relation: 'project_member_recovery_credentials',
+      },
+      {
         policy_name: 'project_member_removal_journals_project_scope',
         relation: 'project_member_removal_journals',
       },
@@ -643,6 +653,10 @@ async function verifySchemaContract(database: PostgresTestDatabase): Promise<voi
       {
         policy_name: 'project_principal_bindings_project_scope',
         relation: 'project_principal_bindings',
+      },
+      {
+        policy_name: 'project_recovery_links_project_scope',
+        relation: 'project_recovery_links',
       },
       {
         policy_name: 'project_terminal_acknowledgements_project_scope',
@@ -926,7 +940,7 @@ describe('PostgresSchemaInitializer', () => {
       try {
         await client.connect();
         const result = await client.query('SELECT singleton, version FROM claudian_cloud.schema_metadata');
-        assert.deepEqual(result.rows, [{ singleton: true, version: 12 }]);
+        assert.deepEqual(result.rows, [{ singleton: true, version: 13 }]);
       } finally {
         await client.end();
       }
@@ -963,9 +977,9 @@ describe('PostgresSchemaInitializer', () => {
       } finally {
         await admin.end();
       }
-      assert.deepEqual(await initializer.preflight(), { currentVersion: 0, targetVersion: 12 });
+      assert.deepEqual(await initializer.preflight(), { currentVersion: 0, targetVersion: 13 });
       await Promise.all([initializer.apply(), initializer.apply()]);
-      assert.deepEqual(await initializer.preflight(), { currentVersion: 12, targetVersion: 12 });
+      assert.deepEqual(await initializer.preflight(), { currentVersion: 13, targetVersion: 13 });
     });
   });
 

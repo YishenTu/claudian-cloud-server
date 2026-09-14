@@ -86,6 +86,40 @@ CREATE TABLE claudian_cloud.project_memberships (
     )
 );
 
+CREATE TABLE claudian_cloud.project_member_recovery_credentials (
+  project_id varchar(64) NOT NULL,
+  member_id varchar(64) NOT NULL,
+  credential_sha256 char(64) NOT NULL CHECK (credential_sha256 ~ '^[a-f0-9]{64}$'),
+  PRIMARY KEY (project_id, credential_sha256),
+  FOREIGN KEY (project_id, member_id) REFERENCES claudian_cloud.project_memberships(project_id, member_id)
+);
+CREATE INDEX project_member_recovery_credentials_member
+  ON claudian_cloud.project_member_recovery_credentials(project_id, member_id);
+
+CREATE TABLE claudian_cloud.project_recovery_links (
+  project_id varchar(64) NOT NULL,
+  recovery_link_id varchar(128) NOT NULL CHECK (recovery_link_id ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'),
+  authority_generation bigint NOT NULL CHECK (authority_generation BETWEEN 1 AND 9007199254740991),
+  issued_by_member_id varchar(64) NOT NULL,
+  idempotency_key varchar(128) NOT NULL CHECK (idempotency_key ~ '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'),
+  request_fingerprint char(64) NOT NULL CHECK (request_fingerprint ~ '^[a-f0-9]{64}$'),
+  token_sha256 char(64) NOT NULL CHECK (token_sha256 ~ '^[a-f0-9]{64}$'),
+  created_at timestamptz NOT NULL,
+  expires_at timestamptz NOT NULL,
+  secret_replay_expires_at timestamptz NOT NULL,
+  envelope_json text CHECK (envelope_json IS NULL OR octet_length(envelope_json) BETWEEN 1 AND 16384),
+  redemption_json text CHECK (redemption_json IS NULL OR octet_length(redemption_json) BETWEEN 1 AND 8192),
+  PRIMARY KEY (project_id, recovery_link_id),
+  UNIQUE (project_id, issued_by_member_id, idempotency_key),
+  UNIQUE (project_id, token_sha256),
+  FOREIGN KEY (project_id, issued_by_member_id) REFERENCES claudian_cloud.project_memberships(project_id, member_id),
+  CHECK (created_at = date_trunc('second', created_at)
+    AND expires_at = created_at + interval '15 minutes'
+    AND secret_replay_expires_at = created_at + interval '10 minutes')
+);
+CREATE INDEX project_recovery_links_expiry ON claudian_cloud.project_recovery_links(project_id, authority_generation, expires_at)
+  WHERE redemption_json IS NULL;
+
 CREATE TABLE claudian_cloud.repository_placements (
   project_id varchar(64) PRIMARY KEY,
   storage_node_id varchar(64) NOT NULL,
@@ -2398,6 +2432,10 @@ BEGIN
     RETURN false;
   END IF;
 
+  DELETE FROM claudian_cloud.project_recovery_links
+   WHERE project_id = requested_project_id;
+  DELETE FROM claudian_cloud.project_member_recovery_credentials
+   WHERE project_id = requested_project_id;
   DELETE FROM claudian_cloud.leave_project_request_facts
    WHERE project_id = requested_project_id;
   DELETE FROM claudian_cloud.protected_claim_override_envelopes
@@ -3141,3 +3179,17 @@ GRANT UPDATE (acknowledged_at)
   ON claudian_cloud.transfer_redemption_receipts TO claudian_cloud_runtime;
 GRANT UPDATE (state, target_principal_id, operation_intent_id, redemption_receipt_id, updated_at)
   ON claudian_cloud.transferred_membership_claims TO claudian_cloud_runtime;
+
+ALTER TABLE claudian_cloud.project_recovery_links ENABLE ROW LEVEL SECURITY;
+ALTER TABLE claudian_cloud.project_recovery_links FORCE ROW LEVEL SECURITY;
+CREATE POLICY project_recovery_links_project_scope ON claudian_cloud.project_recovery_links
+  USING (project_id = current_setting('claudian_cloud.project_id', true))
+  WITH CHECK (project_id = current_setting('claudian_cloud.project_id', true));
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE claudian_cloud.project_recovery_links TO claudian_cloud_runtime;
+
+ALTER TABLE claudian_cloud.project_member_recovery_credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE claudian_cloud.project_member_recovery_credentials FORCE ROW LEVEL SECURITY;
+CREATE POLICY project_member_recovery_credentials_project_scope ON claudian_cloud.project_member_recovery_credentials
+  USING (project_id = current_setting('claudian_cloud.project_id', true))
+  WITH CHECK (project_id = current_setting('claudian_cloud.project_id', true));
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE claudian_cloud.project_member_recovery_credentials TO claudian_cloud_runtime;

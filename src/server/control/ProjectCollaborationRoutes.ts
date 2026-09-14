@@ -4,6 +4,7 @@ import {
   COLLAB_AUTHORITY_TRANSFER_OPERATIONS,
   COLLAB_PROJECT_MEMBERSHIP_OPERATIONS,
   COLLAB_PROJECT_RETIREMENT_OPERATIONS,
+  COLLAB_PROJECT_RECOVERY_OPERATIONS,
   collabControlOperationCodec,
   matchCollabCloudRoute,
   type CollabControlOperation,
@@ -24,7 +25,8 @@ import {
 type RoutedElsewhereOperation =
   | typeof COLLAB_AUTHORITY_TRANSFER_OPERATIONS[number]
   | typeof COLLAB_PROJECT_MEMBERSHIP_OPERATIONS[number]
-  | typeof COLLAB_PROJECT_RETIREMENT_OPERATIONS[number];
+  | typeof COLLAB_PROJECT_RETIREMENT_OPERATIONS[number]
+  | typeof COLLAB_PROJECT_RECOVERY_OPERATIONS[number];
 
 type ActiveCollaborationOperation = Exclude<
   CollabControlOperation,
@@ -35,6 +37,7 @@ const ROUTED_ELSEWHERE_OPERATION_SET: ReadonlySet<string> = new Set([
   ...COLLAB_AUTHORITY_TRANSFER_OPERATIONS,
   ...COLLAB_PROJECT_MEMBERSHIP_OPERATIONS,
   ...COLLAB_PROJECT_RETIREMENT_OPERATIONS,
+  ...COLLAB_PROJECT_RECOVERY_OPERATIONS,
 ]);
 
 function isActiveCollaborationOperation(

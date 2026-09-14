@@ -654,3 +654,22 @@ describe('ClaimCustodyKeyReferenceVerifier', () => {
     assert.deepEqual(checked, [capturedRecords]);
   });
 });
+
+it('verifies live recovery-link encryption keys and authenticates their envelopes', async () => {
+  const custody = new ProtectedSecretCustody({ activeKeyId: 'recovery-key', keys: [{ keyId: 'recovery-key', keyVersion: 1, key: Buffer.alloc(32, 7) }] });
+  const facts = { projectId: 'project_recovery', recoveryLinkId: 'recovery_link', authorityGeneration: 4,
+    createdAt: '2026-09-14T12:00:00.000Z', secretReplayExpiresAt: '2026-09-14T12:10:00.000Z' };
+  const associatedData = JSON.stringify({ purpose: 'project-recovery-link', envelopeVersion: 1, ...facts });
+  const envelope = await custody.seal({ associatedData, secret: 'a'.repeat(64) });
+  const value = { ...facts, envelope: { associatedDataSha256: envelope.associatedDataSha256,
+    ciphertext: frameBackupProtectedSecretEnvelope(envelope), createdAt: facts.createdAt, expiresAt: facts.secretReplayExpiresAt,
+    keyId: envelope.keyId, nonce: envelope.nonce, projectId: facts.projectId } };
+  const calls: string[][] = [];
+  const verifier = new ClaimCustodyKeyReferenceVerifier({ custody: { open: () => Promise.resolve('unused') }, membershipCustody: custody,
+    keyring: { assertReferences: input => { calls.push([...input.encryptionKeyIds]); }, assertReceiptPublicKey() {} } });
+  await verifier.verify([{ kind: 'project-recovery-link', value }]);
+  assert.deepEqual(calls, [['recovery-key']]);
+  await assert.rejects(verifier.verify([{ kind: 'project-recovery-link', value: { ...value, authorityGeneration: 5 } }]));
+  await assert.rejects(verifier.verify([{ kind: 'project-recovery-link', value: { ...value,
+    envelope: { ...value.envelope, ciphertext: 'broken' } } }]));
+});
