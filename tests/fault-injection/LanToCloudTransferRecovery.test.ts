@@ -759,6 +759,28 @@ describe('LAN-to-Cloud cross-store recovery', () => {
             } })).phase, 'cancelled');
           } finally { await restarted.close(); }
         }
+        const cancelledRoot = join(root, 'cancelled-activation-attempt');
+        await mkdir(cancelledRoot);
+        const cancelledActivation = await importTransfer(
+          cancelledRoot, importer, 'project-activation-recovery', 'transfer-before-activation', 0,
+        );
+        const cancelling = createCoordinator(cancelledActivation);
+        await beginValidateAndPublish(cancelling, cancelledActivation);
+        const cancellationRequest = {
+          projectId: cancelledActivation.projectId, transferId: cancelledActivation.transferId,
+        };
+        assert.equal((await cancelling.cancel({
+          principalId: cancelledActivation.principalId,
+          request: { ...cancellationRequest, expectedPhase: 'repository-published',
+            idempotencyKey: 'cancel-before-activation' },
+        })).phase, 'target-cleaned');
+        assert.equal((await cancelling.cancel({
+          principalId: cancelledActivation.principalId,
+          request: { ...cancellationRequest, expectedPhase: 'target-cleaned',
+            idempotencyKey: 'reopen-before-activation' },
+        })).phase, 'cancelled');
+        await cancelling.close();
+
         const activationTransfer = await importTransfer(
           root,
           importer,
@@ -943,6 +965,27 @@ describe('LAN-to-Cloud cross-store recovery', () => {
           Buffer.from(activationTransfer.projectId).toString('hex'),
           `repo_${activationTransfer.projectId.replaceAll('-', '_')}`,
         ));
+        const restartedCoordination = postgres(database);
+        try {
+          await new ActiveClaimCustodyKeyReferenceGate({
+            coordination: restartedCoordination,
+            metadata: { read: () => Promise.resolve({
+              authorityId: 'authority-real', authorityVolumeIdentity: 'volume-real',
+              coordinationSchemaVersion: 12, repositoryFormatVersion: 1, restoreEpoch: 1,
+              serverBuild: 'cloud-build-real',
+            }) },
+            verifier: new ClaimCustodyKeyReferenceVerifier({
+              custody: { open: () => Promise.reject(new Error('unexpected-custody-envelope')) },
+              keyring: {
+                assertReferences: references => assert.deepEqual(references.receiptKeyIds, ['receipt-key']),
+                assertReceiptPublicKey: (keyId, publicKey) => {
+                  assert.equal(keyId, 'receipt-key');
+                  assert.equal(publicKey, PUBLIC_KEY);
+                },
+              },
+            }),
+          }).verifyAll(new AbortController().signal);
+        } finally { await restartedCoordination.close(); }
         const activationLease = await coordination.acquireProjectLease(
           activationTransfer.projectId,
         );
