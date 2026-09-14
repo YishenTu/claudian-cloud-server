@@ -134,7 +134,8 @@ class MemoryPortability {
     }
     const current = this.journal;
     assert.ok(current);
-    if (current.phase === input.nextPhase && current.state === input.nextState) {
+    if (current.phase === input.nextPhase && current.state === input.nextState
+      && (input.checkpointSha256 === undefined || current.checkpointSha256 === input.checkpointSha256)) {
       if (
         current.resultSha256 === undefined
         && input.resultSha256 !== undefined
@@ -1586,6 +1587,34 @@ describe('LanToCloudTransferCoordinator', () => {
     )).phase, 'cancelled');
   });
 
+  it('keeps status and cancellation usable when checkpoint validation fails after receipt', async () => {
+    const test = fixture();
+    await test.coordinator.begin({
+      principalId: HOST_PRINCIPAL_ID,
+      request: {
+        checkpointManifestSha256: test.checkpoint.manifest.manifestSha256,
+        expectedSourceAuthorityGeneration: 1, idempotencyKey: 'intent-begin-failed-checkpoint',
+        projectId: PROJECT_ID, sourceHostMemberId: HOST_MEMBER_ID, sourceProof: 'source-proof',
+        targetUrl: TARGET_URL, transferId: TRANSFER_ID,
+      },
+    });
+    test.loseCheckpoint();
+    await assert.rejects(test.coordinator.completeCheckpoint({
+      principalId: HOST_PRINCIPAL_ID, projectId: PROJECT_ID, transferId: TRANSFER_ID,
+    }));
+    const status = await test.coordinator.getStatus({
+      principalId: HOST_PRINCIPAL_ID, request: { projectId: PROJECT_ID, transferId: TRANSFER_ID },
+    });
+    assert.equal(status.phase, 'checkpoint-received');
+    assert.equal(status.checkpointSha256, test.checkpoint.manifest.manifestSha256);
+    const cancelled = await test.coordinator.cancel({
+      principalId: HOST_PRINCIPAL_ID,
+      request: { expectedPhase: 'checkpoint-received', idempotencyKey: 'cancel-failed-checkpoint', projectId: PROJECT_ID, transferId: TRANSFER_ID },
+    });
+    assert.equal(cancelled.phase, 'target-cleaned');
+    assert.equal((await confirmSourceReopened(test.coordinator, 'reopen-failed-checkpoint')).phase, 'cancelled');
+  });
+
   it('cancels an incomplete checkpoint-received attempt without publication', async () => {
     const test = fixture();
     await test.coordinator.begin({
@@ -1613,6 +1642,11 @@ describe('LanToCloudTransferCoordinator', () => {
       updatedAt: new Date(Date.parse(journal.updatedAt) + 1).toISOString(),
     });
     test.loseCheckpoint();
+    const recovered = await test.coordinator.getStatus({
+      principalId: HOST_PRINCIPAL_ID, request: { projectId: PROJECT_ID, transferId: TRANSFER_ID },
+    });
+    assert.equal(recovered.phase, 'checkpoint-received');
+    assert.equal(recovered.checkpointSha256, test.checkpoint.manifest.manifestSha256);
     const cleaned = await test.coordinator.cancel({
       principalId: HOST_PRINCIPAL_ID,
       request: {

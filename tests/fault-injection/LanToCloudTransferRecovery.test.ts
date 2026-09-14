@@ -574,11 +574,14 @@ describe('LAN-to-Cloud cross-store recovery', () => {
       let now = Date.parse(CREATED_AT) - 1_000;
       const claimSequences = new Map<string, number>();
       const activation = new LanToCloudProjectActivation();
+      const rejectedCheckpoints = new Set<string>();
       const checkpointPort = (transfer: TransferFixture) => ({
         discardAttempt: (
           attempt: ValidatedProjectCheckpoint['attempt'],
         ) => importer.discardCheckpoint(attempt).then(() => undefined),
-        validateStaged: () => Promise.resolve(transfer.checkpoint),
+        validateStaged: () => rejectedCheckpoints.has(transfer.transferId)
+          ? Promise.reject(new Error('injected-checkpoint-validation-failure'))
+          : Promise.resolve(transfer.checkpoint),
         validateStagedWithRepository: (
           _input: unknown,
           verifiedRepository: ValidatedProjectCheckpoint['repository'],
@@ -663,6 +666,61 @@ describe('LAN-to-Cloud cross-store recovery', () => {
         });
       };
       try {
+        for (const interrupted of [false, true]) {
+          const transfer = await importTransfer(root, importer,
+            `project-receipt-${String(interrupted)}`, `transfer-receipt-${String(interrupted)}`, 0);
+          const coordinator = createCoordinator(transfer);
+          const request = { projectId: transfer.projectId, transferId: transfer.transferId };
+          await coordinator.begin({
+            principalId: transfer.principalId,
+            request: {
+              ...request,
+              checkpointManifestSha256: transfer.checkpoint.manifest.manifestSha256,
+              expectedSourceAuthorityGeneration: 1,
+              idempotencyKey: `begin-${transfer.transferId}`,
+              sourceHostMemberId: HOST_MEMBER_ID,
+              sourceProof: `proof-${transfer.transferId}`,
+              targetUrl: TARGET_URL,
+            },
+          });
+          if (interrupted) {
+            // Inject the durable state left by a process interrupted before validation.
+            const lease = await coordination.acquireProjectLease(transfer.projectId);
+            try {
+              await lease.withProjectScope(scope => scope.portability.advanceLifecycleJournal({
+                operationId: transfer.transferId, expectedPhase: 'source-quiesced', expectedState: 'active',
+                nextPhase: 'checkpoint-received', nextState: 'active', scheduledAt: EXPIRES_AT,
+                updatedAt: new Date(now += 1_000).toISOString(),
+              }));
+            } finally { await lease.close(); }
+          } else {
+            rejectedCheckpoints.add(transfer.transferId);
+            await assert.rejects(coordinator.completeCheckpoint({ principalId: transfer.principalId, ...request }));
+          }
+          await coordinator.close();
+          const restarted = createCoordinator(transfer);
+          try {
+            await assert.rejects(restarted.getStatus({ principalId: 'principal:unrelated', request }),
+              error => error instanceof LanToCloudTransferCoordinatorError && error.code === 'authorization-denied');
+            const lease = await coordination.acquireProjectLease(transfer.projectId);
+            try {
+              const journal = await lease.withProjectScope(scope => scope.portability.getLifecycleJournal(transfer.transferId));
+              assert.equal(journal?.checkpointSha256, interrupted ? undefined : transfer.checkpoint.manifest.manifestSha256);
+            } finally { await lease.close(); }
+            const received = await restarted.getStatus({ principalId: transfer.principalId, request });
+            assert.equal(received.phase, 'checkpoint-received');
+            assert.equal(received.checkpointSha256, transfer.checkpoint.manifest.manifestSha256);
+            assert.equal((await restarted.getCheckpointUploadStatus({ principalId: transfer.principalId, request })).phase,
+              'checkpoint-received');
+            const cleaned = await restarted.cancel({ principalId: transfer.principalId, request: {
+              ...request, expectedPhase: 'checkpoint-received', idempotencyKey: `cancel-${transfer.transferId}`,
+            } });
+            assert.equal(cleaned.phase, 'target-cleaned');
+            assert.equal((await restarted.cancel({ principalId: transfer.principalId, request: {
+              ...request, expectedPhase: 'target-cleaned', idempotencyKey: `reopen-${transfer.transferId}`,
+            } })).phase, 'cancelled');
+          } finally { await restarted.close(); }
+        }
         const activationTransfer = await importTransfer(
           root,
           importer,

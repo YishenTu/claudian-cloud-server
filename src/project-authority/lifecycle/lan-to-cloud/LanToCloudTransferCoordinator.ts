@@ -655,12 +655,14 @@ async function advanceLifecycle(
   lease: PinnedProjectLease,
   journal: ProjectLifecycleJournalRecord,
   input: Readonly<{
+    readonly checkpointSha256?: string;
     readonly nextPhase: string;
     readonly nextState?: 'active' | 'cancelled' | 'completed';
     readonly scheduledAt: CollabIsoTimestamp;
   }>,
 ): Promise<void> {
   await lease.withProjectScope(scope => scope.portability.advanceLifecycleJournal({
+    ...(input.checkpointSha256 === undefined ? {} : { checkpointSha256: input.checkpointSha256 }),
     expectedPhase: journal.phase,
     expectedState: journal.state,
     nextPhase: input.nextPhase,
@@ -1069,6 +1071,7 @@ implements ProjectLifecycleRecoveryOwner {
       }
       if (exact.journal.phase === 'source-quiesced') {
         await this.#advance(lease, exact.journal, {
+          checkpointSha256: exact.evidence.checkpointManifestSha256,
           nextPhase: 'checkpoint-received',
           scheduledAt: exact.recovery.expiresAt,
         });
@@ -1490,6 +1493,7 @@ implements ProjectLifecycleRecoveryOwner {
         return binding?.state === 'active';
       });
       if (!sourceAuthorized && !targetAuthorized) return fail('authorization-denied');
+      await this.#recoverReceivedCheckpointIdentity(lease, exact);
       return this.#requireStatus(lease, request.transferId);
     });
   }
@@ -1658,7 +1662,27 @@ implements ProjectLifecycleRecoveryOwner {
     principalId: string,
     signal?: AbortSignal,
   ): Promise<ExactTransfer> {
-    return this.#exactTransfer(lease, transferId, signal, principalId);
+    const exact = await this.#exactTransfer(lease, transferId, signal, principalId);
+    return this.#recoverReceivedCheckpointIdentity(lease, exact);
+  }
+
+  async #recoverReceivedCheckpointIdentity(
+    lease: PinnedProjectLease,
+    exact: ExactTransfer,
+  ): Promise<ExactTransfer> {
+    if (exact.journal.phase !== 'checkpoint-received') return exact;
+    if (exact.journal.checkpointSha256 !== undefined) {
+      if (exact.journal.checkpointSha256 !== exact.evidence.checkpointManifestSha256) return fail('recovery-required');
+      return exact;
+    }
+    // Older interrupted attempts already pin this identity in verified source evidence.
+    // Repair only after caller authorization, under the same Project lease.
+    await this.#advance(lease, exact.journal, {
+      checkpointSha256: exact.evidence.checkpointManifestSha256,
+      nextPhase: 'checkpoint-received',
+      scheduledAt: exact.recovery.expiresAt,
+    });
+    return this.#exactTransfer(lease, exact.journal.operationId);
   }
 
   async #exactTransfer(
@@ -1983,6 +2007,7 @@ implements ProjectLifecycleRecoveryOwner {
     lease: PinnedProjectLease,
     journal: ProjectLifecycleJournalRecord,
     input: Readonly<{
+      readonly checkpointSha256?: string;
       readonly nextPhase: string;
       readonly nextState?: 'active' | 'cancelled' | 'completed';
       readonly scheduledAt: CollabIsoTimestamp;
