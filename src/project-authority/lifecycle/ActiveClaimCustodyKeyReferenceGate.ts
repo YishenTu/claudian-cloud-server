@@ -258,6 +258,7 @@ export class ActiveClaimCustodyKeyReferenceGate {
             !== (journal.direction === 'cloud-to-lan' ? 'lan' : 'cloud')
         ) return fail();
         const continuity = await scope.checkpoint.readTerminalProjectContinuityRecords({
+          allowEmpty: true,
           maximumCoordinationBytes:
             COLLAB_CHECKPOINT_ARTIFACT_LIMITS.maxCoordinationBytes,
         });

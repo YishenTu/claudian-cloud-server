@@ -1,3 +1,5 @@
+import { ActiveClaimCustodyKeyReferenceGate } from '../../src/project-authority/lifecycle/ActiveClaimCustodyKeyReferenceGate.js';
+import { ClaimCustodyKeyReferenceVerifier } from '../../src/environment-maintenance/commands/ClaimCustodyKeyReferenceVerifier.js';
 import { ProjectMembershipAdministration } from '../../src/project-authority/membership/ProjectMembershipAdministration.js';
 import { EnvironmentProjectRecovery } from '../../src/environment-maintenance/recovery/EnvironmentProjectRecovery.js';
 import { DeletionCoordinator } from '../../src/project-authority/lifecycle/delete/DeletionCoordinator.js';
@@ -698,6 +700,24 @@ describe('LAN-to-Cloud cross-store recovery', () => {
             await assert.rejects(coordinator.completeCheckpoint({ principalId: transfer.principalId, ...request }));
           }
           await coordinator.close();
+          await new ActiveClaimCustodyKeyReferenceGate({
+            coordination,
+            metadata: { read: () => Promise.resolve({
+              authorityId: 'authority-real', authorityVolumeIdentity: 'volume-real',
+              coordinationSchemaVersion: 12, repositoryFormatVersion: 1, restoreEpoch: 1,
+              serverBuild: 'cloud-build-real',
+            }) },
+            verifier: new ClaimCustodyKeyReferenceVerifier({
+              custody: { open: () => Promise.reject(new Error('unexpected-custody-envelope')) },
+              keyring: {
+                assertReferences: references => assert.deepEqual(references.receiptKeyIds, ['receipt-key']),
+                assertReceiptPublicKey: (keyId, publicKey) => {
+                  assert.equal(keyId, 'receipt-key');
+                  assert.equal(publicKey, PUBLIC_KEY);
+                },
+              },
+            }),
+          }).verifyAll(new AbortController().signal);
           const restarted = createCoordinator(transfer);
           try {
             await assert.rejects(restarted.getStatus({ principalId: 'principal:unrelated', request }),

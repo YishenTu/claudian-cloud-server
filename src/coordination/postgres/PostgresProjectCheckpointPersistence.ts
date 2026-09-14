@@ -278,7 +278,7 @@ class BoundedCheckpointRecords {
     }
   }
 
-  terminal(): readonly TerminalProjectContinuityRecord[] {
+  terminal(allowEmpty = false): readonly TerminalProjectContinuityRecord[] {
     const allowed = new Set<string>([
       'lifecycle-journal',
       'protected-claim-envelope',
@@ -294,7 +294,7 @@ class BoundedCheckpointRecords {
         - (KIND_ORDER.get(right.kind) ?? Number.MAX_SAFE_INTEGER)
       || left.recordId.localeCompare(right.recordId, 'en-US')
     ));
-    if (sorted.length === 0 || sorted.some(record => !allowed.has(record.kind))) {
+    if ((!allowEmpty && sorted.length === 0) || sorted.some(record => !allowed.has(record.kind))) {
       invalidRecord();
     }
     if (Buffer.byteLength(
@@ -347,6 +347,7 @@ implements ProjectCheckpointPersistence {
   }
 
   async readTerminalProjectContinuityRecords(input: Readonly<{
+    readonly allowEmpty?: boolean;
     readonly maximumCoordinationBytes: number;
   }>): Promise<readonly TerminalProjectContinuityRecord[]> {
     const records = new BoundedCheckpointRecords(input.maximumCoordinationBytes);
@@ -356,7 +357,7 @@ implements ProjectCheckpointPersistence {
     await this.#readTerminalResponders(records, true);
     await this.#readProtectedEnvelopes(records, true);
     await this.#readTombstone(records);
-    return records.terminal();
+    return records.terminal(input.allowEmpty);
   }
 
   async #readPortable(records: BoundedCheckpointRecords): Promise<void> {

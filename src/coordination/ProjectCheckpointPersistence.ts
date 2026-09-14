@@ -67,6 +67,8 @@ export interface ProjectCheckpointPersistence {
     input: ReadProjectCheckpointRecordsInput,
   ): Promise<readonly ProjectCheckpointRecord[]>;
   readTerminalProjectContinuityRecords(input: Readonly<{
+    /** Incoming recovery may precede any retained terminal history. */
+    readonly allowEmpty?: boolean;
     readonly maximumCoordinationBytes: number;
   }>): Promise<readonly TerminalProjectContinuityRecord[]>;
 }
