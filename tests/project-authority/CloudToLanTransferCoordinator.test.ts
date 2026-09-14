@@ -559,6 +559,7 @@ class Harness {
     this.targetTrust = {
       verifyAcceptance: async input => Object.freeze({
         authorityFingerprint: 'f'.repeat(64),
+        caCertificatePem: '-----BEGIN CERTIFICATE-----\nQUJDRA==\n-----END CERTIFICATE-----',
         principalId: input.principalId,
         projectId: input.request.projectId,
         receiptKeyId: 'receipt-key-target',
@@ -880,6 +881,15 @@ describe('CloudToLanTransferCoordinator', () => {
     });
     assert.equal(completed.phase, 'completed');
     assert.equal(completed.state, 'completed');
+    const expectedLanTarget = {
+      caCertificatePem: '-----BEGIN CERTIFICATE-----\nQUJDRA==\n-----END CERTIFICATE-----',
+      caFingerprint: 'f'.repeat(64),
+    };
+    assert.deepEqual(Reflect.get(completed, 'lanTarget'), expectedLanTarget);
+    assert.deepEqual(Reflect.get(await coordinator.getStatus({
+      principalId: OFFLINE_PRINCIPAL,
+      request: { projectId: PROJECT_ID, transferId: begun.transferId },
+    }), 'lanTarget'), expectedLanTarget);
     assert.equal(harness.state.deletionIntent?.reason, 'cloud-to-lan');
     assert.equal(harness.state.deletionIntent?.placementGeneration, 7);
     assert.equal(harness.state.deletionJournals.get('delete-transfer')?.phase, 'traffic-denied');

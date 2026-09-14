@@ -145,7 +145,7 @@ describe('ProjectEventRoutes', () => {
             ? { events: [], kind: 'events', latestSequence: 0 }
             : { events: [{
               kind: 'membership.updated', occurredAt: '2026-08-21T00:00:00.000Z',
-              payload: { memberId: 'member-a' }, projectId, protocolVersion: 10, sequence: 1,
+              payload: { memberId: 'member-a' }, projectId, protocolVersion: 11, sequence: 1,
             }], kind: 'events', latestSequence: 1 };
         },
       },
@@ -455,7 +455,7 @@ describe('ProjectEventRoutes', () => {
               occurredAt: '2026-08-21T00:00:00.000Z',
               payload: { memberId: `member-${String(eventSequence)}` },
               projectId,
-              protocolVersion: 10 as const,
+              protocolVersion: 11 as const,
               sequence: eventSequence,
             };
           },
@@ -493,7 +493,7 @@ describe('ProjectEventRoutes', () => {
           occurredAt: '2026-08-21T00:00:00.000Z',
           payload: { memberId: 'member-1' },
           projectId: 'project-a',
-          protocolVersion: 10,
+          protocolVersion: 11,
           sequence: 1,
         },
       );
@@ -539,7 +539,7 @@ describe('ProjectEventRoutes', () => {
             occurredAt: '2026-08-21T00:00:00.000Z',
             payload: { memberId: 'member-a' },
             projectId,
-            protocolVersion: 10,
+            protocolVersion: 11,
             sequence: latestSequence,
           }] : [],
           kind: 'events',
@@ -595,7 +595,7 @@ describe('ProjectEventRoutes', () => {
             occurredAt: '2026-08-21T00:00:00.000Z',
             payload: { memberId: 'member-a' },
             projectId,
-            protocolVersion: 10,
+            protocolVersion: 11,
             sequence: 1,
           }],
           kind: 'events',

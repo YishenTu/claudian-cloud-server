@@ -386,6 +386,7 @@ implements CloudToLanTargetTrustPort, LanToCloudSourceTrustPort {
       ) return fail();
       return Object.freeze({
         authorityFingerprint: envelope.caFingerprint,
+        caCertificatePem: certificate(envelope.caCertificatePem, envelope.caFingerprint).toString(),
         principalId: input.principalId,
         projectId: payload.projectId,
         receiptKeyId: payload.receiptKeyId,

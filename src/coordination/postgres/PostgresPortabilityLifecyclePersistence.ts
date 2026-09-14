@@ -1140,6 +1140,23 @@ implements PortabilityLifecyclePersistence {
     return rows[0] === undefined ? undefined : lifecycleJournal(rows[0]);
   }
 
+  async findCompletedCloudToLanTransferId(
+    sourceAuthorityGeneration: number,
+  ): Promise<string | undefined> {
+    positiveInteger(sourceAuthorityGeneration);
+    const rows = await this.#query<{ readonly operation_id: string }>(
+      `SELECT operation_id
+         FROM claudian_cloud.project_lifecycle_journals
+        WHERE project_id = $1 AND kind = 'authority-transfer'
+          AND direction = 'cloud-to-lan' AND phase = 'completed' AND state = 'completed'
+          AND expected_authority_generation = $2
+        LIMIT 2`,
+      [this.#projectId, sourceAuthorityGeneration],
+    );
+    if (rows.length > 1) stateConflict();
+    return rows[0]?.operation_id;
+  }
+
   async getNonterminalLifecycleJournal(): Promise<
     ProjectLifecycleJournalRecord | undefined
   > {
@@ -2134,7 +2151,8 @@ implements PortabilityLifecyclePersistence {
         && acknowledgement.principalId === principal.principalId
       ))
     ));
-    if (!allAcknowledged && Date.parse(removedAt) < Date.parse(expectedExpiresAt)) {
+    if ((input.operationKind === 'authority-transfer' || !allAcknowledged)
+      && Date.parse(removedAt) < Date.parse(expectedExpiresAt)) {
       stateConflict();
     }
     const rows = await this.#query<{ readonly operation_id: string }>(
@@ -2143,14 +2161,14 @@ implements PortabilityLifecyclePersistence {
           AND expires_at = $4::timestamptz
           AND (
             $5::timestamptz >= expires_at
-            OR NOT EXISTS (
+            OR (operation_kind = 'retire' AND NOT EXISTS (
               SELECT 1
                 FROM claudian_cloud.project_terminal_acknowledgements AS ack
                WHERE ack.project_id = project_terminal_responders.project_id
                  AND ack.operation_kind = project_terminal_responders.operation_kind
                  AND ack.operation_id = project_terminal_responders.operation_id
                  AND ack.acknowledged_at IS NULL
-            )
+            ))
           )
        RETURNING operation_id`,
       [

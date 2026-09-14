@@ -345,7 +345,7 @@ async function pushPersonalCommit(
     '-c',
     `http.extraHeader=X-Claudian-Development-Actor: ${actor}`,
     'push',
-    `${baseUrl}/v6/projects/${PROJECT_ID}/repository.git`,
+    `${baseUrl}/v7/projects/${PROJECT_ID}/repository.git`,
     `HEAD:${personalRef}`,
   ]);
   return oid;
@@ -468,7 +468,7 @@ describe('collaboration operation gate', { concurrency: false }, () => {
         actor: string = ACTORS[1],
         bodyProjectId = projectId,
       ): Promise<Response> => fetch(
-        `${baseUrl}/v6/projects/${projectId}/operations/resolveTicketNumber`,
+        `${baseUrl}/v7/projects/${projectId}/operations/resolveTicketNumber`,
         {
           body: JSON.stringify(envelope({
             projectId: bodyProjectId,

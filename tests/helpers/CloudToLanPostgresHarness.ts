@@ -465,6 +465,7 @@ export function cloudToLanCoordinator(input: Readonly<{
       readonly targetUrl: string;
     }>) => Promise.resolve(Object.freeze({
       authorityFingerprint: 'f'.repeat(64),
+      caCertificatePem: '-----BEGIN CERTIFICATE-----\nQUJDRA==\n-----END CERTIFICATE-----',
       principalId: request.principalId,
       projectId: request.request.projectId,
       receiptKeyId: `receipt-${sha256(input.projectId).slice(0, 16)}`,

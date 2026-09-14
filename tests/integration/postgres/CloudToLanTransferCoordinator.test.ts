@@ -233,6 +233,7 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
         targetTrust: {
           verifyAcceptance: input => Promise.resolve(Object.freeze({
           authorityFingerprint: 'f'.repeat(64),
+            caCertificatePem: '-----BEGIN CERTIFICATE-----\nQUJDRA==\n-----END CERTIFICATE-----',
             principalId: input.principalId,
             projectId: input.request.projectId,
             receiptKeyId: 'receipt-key-target-real',
@@ -249,6 +250,10 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
         },
       });
       try {
+        assert.deepEqual(await coordinator.getSuccessor({
+          principalId: MANAGER_PRINCIPAL,
+          request: { projectId: PROJECT_ID, sourceAuthorityGeneration: 4 },
+        }), { successor: null });
         const begun = await coordinator.begin({
           principalId: MANAGER_PRINCIPAL,
           request: {
@@ -412,6 +417,11 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
           },
         });
         assert.equal(completed.state, 'completed');
+        const expectedLanTarget = {
+          caCertificatePem: '-----BEGIN CERTIFICATE-----\nQUJDRA==\n-----END CERTIFICATE-----',
+          caFingerprint: 'f'.repeat(64),
+        };
+        assert.deepEqual(Reflect.get(completed, 'lanTarget'), expectedLanTarget);
         assert.equal(Date.parse(completed.expiresAt) > Date.parse(completed.updatedAt), true);
         const managerEnvelope = await store.withProjectScope(
           PROJECT_ID,
@@ -567,6 +577,23 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
           request: { projectId: PROJECT_ID, transferId: begun.transferId },
         });
         assert.equal(offlineClaim.expiresAt, completed.expiresAt);
+        const successorRequest = { projectId: PROJECT_ID, sourceAuthorityGeneration: 4 };
+        assert.deepEqual(await coordinator.getSuccessor({
+          principalId: OFFLINE_PRINCIPAL, request: successorRequest,
+        }), { successor: completed });
+        assert.deepEqual(await coordinator.getSuccessor({
+          principalId: MANAGER_PRINCIPAL, request: successorRequest,
+        }), { successor: completed });
+        for (const request of [
+          successorRequest,
+          { ...successorRequest, projectId: 'project-unrelated' },
+          { ...successorRequest, sourceAuthorityGeneration: 2 },
+        ]) {
+          await assert.rejects(coordinator.getSuccessor({
+            principalId: 'principal:unrelated', request,
+          }), (error: unknown) => error instanceof CloudToLanTransferCoordinatorError
+            && error.code === 'authorization-denied');
+        }
         const offlineEnvelope = await store.withProjectScope(
           PROJECT_ID,
           scope => scope.portability.getProtectedClaimEnvelope(
@@ -605,6 +632,23 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
           ),
         ), undefined);
         if (memberChange !== 'none') return;
+        await store.withProjectScope(PROJECT_ID, async scope => {
+          const responder = await scope.portability.getTerminalResponder('authority-transfer', begun.transferId);
+          assert.ok(responder);
+          for (const principal of responder.eligiblePrincipals) {
+            await scope.portability.acknowledgeTerminalResponder({
+              ...principal, operationId: begun.transferId, operationKind: 'authority-transfer',
+              acknowledgedAt: completed.updatedAt,
+            });
+          }
+        });
+        await assert.rejects(new TerminalResponderExpiry({ coordination: store }).expire({
+          operationId: begun.transferId, operationKind: 'authority-transfer',
+          projectId: PROJECT_ID, removedAt: completed.updatedAt,
+        }));
+        assert.deepEqual(await coordinator.getSuccessor({
+          principalId: MANAGER_PRINCIPAL, request: successorRequest,
+        }), { successor: completed });
         const terminalReferences: unknown[] = [];
         await new ActiveClaimCustodyKeyReferenceGate({
           coordination: store,
@@ -641,6 +685,14 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
             transferId: begun.transferId,
           },
         }), acknowledgement);
+        tick = Date.parse(completed.expiresAt) - 2_000;
+        assert.deepEqual(await coordinator.getSuccessor({
+          principalId: OFFLINE_PRINCIPAL, request: successorRequest,
+        }), { successor: completed });
+        await assert.rejects(coordinator.getSuccessor({
+          principalId: OFFLINE_PRINCIPAL, request: successorRequest,
+        }), (error: unknown) => error instanceof CloudToLanTransferCoordinatorError
+          && error.code === 'authorization-denied');
       } finally {
         await coordinator.close();
         await store.close();
@@ -705,6 +757,7 @@ describe('Cloud-to-LAN PostgreSQL lifecycle', () => {
         targetTrust: {
           verifyAcceptance: input => Promise.resolve(Object.freeze({
           authorityFingerprint: 'f'.repeat(64),
+          caCertificatePem: '-----BEGIN CERTIFICATE-----\nQUJDRA==\n-----END CERTIFICATE-----',
             principalId: input.principalId,
             projectId: input.request.projectId,
             receiptKeyId: 'receipt-key-target-real',

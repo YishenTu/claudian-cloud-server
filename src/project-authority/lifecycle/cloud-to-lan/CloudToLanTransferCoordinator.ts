@@ -32,6 +32,8 @@ import {
   type ConfirmCloudToLanTargetActiveRequest,
   type ConfirmCloudToLanTargetInvalidatedRequest,
   type GetProjectAuthorityTransferRequest,
+  type GetProjectAuthoritySuccessorRequest,
+  type GetProjectAuthoritySuccessorResponse,
   type GetTransferredMembershipClaimRequest,
   type ReportCloudToLanTargetStagedRequest,
   type CollabControlOperationMap,
@@ -121,6 +123,7 @@ export interface CloudToLanCheckpointCapturePort {
 }
 
 export interface VerifiedCloudToLanTarget {
+  readonly caCertificatePem: string;
   readonly authorityFingerprint: string;
   readonly principalId: string;
   readonly projectId: CollabProjectId;
@@ -304,6 +307,7 @@ type CloudToLanControlOperation =
   | 'confirmCloudToLanTargetInvalidated'
   | 'getAuthorityTransferReceiptVerifier'
   | 'getProjectAuthorityTransfer'
+  | 'getProjectAuthoritySuccessor'
   | 'getTransferredMembershipClaim'
   | 'reportCloudToLanTargetStaged';
 
@@ -1080,6 +1084,40 @@ implements ProjectLifecycleRecoveryOwner {
     });
   }
 
+  getSuccessor(input: Readonly<{
+    principalId: string;
+    request: GetProjectAuthoritySuccessorRequest;
+  }>): Promise<GetProjectAuthoritySuccessorResponse> {
+    const request = decodeRequest('getProjectAuthoritySuccessor', input.request);
+    return this.#run(request.projectId, async lease => {
+      const transferId = await lease.withProjectScope(scope => (
+        scope.portability.findCompletedCloudToLanTransferId(request.sourceAuthorityGeneration)
+      ));
+      if (transferId === undefined) {
+        await lease.withProjectScope(async scope => {
+          await this.#activeActor(scope, input.principalId);
+          const project = await scope.getProject();
+          if (project?.authorityGeneration !== request.sourceAuthorityGeneration) {
+            return fail('authorization-denied');
+          }
+        });
+        return { successor: null };
+      }
+      const responder = await lease.withProjectScope(scope => (
+        scope.portability.getTerminalResponder('authority-transfer', transferId)
+      ));
+      if (responder === undefined) return fail('authorization-denied');
+      await this.#authorizeCurrentOrTerminal(lease, transferId, input.principalId, true);
+      const successor = await this.#requireStatus(lease, transferId);
+      if (successor.projectId !== request.projectId
+        || successor.sourceAuthority.generation !== request.sourceAuthorityGeneration
+        || successor.targetAuthority.generation !== request.sourceAuthorityGeneration + 1) {
+        return fail('recovery-required');
+      }
+      return decodeCollabAuthorityTransferOperationResponse('getProjectAuthoritySuccessor', { successor });
+    });
+  }
+
   getReceiptVerifier(
     input: GetCloudToLanReceiptVerifierInput,
   ): Promise<CollabAuthorityTransferReceiptVerifier> {
@@ -1747,6 +1785,10 @@ implements ProjectLifecycleRecoveryOwner {
     const current = await this.#requireStatus(lease, exact.journal.operationId);
     const completed = decodeCollabAuthorityTransferStatus({
       ...current,
+      lanTarget: {
+        caCertificatePem: this.#requireTarget(exact).caCertificatePem,
+        caFingerprint: this.#requireTarget(exact).authorityFingerprint,
+      },
       phase: 'completed',
       state: 'completed',
       updatedAt: completedAt,
@@ -2372,8 +2414,10 @@ implements ProjectLifecycleRecoveryOwner {
       ),
       status: await scope.portability.getAuthorityTransferStatus(transferId),
     }));
-    if (facts.status?.direction === 'cloud-to-lan') return facts.status;
-    if (facts.responder === undefined) return fail('recovery-required');
+    if (facts.responder === undefined) {
+      if (facts.status?.direction === 'cloud-to-lan') return facts.status;
+      return fail('recovery-required');
+    }
     try {
       const terminal = decodeCollabAuthorityTransferStatus(
         JSON.parse(facts.responder.responseJson) as unknown,

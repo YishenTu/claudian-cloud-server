@@ -485,6 +485,9 @@ export interface PortabilityLifecyclePersistenceReader {
   getLifecycleJournal(
     operationId: string,
   ): Promise<ProjectLifecycleJournalRecord | undefined>;
+  findCompletedCloudToLanTransferId(
+    sourceAuthorityGeneration: number,
+  ): Promise<string | undefined>;
   getLeaveFormerPrincipalReplay(
     operationId: string,
   ): Promise<LeaveFormerPrincipalReplayRecord | undefined>;

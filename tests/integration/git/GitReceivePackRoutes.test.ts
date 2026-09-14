@@ -406,7 +406,7 @@ describe('GitReceivePackRoutes', () => {
       const address = await server.start();
       const repositoryUrl = `http://${address.host}:${String(
         address.port,
-      )}/v6/projects/project-a/repository.git`;
+      )}/v7/projects/project-a/repository.git`;
       await execFileAsync(GIT_EXECUTABLE, [
         '-c',
         'http.extraHeader=x-claudian-development-actor: member-a',

@@ -15,6 +15,7 @@ import {
   type ConfirmCloudToLanTargetActiveRequest,
   type ConfirmCloudToLanTargetInvalidatedRequest,
   type GetProjectAuthorityTransferRequest,
+  type GetProjectAuthoritySuccessorRequest,
   type GetAuthorityTransferReceiptVerifierRequest,
   type GetTransferredMembershipClaimRequest,
   type ReportCloudToLanTargetStagedRequest,
@@ -61,6 +62,7 @@ type CloudToLanControl = Pick<
   | 'confirmTargetActive'
   | 'confirmTargetInvalidated'
   | 'getClaim'
+  | 'getSuccessor'
   | 'getReceiptVerifier'
   | 'reportTargetStaged'
 >;
@@ -254,6 +256,11 @@ export class CloudLifecycleControlAdapter implements CloudLifecycleControl {
         return this.#cloudToLan.acknowledgeRedemption({
           principalId,
           request: context.request as AcknowledgeTransferredMembershipClaimRedemptionRequest,
+        });
+      case 'getProjectAuthoritySuccessor':
+        return this.#cloudToLan.getSuccessor({
+          principalId,
+          request: context.request as GetProjectAuthoritySuccessorRequest,
         });
       case 'getProjectAuthorityTransfer': {
         const request = context.request as GetProjectAuthorityTransferRequest;

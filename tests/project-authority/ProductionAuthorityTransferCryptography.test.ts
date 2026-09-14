@@ -129,7 +129,7 @@ describe('ProductionAuthorityTransferCryptography', () => {
     };
     const certificate = new X509Certificate(caCertificatePem);
     const targetProof = encoded({
-      caCertificatePem,
+      caCertificatePem: caCertificatePem.replaceAll('\n', '\r\n'),
       caFingerprint: certificate.fingerprint256.replaceAll(':', '').toLowerCase(),
       certificate: rsaPss(JSON.stringify(targetPayload)),
       payload: targetPayload,
@@ -148,6 +148,7 @@ describe('ProductionAuthorityTransferCryptography', () => {
       targetAuthority: TARGET_AUTHORITY,
       targetUrl: TARGET_URL,
     });
+    assert.equal(Reflect.get(verifiedTarget, "caCertificatePem"), caCertificatePem);
     assert.equal(verifiedTarget.receiptPublicKey, targetPublicKey);
     assert.equal(verifiedTarget.authorityFingerprint, verifiedSource.authorityFingerprint);
     await trust.verifyStaged({

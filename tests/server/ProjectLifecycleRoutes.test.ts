@@ -88,6 +88,26 @@ async function request(
 }
 
 describe('ProjectLifecycleRoutes', () => {
+  it('binds successor discovery to the authenticated principal and path Project', async () => {
+    const control: CloudLifecycleControl = {
+      execute: (operation, context) => {
+        assert.equal(operation, 'getProjectAuthoritySuccessor');
+        assert.equal(context.principalId, 'member-manager');
+        assert.deepEqual(context.request, { projectId: PROJECT_ID, sourceAuthorityGeneration: 1 });
+        return Promise.resolve({ successor: null }) as never;
+      },
+    };
+    const response = await request(control, 'getProjectAuthoritySuccessor', {
+      projectId: PROJECT_ID, sourceAuthorityGeneration: 1,
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(decodeCollabCloudSuccessEnvelope(await response.json()).data, { successor: null });
+    const mismatch = await request(control, 'getProjectAuthoritySuccessor', {
+      projectId: 'project-unrelated', sourceAuthorityGeneration: 1,
+    });
+    assert.equal(mismatch.status, 400);
+  });
+
   it('binds a trusted principal and dispatches a Cloud v5 lifecycle operation', async () => {
     const calls: unknown[] = [];
     const response = await request({
