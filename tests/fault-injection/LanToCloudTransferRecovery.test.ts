@@ -743,7 +743,7 @@ describe('LAN-to-Cloud cross-store recovery', () => {
             const lease = await coordination.acquireProjectLease(transfer.projectId);
             try {
               const journal = await lease.withProjectScope(scope => scope.portability.getLifecycleJournal(transfer.transferId));
-              assert.equal(journal?.checkpointSha256, interrupted ? undefined : transfer.checkpoint.manifest.manifestSha256);
+              assert.equal(journal?.checkpointSha256, transfer.checkpoint.manifest.manifestSha256);
             } finally { await lease.close(); }
             const received = await restarted.getStatus({ principalId: transfer.principalId, request });
             assert.equal(received.phase, 'checkpoint-received');
@@ -759,27 +759,40 @@ describe('LAN-to-Cloud cross-store recovery', () => {
             } })).phase, 'cancelled');
           } finally { await restarted.close(); }
         }
-        const cancelledRoot = join(root, 'cancelled-activation-attempt');
-        await mkdir(cancelledRoot);
-        const cancelledActivation = await importTransfer(
-          cancelledRoot, importer, 'project-activation-recovery', 'transfer-before-activation', 0,
-        );
-        const cancelling = createCoordinator(cancelledActivation);
-        await beginValidateAndPublish(cancelling, cancelledActivation);
-        const cancellationRequest = {
-          projectId: cancelledActivation.projectId, transferId: cancelledActivation.transferId,
-        };
-        assert.equal((await cancelling.cancel({
-          principalId: cancelledActivation.principalId,
-          request: { ...cancellationRequest, expectedPhase: 'repository-published',
-            idempotencyKey: 'cancel-before-activation' },
-        })).phase, 'target-cleaned');
-        assert.equal((await cancelling.cancel({
-          principalId: cancelledActivation.principalId,
-          request: { ...cancellationRequest, expectedPhase: 'target-cleaned',
-            idempotencyKey: 'reopen-before-activation' },
-        })).phase, 'cancelled');
-        await cancelling.close();
+        for (const phase of ['source-quiesced', 'repository-published'] as const) {
+          const cancelledRoot = join(root, `cancelled-${phase}`);
+          await mkdir(cancelledRoot);
+          const cancelledActivation = await importTransfer(
+            cancelledRoot, importer, 'project-activation-recovery', `transfer-before-${phase}`, 0,
+          );
+          const cancelling = createCoordinator(cancelledActivation);
+          const cancellationRequest = {
+            projectId: cancelledActivation.projectId, transferId: cancelledActivation.transferId,
+          };
+          if (phase === 'repository-published') {
+            await beginValidateAndPublish(cancelling, cancelledActivation);
+          } else {
+            await cancelling.begin({
+              principalId: cancelledActivation.principalId,
+              request: { ...cancellationRequest,
+                checkpointManifestSha256: cancelledActivation.checkpoint.manifest.manifestSha256,
+                expectedSourceAuthorityGeneration: 1, idempotencyKey: 'begin-before-upload',
+                sourceHostMemberId: HOST_MEMBER_ID, sourceProof: `proof-${cancelledActivation.transferId}`,
+                targetUrl: TARGET_URL },
+            });
+          }
+          assert.equal((await cancelling.cancel({
+            principalId: cancelledActivation.principalId,
+            request: { ...cancellationRequest, expectedPhase: phase,
+              idempotencyKey: `cancel-${phase}` },
+          })).phase, 'target-cleaned');
+          assert.equal((await cancelling.cancel({
+            principalId: cancelledActivation.principalId,
+            request: { ...cancellationRequest, expectedPhase: 'target-cleaned',
+              idempotencyKey: `reopen-${phase}` },
+          })).phase, 'cancelled');
+          await cancelling.close();
+        }
 
         const activationTransfer = await importTransfer(
           root,

@@ -937,6 +937,22 @@ implements ProjectLifecycleRecoveryOwner {
               targetUrl: request.targetUrl,
               transferId: request.transferId,
             });
+            await scope.portability.advanceLifecycleJournal({
+              checkpointSha256: evidence.checkpointManifestSha256,
+              expectedPhase: 'source-quiesced',
+              expectedState: 'active',
+              nextPhase: 'source-quiesced',
+              nextState: 'active',
+              operationId: request.transferId,
+              scheduledAt: expiresAt,
+              updatedAt: createdAt,
+            });
+            await scope.portability.putTransferReceiptKey({
+              createdAt,
+              publicKey: evidence.receiptPublicKey,
+              receiptKeyId: evidence.receiptKeyId,
+              transferId: request.transferId,
+            });
             await scope.portability.advanceAuthorityTransferRecoveryEvidence({
               expectedUpdatedAt: createdAt,
               sourceProof: encodeSourceEvidence(evidence),
@@ -1116,12 +1132,6 @@ implements ProjectLifecycleRecoveryOwner {
           operationId: current.journal.operationId,
           scheduledAt: current.recovery.expiresAt,
           updatedAt,
-        });
-        await scope.portability.putTransferReceiptKey({
-          createdAt: updatedAt,
-          publicKey: current.evidence.receiptPublicKey,
-          receiptKeyId: current.evidence.receiptKeyId,
-          transferId: current.journal.operationId,
         });
         for (const item of batch.claims) {
           await scope.portability.putTransferredMembershipClaim({
