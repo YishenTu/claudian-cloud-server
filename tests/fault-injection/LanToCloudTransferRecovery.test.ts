@@ -745,6 +745,25 @@ describe('LAN-to-Cloud cross-store recovery', () => {
               const journal = await lease.withProjectScope(scope => scope.portability.getLifecycleJournal(transfer.transferId));
               assert.equal(journal?.checkpointSha256, transfer.checkpoint.manifest.manifestSha256);
             } finally { await lease.close(); }
+            // A journal/evidence mismatch must fence status and cancellation after process restart.
+            const writer = new Client({ connectionString: database.migrationUrl });
+            try {
+              await writer.connect();
+              for (const digest of ['0'.repeat(64), transfer.checkpoint.manifest.manifestSha256]) {
+                await writer.query('BEGIN');
+                await writer.query("SELECT set_config('claudian_cloud.project_id', $1, true)", [transfer.projectId]);
+                await writer.query(`UPDATE claudian_cloud.project_lifecycle_journals SET checkpoint_sha256 = $3
+                  WHERE project_id = $1 AND operation_id = $2`, [transfer.projectId, transfer.transferId, digest]);
+                await writer.query('COMMIT');
+                if (digest === '0'.repeat(64)) {
+                  await assert.rejects(restarted.getStatus({ principalId: transfer.principalId, request }),
+                    error => error instanceof LanToCloudTransferCoordinatorError && error.code === 'recovery-required');
+                  await assert.rejects(restarted.cancel({ principalId: transfer.principalId, request: {
+                    ...request, expectedPhase: 'checkpoint-received', idempotencyKey: `contradictory-${transfer.transferId}`,
+                  } }), error => error instanceof LanToCloudTransferCoordinatorError && error.code === 'recovery-required');
+                }
+              }
+            } finally { await writer.end(); }
             const received = await restarted.getStatus({ principalId: transfer.principalId, request });
             assert.equal(received.phase, 'checkpoint-received');
             assert.equal(received.checkpointSha256, transfer.checkpoint.manifest.manifestSha256);

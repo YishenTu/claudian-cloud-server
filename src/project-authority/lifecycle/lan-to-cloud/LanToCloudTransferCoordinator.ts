@@ -1,3 +1,4 @@
+import { hasConsistentLanToCloudEvidence, hasDurableLanRelinquishment } from './LanToCloudDurableEvidence.js';
 import { ProjectTransferredMembershipClaims } from '../../membership/ProjectTransferredMembershipClaims.js';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -534,6 +535,9 @@ async function storedTransfer(
     authorizedPrincipalId !== undefined
     && evidence.principalId !== authorizedPrincipalId
   ) return fail('authorization-denied');
+  if (!hasConsistentLanToCloudEvidence({ journal, recovery, checkpointManifestSha256: evidence.checkpointManifestSha256 })) {
+    return fail('recovery-required');
+  }
   return Object.freeze({ evidence, journal, recovery });
 }
 
@@ -637,18 +641,7 @@ async function validatedCheckpoint(
 }
 
 function assertDurableRelinquishment(exact: StoredTransfer): void {
-  const proof = exact.recovery.relinquishmentProof;
-  if (
-    proof === undefined
-    || proof.projectId !== exact.journal.projectId
-    || proof.transferId !== exact.journal.operationId
-    || proof.sourceHostMemberId !== exact.recovery.sourceHostMemberId
-    || !isDeepStrictEqual(proof.sourceAuthority, exact.recovery.sourceAuthority)
-    || !isDeepStrictEqual(proof.targetAuthority, exact.recovery.targetAuthority)
-    || proof.checkpointSha256 !== exact.journal.checkpointSha256
-    || proof.batchRevision !== exact.journal.batchRevision
-    || proof.batchSha256 !== exact.journal.batchSha256
-  ) return fail('recovery-required');
+  if (!hasDurableLanRelinquishment(exact.journal, exact.recovery)) return fail('recovery-required');
 }
 
 async function advanceLifecycle(
@@ -657,7 +650,7 @@ async function advanceLifecycle(
   journal: ProjectLifecycleJournalRecord,
   input: Readonly<{
     readonly checkpointSha256?: string;
-    readonly nextPhase: string;
+    readonly nextPhase: CollabAuthorityTransferStatus['phase'];
     readonly nextState?: 'active' | 'cancelled' | 'completed';
     readonly scheduledAt: CollabIsoTimestamp;
   }>,
@@ -2033,7 +2026,7 @@ implements ProjectLifecycleRecoveryOwner {
     journal: ProjectLifecycleJournalRecord,
     input: Readonly<{
       readonly checkpointSha256?: string;
-      readonly nextPhase: string;
+      readonly nextPhase: CollabAuthorityTransferStatus['phase'];
       readonly nextState?: 'active' | 'cancelled' | 'completed';
       readonly scheduledAt: CollabIsoTimestamp;
     }>,

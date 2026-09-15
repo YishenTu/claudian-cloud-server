@@ -2508,7 +2508,7 @@ implements ProjectLifecycleRecoveryOwner {
     journal: ProjectLifecycleJournalRecord,
     input: Readonly<{
       readonly checkpointSha256?: string;
-      readonly nextPhase: string;
+      readonly nextPhase: CollabAuthorityTransferStatus['phase'];
       readonly nextState?: 'active' | 'cancelled' | 'completed';
       readonly scheduledAt: CollabIsoTimestamp;
     }>,

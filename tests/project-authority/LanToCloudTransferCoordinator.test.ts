@@ -1005,6 +1005,24 @@ async function assertCode(operation: Promise<unknown>, code: string): Promise<vo
 }
 
 describe('LanToCloudTransferCoordinator', () => {
+  it('rejects contradictory durable checkpoint identity before status or cleanup', async () => {
+    const test = fixture();
+    await test.coordinator.begin(beginInput(test));
+    const original = test.coordination.portability.journal;
+    assert.ok(original);
+    test.coordination.portability.journal = { ...original, checkpointSha256: '0'.repeat(64) };
+    const request = { projectId: PROJECT_ID, transferId: TRANSFER_ID };
+    await assertCode(test.coordinator.getStatus({ principalId: HOST_PRINCIPAL_ID, request }), 'recovery-required');
+    await assertCode(test.coordinator.cancel({ principalId: HOST_PRINCIPAL_ID, request: {
+      ...request, expectedPhase: 'source-quiesced', idempotencyKey: 'cancel-contradictory-checkpoint',
+    } }), 'recovery-required');
+    assert.equal(test.staging.discardCalls, 0);
+    assert.equal(test.repository.publishCalls, 0);
+    test.coordination.portability.journal = original;
+    assert.equal((await test.coordinator.getStatus({ principalId: HOST_PRINCIPAL_ID, request })).phase, 'source-quiesced');
+    await test.coordinator.close();
+  });
+
   it('authorizes checkpoint uploads only for the exact LAN source principal', async () => {
     const test = fixture();
     await test.coordinator.begin(beginInput(test));
