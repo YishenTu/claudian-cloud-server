@@ -133,16 +133,13 @@ describe('ProjectMembershipAdministrationAuthority', () => {
     })).offer.state, 'acknowledged');
     assert.deepEqual(await authority.promote(PRINCIPAL, {
       expectedManagerSetGeneration: 1,
-      expectedOfferRevision: 2,
       expectedTargetMembershipRevision: 2,
       idempotencyKey: 'promote-key',
-      managerResponsibilityOfferId: 'offer-one',
       projectId: PROJECT_ID,
       targetMemberId: 'member-target',
     }), {
       managerSetGeneration: 2,
       membershipRevision: 3,
-      offerRevision: 3,
       projectId: PROJECT_ID,
       promotedMemberId: 'member-target',
     });

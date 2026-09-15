@@ -1723,17 +1723,7 @@ export class PostgresProjectMembershipPersistence
       [this.#projectId, input.expectedManagerSetGeneration],
     );
     if (membership.length !== 1 || project.length !== 1) throw new CoordinationError('state-conflict');
-    if (input.consumeOffer !== undefined) {
-      const offer = await this.#query<{ readonly offer_id: string }>(
-        `UPDATE claudian_cloud.manager_responsibility_offers
-            SET state = 'consumed', revision = revision + 1, terminal_at = $4
-          WHERE project_id = $1 AND offer_id = $2 AND state = 'acknowledged'
-            AND revision = $3 RETURNING offer_id`,
-        [this.#projectId, input.consumeOffer.offerId, input.consumeOffer.revision, input.changedAt],
-      );
-      if (offer.length !== 1) throw new CoordinationError('state-conflict');
-    }
-    await this.#cancelSupersededOffers(input.expectedManagerSetGeneration, input.changedAt, input.consumeOffer?.offerId);
+    await this.#cancelSupersededOffers(input.expectedManagerSetGeneration, input.changedAt);
   }
 
   async insertResponsibilityOffer(input: InsertResponsibilityOfferInput): Promise<CollabManagerResponsibilityOffer> {

@@ -58,7 +58,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
               projectId: PROJECT_ID,
               secret: Buffer.alloc(32, 7).toString('base64url'),
             },
-            protocolVersion: 13,
+            protocolVersion: 14,
             requestId: 'request-join-rejected',
           }),
           headers: { 'content-type': 'application/json', authorization: `Bearer ${'a'.repeat(64)}` },
@@ -113,7 +113,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
             projectId: PROJECT_ID,
             secret: Buffer.alloc(32, 7).toString('base64url'),
           },
-          protocolVersion: 13,
+          protocolVersion: 14,
           requestId: 'request-join-diverged',
         }),
         headers: { 'content-type': 'application/json', authorization: `Bearer ${'a'.repeat(64)}` },
@@ -170,7 +170,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
             projectId: PROJECT_ID,
             projectName: 'Cloud Route Project',
           },
-          protocolVersion: 13,
+          protocolVersion: 14,
           requestId: 'route_request',
         }),
         headers: {
@@ -275,7 +275,6 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
           return Promise.resolve({
             managerSetGeneration: 2,
             membershipRevision: 3,
-            offerRevision: 2,
             projectId: PROJECT_ID,
             promotedMemberId: 'member-target',
           });
@@ -467,10 +466,8 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
       }],
       ['promoteManager', {
         expectedManagerSetGeneration: 1,
-        expectedOfferRevision: 2,
         expectedTargetMembershipRevision: 2,
         idempotencyKey: 'promote-route-key',
-        managerResponsibilityOfferId: 'offer-route',
         projectId: PROJECT_ID,
         targetMemberId: 'member-target',
       }],
@@ -501,7 +498,7 @@ describe('CloudProjectMembershipRoutes creation entry', () => {
     for (const [operation, data] of requests) {
       const route = collabCloudProjectOperationRoute(PROJECT_ID, operation);
       const response = await fetch(`${base}${route.target}`, {
-        body: JSON.stringify({ data, protocolVersion: 13, requestId: `request-${operation}` }),
+        body: JSON.stringify({ data, protocolVersion: 14, requestId: `request-${operation}` }),
         headers: { 'content-type': 'application/json', authorization: `Bearer ${'a'.repeat(64)}` },
         method: route.method,
       });

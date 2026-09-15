@@ -773,9 +773,8 @@ describe('Postgres Project invitation persistence', () => {
             requestFingerprint: 'f'.repeat(64), targetMemberId: 'member_admin_target',
           })],
           ['promote', (_membership, expectedManagerSetGeneration, scope) => new ProjectMembershipAdministration(scope, PROJECT_ID).promoteManager({
-            actorMemberId: MEMBER_ID, expectedManagerSetGeneration, expectedOfferRevision: 1,
-            expectedTargetMembershipRevision: 2, idempotencyKey: 'stale_promote',
-            managerResponsibilityOfferId: 'missing_offer', projectId: PROJECT_ID, promotedAt: CREATED,
+            actorMemberId: MEMBER_ID, expectedManagerSetGeneration,
+            expectedTargetMembershipRevision: 2, idempotencyKey: 'stale_promote', projectId: PROJECT_ID, promotedAt: CREATED,
             requestFingerprint: '1'.repeat(64), targetMemberId: 'member_admin_target',
           })],
           ['remove', (_membership, expectedManagerSetGeneration, scope) => new ProjectMembershipSettlement(scope, PROJECT_ID).prepareRemoval({
@@ -811,6 +810,42 @@ describe('Postgres Project invitation persistence', () => {
         }
         assert.equal((await lease.withProjectScope(scope => new ProjectMembershipAdmission(scope).createInvitation(INPUT))).status,
           'replayed');
+      } finally { await lease.close(); await store.close(); }
+    });
+  });
+
+  it('promotes an active member directly and retains exact replay under revision checks', async () => {
+    await withPostgresTestDatabase(async database => {
+      await new PostgresSchemaInitializer({ connectionString: database.migrationUrl }).apply();
+      await seed(database);
+      const store = coordination(database);
+      const lease = await store.acquireProjectLease(PROJECT_ID);
+      try {
+        await lease.withProjectScope(async scope => {
+          const administration = new ProjectMembershipAdministration(scope, PROJECT_ID);
+          const request = {
+            actorMemberId: MEMBER_ID, expectedManagerSetGeneration: 1,
+            expectedTargetMembershipRevision: 2, idempotencyKey: 'direct_promotion',
+            projectId: PROJECT_ID, promotedAt: CREATED, requestFingerprint: 'a'.repeat(64),
+            targetMemberId: 'member_admin_target',
+          };
+          assert.equal((await administration.promoteManager({ ...request,
+            actorMemberId: 'member_admin_target', idempotencyKey: 'unauthorized',
+          })).status, 'authorization-denied');
+          const first = await administration.promoteManager(request);
+          assert.equal(first.status, 'created');
+          assert.deepEqual(first.response, {
+            projectId: PROJECT_ID, promotedMemberId: 'member_admin_target',
+            managerSetGeneration: 2, membershipRevision: 3,
+          });
+          assert.equal((await administration.promoteManager(request)).status, 'replayed');
+          assert.equal((await administration.promoteManager({ ...request,
+            idempotencyKey: 'stale_promotion',
+          })).status, 'permanently-stale');
+          const members = await administration.listProjectMembers({ actorRole: 'manager', now: CREATED });
+          assert.equal(members.members.find(member => member.memberId === 'member_admin_target')?.role, 'manager');
+          assert.equal(members.members.find(member => member.memberId === MEMBER_ID)?.role, 'manager');
+        });
       } finally { await lease.close(); await store.close(); }
     });
   });
@@ -851,12 +886,7 @@ describe('Postgres Project invitation persistence', () => {
               actorMemberId: MEMBER_ID, actorRole: 'manager', expectedOfferRevision,
               idempotencyKey: 'revision_cancel', nextState: 'cancelled', operation: 'cancelManagerResponsibilityOffer',
             })).status, expectedOfferRevision === 1 ? 'permanently-stale' : 'stale');
-            assert.equal((await new ProjectMembershipAdministration(scope, PROJECT_ID).promoteManager({
-              actorMemberId: MEMBER_ID, expectedManagerSetGeneration: 1, expectedOfferRevision,
-              expectedTargetMembershipRevision: 2, idempotencyKey: 'revision_promote',
-              managerResponsibilityOfferId: 'revision_offer', projectId: PROJECT_ID, promotedAt: CREATED,
-              requestFingerprint: 'd'.repeat(64), targetMemberId: 'member_admin_target',
-            })).status, expectedOfferRevision === 1 ? 'permanently-stale' : 'stale');
+
           }
         });
       } finally { await lease.close(); await store.close(); }
@@ -927,10 +957,8 @@ describe('Postgres Project invitation persistence', () => {
             new ProjectMembershipAdministration(scope, PROJECT_ID).promoteManager({
               actorMemberId: MEMBER_ID,
               expectedManagerSetGeneration: 1,
-              expectedOfferRevision: 2,
               expectedTargetMembershipRevision: 2,
               idempotencyKey: 'promote_sql_key',
-              managerResponsibilityOfferId: 'offer_sql_one',
               projectId: PROJECT_ID,
               promotedAt: '2026-08-30T02:02:00.000Z',
               requestFingerprint: '3'.repeat(64),
@@ -940,7 +968,6 @@ describe('Postgres Project invitation persistence', () => {
           assert.deepEqual(promoted.response, {
             managerSetGeneration: 2,
             membershipRevision: 3,
-            offerRevision: 3,
             projectId: PROJECT_ID,
             promotedMemberId: 'member_admin_target',
           });
@@ -948,10 +975,8 @@ describe('Postgres Project invitation persistence', () => {
             new ProjectMembershipAdministration(scope, PROJECT_ID).promoteManager({
               actorMemberId: MEMBER_ID,
               expectedManagerSetGeneration: 1,
-              expectedOfferRevision: 2,
               expectedTargetMembershipRevision: 2,
               idempotencyKey: 'promote_sql_key',
-              managerResponsibilityOfferId: 'offer_sql_one',
               projectId: PROJECT_ID,
               promotedAt: '2026-08-30T02:02:00.000Z',
               requestFingerprint: '3'.repeat(64),
@@ -1023,8 +1048,8 @@ describe('Postgres Project invitation persistence', () => {
           ));
 
           assert.equal((await createOffer(
-            'offer_compact_consumed',
-            'offer_compact_consumed_key',
+            'offer_compact_superseded',
+            'offer_compact_superseded_key',
             '1'.repeat(64),
             1,
             2,
@@ -1036,7 +1061,7 @@ describe('Postgres Project invitation persistence', () => {
               expectedOfferRevision: 1,
               idempotencyKey: 'offer_compact_ack_key',
               nextState: 'acknowledged',
-              offerId: 'offer_compact_consumed',
+              offerId: 'offer_compact_superseded',
               operation: 'acknowledgeManagerResponsibility',
               requestFingerprint: '2'.repeat(64),
               transitionedAt: terminalAt,
@@ -1046,10 +1071,8 @@ describe('Postgres Project invitation persistence', () => {
             new ProjectMembershipAdministration(scope, PROJECT_ID).promoteManager({
               actorMemberId: MEMBER_ID,
               expectedManagerSetGeneration: 1,
-              expectedOfferRevision: 2,
               expectedTargetMembershipRevision: 2,
               idempotencyKey: 'offer_compact_promote_key',
-              managerResponsibilityOfferId: 'offer_compact_consumed',
               projectId: PROJECT_ID,
               promotedAt: terminalAt,
               requestFingerprint: '3'.repeat(64),
@@ -1121,12 +1144,12 @@ describe('Postgres Project invitation persistence', () => {
               actorMemberId: MEMBER_ID,
               actorRole: 'manager',
               now: retainedAt,
-              offerId: 'offer_compact_consumed',
+              offerId: 'offer_compact_superseded',
             })
-          )))?.state, 'consumed');
+          )))?.state, 'cancelled');
           const offeredReplay = await createOffer(
-            'offer_compact_consumed',
-            'offer_compact_consumed_key',
+            'offer_compact_superseded',
+            'offer_compact_superseded_key',
             '1'.repeat(64),
             1,
             2,
@@ -1142,12 +1165,12 @@ describe('Postgres Project invitation persistence', () => {
               actorMemberId: MEMBER_ID,
               actorRole: 'manager',
               now: compactedAt,
-              offerId: 'offer_compact_consumed',
+              offerId: 'offer_compact_superseded',
             })
           )), undefined);
           assert.equal((await createOffer(
-            'offer_compact_consumed',
-            'offer_compact_consumed_key',
+            'offer_compact_superseded',
+            'offer_compact_superseded_key',
             '1'.repeat(64),
             1,
             2,
@@ -1159,7 +1182,7 @@ describe('Postgres Project invitation persistence', () => {
               expectedOfferRevision: 1,
               idempotencyKey: 'offer_compact_ack_key',
               nextState: 'acknowledged',
-              offerId: 'offer_compact_consumed',
+              offerId: 'offer_compact_superseded',
               operation: 'acknowledgeManagerResponsibility',
               requestFingerprint: '2'.repeat(64),
               transitionedAt: compactedAt,
@@ -1169,16 +1192,14 @@ describe('Postgres Project invitation persistence', () => {
             new ProjectMembershipAdministration(scope, PROJECT_ID).promoteManager({
               actorMemberId: MEMBER_ID,
               expectedManagerSetGeneration: 1,
-              expectedOfferRevision: 2,
               expectedTargetMembershipRevision: 2,
               idempotencyKey: 'offer_compact_promote_key',
-              managerResponsibilityOfferId: 'offer_compact_consumed',
               projectId: PROJECT_ID,
               promotedAt: compactedAt,
               requestFingerprint: '3'.repeat(64),
               targetMemberId: 'member_admin_target',
             })
-          ))).status, 'conflict');
+          ))).status, 'replayed');
           assert.equal((await lease.withProjectScope(scope => (
             new ProjectMembershipAdministration(scope, PROJECT_ID).transitionManagerResponsibilityOffer({
               actorMemberId: 'member_admin_target',
@@ -1218,7 +1239,7 @@ describe('Postgres Project invitation persistence', () => {
             [PROJECT_ID],
           );
           const counts = await client.query<{
-            readonly demote_results: string;
+            readonly role_results: string;
             readonly offers: string;
             readonly offer_results: string;
             readonly tombstones: string;
@@ -1229,21 +1250,21 @@ describe('Postgres Project invitation persistence', () => {
                (SELECT count(*)
                   FROM claudian_cloud.idempotency_results
                  WHERE project_id = $1
-                   AND operation <> 'demoteManager')::text AS offer_results,
+                   AND operation NOT IN ('demoteManager', 'promoteManager'))::text AS offer_results,
                (SELECT count(*)
                   FROM claudian_cloud.idempotency_results
                  WHERE project_id = $1
-                   AND operation = 'demoteManager')::text AS demote_results,
+                   AND operation IN ('demoteManager', 'promoteManager'))::text AS role_results,
                (SELECT count(*)
                   FROM claudian_cloud.project_membership_idempotency_tombstones
                  WHERE project_id = $1)::text AS tombstones`,
             [PROJECT_ID],
           );
           assert.deepEqual(counts.rows, [{
-            demote_results: '1',
+            role_results: '2',
             offer_results: '0',
             offers: '0',
-            tombstones: '7',
+            tombstones: '6',
           }]);
           await client.query('COMMIT');
         } finally {

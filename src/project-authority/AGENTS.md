@@ -15,7 +15,7 @@
 - Invitation reservations count toward membership capacity before redemption. Ordinary invitations and imported-member claims remain separate authorities, including their secret custody, replay, expiry, and tombstones.
 - Imported-claim overrides cannot rewrite an accepted transfer batch or reuse terminal authority. Redemption resolves the highest recorded override history; revocation or expiry must not revive an earlier digest. Imported Members remain unbound until the authorized claim or source/target proof binds them.
 - Enforce expiry from immutable timestamps in the owning transaction. Background reconciliation cleans up expired state but cannot extend eligibility or replay deadlines.
-- Manager responsibility uses durable offers and expected membership/manager-set revisions, with no presence prerequisite. Preserve at least one active Manager; the last Manager may Leave only through the exact acknowledged succession offer.
+- Manager promotion is an authorized role change, independent of target acknowledgement or presence. Preserve at least one active Manager; the last Manager may Leave only through the exact acknowledged succession offer.
 - Removal and Leave persist the exact personal-ref OID before membership effects. Binding/claim revocation, offers, owned open work, structured mentions, succession, and the immutable result settle together; Git deletion then uses that persisted OID and recovers forward.
 - Former-member replay authorizes only the same principal and exact settled operation intent/fingerprint. It never restores ordinary membership or authorizes another operation.
 

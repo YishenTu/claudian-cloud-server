@@ -163,7 +163,6 @@ export interface TransitionResponsibilityOfferInput {
 }
 export interface ManagerRoleChangeInput {
   readonly changedAt: CollabIsoTimestamp;
-  readonly consumeOffer?: Readonly<{ readonly offerId: string; readonly revision: number }>;
   readonly expectedManagerSetGeneration: number;
   readonly expectedMembershipRevision: number;
   readonly memberId: CollabMemberId;

@@ -62,10 +62,8 @@ export interface ProjectMembershipAdministrationOperations {
   promoteManager(input: Readonly<{
     readonly actorMemberId: CollabMemberId;
     readonly expectedManagerSetGeneration: number;
-    readonly expectedOfferRevision: number;
     readonly expectedTargetMembershipRevision: number;
     readonly idempotencyKey: CollabIdempotencyKey;
-    readonly managerResponsibilityOfferId: string;
     readonly projectId: CollabProjectId;
     readonly promotedAt: CollabIsoTimestamp;
     readonly requestFingerprint: string;
@@ -158,10 +156,8 @@ export class ProjectMembershipAdministration implements ProjectMembershipAdminis
   async promoteManager(input: Readonly<{
     readonly actorMemberId: string;
     readonly expectedManagerSetGeneration: number;
-    readonly expectedOfferRevision: number;
     readonly expectedTargetMembershipRevision: number;
     readonly idempotencyKey: string;
-    readonly managerResponsibilityOfferId: string;
     readonly projectId: string;
     readonly promotedAt: string;
     readonly requestFingerprint: string;
@@ -190,34 +186,16 @@ export class ProjectMembershipAdministration implements ProjectMembershipAdminis
       || fact.status !== 'active'
       || fact.role !== 'member'
     ) return { status: 'stale' as const };
-    const offer = await this.scope.membership.readResponsibilityOffer(input.managerResponsibilityOfferId);
-    if (offer !== undefined && offer.revision > input.expectedOfferRevision) {
-      return { status: 'permanently-stale' as const };
-    }
-    if (
-      offer === undefined
-      || offer.sourceManagerMemberId !== input.actorMemberId
-      || offer.targetMemberId !== input.targetMemberId
-      || offer.purpose !== 'manager-promotion'
-      || offer.state !== 'acknowledged'
-      || offer.revision !== input.expectedOfferRevision
-      || offer.managerSetGenerationAtOffer
-        !== input.expectedManagerSetGeneration
-      || offer.targetMembershipRevisionAtOffer
-        !== input.expectedTargetMembershipRevision
-    ) return { status: 'stale' as const };
     await this.scope.membership.applyManagerRoleChange({
       changedAt: input.promotedAt,
       expectedManagerSetGeneration: input.expectedManagerSetGeneration,
       expectedMembershipRevision: input.expectedTargetMembershipRevision,
       memberId: input.targetMemberId,
       role: 'manager',
-      consumeOffer: { offerId: input.managerResponsibilityOfferId, revision: input.expectedOfferRevision },
     });
     const response = collabControlOperationCodec('promoteManager').decodeResponse({
       managerSetGeneration: input.expectedManagerSetGeneration + 1,
       membershipRevision: input.expectedTargetMembershipRevision + 1,
-      offerRevision: input.expectedOfferRevision + 1,
       projectId: this.projectId,
       promotedMemberId: input.targetMemberId,
     });

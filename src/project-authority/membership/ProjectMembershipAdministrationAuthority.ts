@@ -236,10 +236,8 @@ export class ProjectMembershipAdministrationAuthority {
         const mutation = await new ProjectMembershipAdministration(scope, request.projectId).promoteManager({
           actorMemberId: write.memberId,
           expectedManagerSetGeneration: request.expectedManagerSetGeneration,
-          expectedOfferRevision: request.expectedOfferRevision,
           expectedTargetMembershipRevision: request.expectedTargetMembershipRevision,
           idempotencyKey: request.idempotencyKey,
-          managerResponsibilityOfferId: request.managerResponsibilityOfferId,
           projectId: request.projectId,
           promotedAt,
           requestFingerprint: fingerprint('promoteManager', request),

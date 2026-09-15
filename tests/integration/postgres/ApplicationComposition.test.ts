@@ -188,7 +188,7 @@ async function projectOperation(
   const response = await fetch(`${baseUrl}${route.target}`, {
     body: JSON.stringify({
       data,
-      protocolVersion: 13,
+      protocolVersion: 14,
       requestId: `request-${operation}`,
     }),
     headers: {
@@ -213,7 +213,7 @@ async function rejectedProjectOperation(
   const response = await fetch(`${baseUrl}${route.target}`, {
     body: JSON.stringify({
       data,
-      protocolVersion: 13,
+      protocolVersion: 14,
       requestId: `request-rejected-${operation}`,
     }),
     headers: {
@@ -1058,7 +1058,7 @@ while :; do sleep 1; done`,
         [{ authorization: `Bearer ${'d'.repeat(64)}`, 'x-claudian-ingress-principal': claimedPrincipal }, 404, 'project-not-found'],
       ] as const) {
         const snapshot = await fetch(`${origin}${snapshotRoute.target}`, {
-          body: JSON.stringify({ data: { projectId }, protocolVersion: 13, requestId: 'credential-isolation' }),
+          body: JSON.stringify({ data: { projectId }, protocolVersion: 14, requestId: 'credential-isolation' }),
           headers: { ...headers, 'content-type': 'application/json' },
           method: snapshotRoute.method,
         });
@@ -1401,7 +1401,7 @@ while :; do sleep 1; done`,
       const snapshotResponse = await fetch(`${baseUrl}${snapshotRoute.target}`, {
         body: JSON.stringify({
           data: { projectId },
-          protocolVersion: 13,
+          protocolVersion: 14,
           requestId: 'request-production-snapshot',
         }),
         headers: {
@@ -1542,32 +1542,6 @@ while :; do sleep 1; done`,
           projectId,
         },
       );
-      const offer = await projectOperation(
-        baseUrl,
-        managerCredential,
-        projectId,
-        'createManagerResponsibilityOffer',
-        {
-          expectedManagerSetGeneration: 1,
-          expectedTargetMembershipRevision: 2,
-          idempotencyKey: 'offer-process-member-a',
-          projectId,
-          purpose: 'manager-promotion',
-          targetMemberId: memberA.memberId,
-        },
-      ) as Readonly<{ readonly offer: Readonly<{ readonly offerId: string }> }>;
-      const acknowledged = await projectOperation(
-        baseUrl,
-        memberACredential,
-        projectId,
-        'acknowledgeManagerResponsibility',
-        {
-          expectedOfferRevision: 1,
-          idempotencyKey: 'acknowledge-process-offer',
-          offerId: offer.offer.offerId,
-          projectId,
-        },
-      ) as Readonly<{ readonly offer: Readonly<{ readonly revision: number }> }>;
       await projectOperation(
         baseUrl,
         managerCredential,
@@ -1575,10 +1549,8 @@ while :; do sleep 1; done`,
         'promoteManager',
         {
           expectedManagerSetGeneration: 1,
-          expectedOfferRevision: acknowledged.offer.revision,
           expectedTargetMembershipRevision: 2,
           idempotencyKey: 'promote-process-member-a',
-          managerResponsibilityOfferId: offer.offer.offerId,
           projectId,
           targetMemberId: memberA.memberId,
         },
