@@ -56,6 +56,8 @@ The exact npm dependency recorded in `package.json` and `package-lock.json` is t
 
 Capabilities describe complete composed operation paths. Production exposes Project creation and membership administration, snapshots, Requests and Tickets, Publish/Accept, personal-ref Git access, Project events, authority transfer, Leave, and Retire through the corresponding package bindings. A package upgrade alone does not enable a capability.
 
+The current dependency is protocol package **5.1.0**, canonical wire **15**, and Cloud binding **10**. These values describe this source revision; a deployed server reports its own contract through `/collab/capabilities`. Clients must negotiate that contract before Cloud operations. Existing mixed-version LAN compatibility is owned by the client and does not imply Cloud compatibility.
+
 - `/livez` reports process liveness.
 - `/readyz` reports whether startup and authority checks permit service.
 - `/collab/capabilities` reports protocol compatibility, limits, and available features.
@@ -108,11 +110,19 @@ Startup reconciles locally actionable recovery. An operation explicitly waiting 
 
 Creation establishes an initial Manager. Ordinary invitations reserve membership capacity before redemption, and Join creates one exact pending Member and personal ref. Imported transfer claims are a distinct authority: they bind an existing imported Member and cannot create membership, choose a role, or authenticate connection access.
 
-Manager responsibility is durable offer state with expected revisions and immutable expiry. A Project retains at least one active Manager. The final Manager can Leave only through the exact acknowledged succession offer. Removal and Leave revoke the affected bindings and claim authorities, settle offers and owned open work, remove structured mentions, and retain only permitted exact replay.
+Manager promotion is an immediate, authorized role mutation with expected revisions and exact idempotent replay. It requires neither target acknowledgement nor target presence. Responsibility offers remain a separate succession mechanism: a Project retains at least one active Manager, and the final Manager can Leave only through the exact acknowledged succession offer. Removal and Leave revoke the affected bindings and claim authorities, settle offers and owned open work, remove structured mentions, and retain only permitted exact replay.
 
 A transfer advances authority generation to exactly source generation plus one. Source quiescence, target staging, source relinquishment, and target activation remain separate durable facts. Before relinquishment, source reopen requires proof that the exact target has invalidated the transfer and cleaned its owned staging. After relinquishment, source admission never reopens, including after restart or failed target contact.
 
 The transfer initially binds only the source Host or selected target Host through its direction's proof. Other imported Members remain unbound until claim redemption. Presence or device availability does not bind them.
+
+For Cloud-to-LAN movement, the receiving Member registers its preparation, public target trust, and endpoint with Cloud. A Manager approves that exact preparation. Project events notify clients of the changed state; the receiving client then downloads the checkpoint through an outbound connection and continues the durable transfer. Cloud does not open an inbound connection to the receiving device, and the workflow requires no copied descriptor or completion string. Client observation and restart recovery provide automatic continuation; explicit Resume remains available after interruption. Once LAN is active, participants still need network access to its Host: Cloud does not relay subsequent LAN collaboration through NAT.
+
+Completed transfers retain generation-bound successor lookup and claim/replay evidence separately from ordinary Project content and writable authority. The client uses events and one-hop source lookup to discover a move. A source's reachability or retained recovery window is not guaranteed indefinitely; a fresh recovery link from the current authority handles an unavailable source or missed moves. Old terminal responders cannot authorize ordinary Project operations or reopen a relinquished source.
+
+Returning to Cloud after a physical LAN Host change does not require the original Host to be online or to become Host again. The current Host can supply a signed chain of committed LAN Host activation proofs. The server verifies the exact Project and authority generation, signature and fingerprint continuity, unique handoffs, and the final Host binding against the retained predecessor. A pre-relinquishment offer, TLS rotation alone, or copied receipt key cannot establish this succession.
+
+Project recovery links are distinct from invitations: a link restores an existing Member after proof of a retained Project credential, and cannot create membership or select another Member's identity. Each creation intent issues an independent single-use link with a 15-minute validity window. Exact retries replay the same issuance or successful redemption receipt. Historical credential verifiers travel with checkpoints, while recoverable issuance secrets remain protected at rest. Managers can issue new links at the current authority without contacting a previous Host.
 
 Claim custody is protected at rest. A claim-batch acknowledgement proves custody, not redemption or permission to scrub. Only one batch revision is redeemable; rotation requires authoritative proof that custody did not commit and invalidates older hashes. Per-Member scrubbing requires the same former Member to forward an exact target-signed redemption receipt. Retained key references make claim and receipt continuity verifiable after restore without putting private keys in a backup.
 
@@ -140,7 +150,7 @@ Compose uses host networking. Both PostgreSQL and the application bind to host l
 
 Fresh installation starts PostgreSQL, provisions the database roles/authority-volume pairing, initializes the absent canonical schema, and then runs restore recovery and Project recovery before the server. Runtime accepts only the exact current schema and never applies DDL. The PostgreSQL volume and authority volume form a persistent pair; losing one side does not authorize initialization of a replacement against the other.
 
-The source-based deployment wrapper resolves an immutable candidate and verifies authority before recovery. Once its external recovery fence is recorded, retries use that same candidate and recover forward; the wrapper cannot reopen a predecessor after recovery mutation. An image replacement is not an in-place schema upgrade.
+Both release-based updates and the source-based deployment wrapper resolve an immutable candidate and verify authority before recovery. Once the external recovery fence is recorded, retries use that same candidate and recover forward; neither path can reopen a predecessor after recovery mutation. An image replacement is not an in-place schema upgrade.
 
 Resource admission bounds global/per-Project Git work, read/write classes, queued requests, streams, staging, and event subscriptions. PostgreSQL ordinary, pinned, and reserved pools have separate budgets. Container limits and runtime tuning values are documented in the configuration examples and README. Capacity tests exercise a named single-host workload; their synthetic workload sizes do not establish an Account model or a production hosting guarantee.
 

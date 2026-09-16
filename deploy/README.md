@@ -109,6 +109,8 @@ The address entered in Claudian must be reachable from the participant's device.
 
 After the local readiness check succeeds, verify that an authorized client can connect through ingress, open a Project, receive events, and transfer repository data. A successful health request alone does not verify authentication, WebSocket forwarding, or Git transfers.
 
+Cloud-to-LAN migration also downloads through this client-facing endpoint. The receiving device connects outward after Manager approval; ingress does not need to reach into its LAN. After cutover, Members must be able to reach the new LAN Host directly or through an encrypted tunnel. Cloud does not become a relay for that LAN Host. If a Member misses the move and cannot query the old authority, use a fresh recovery link from the current authority.
+
 ## Server port and settings
 
 Edit the generated application environment file:

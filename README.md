@@ -15,6 +15,8 @@ Use the prebuilt package from the [latest release](https://github.com/YishenTu/c
 
 Enter your ingress URL as the Cloud Server address in Claudian. For example, if ingress forwards `10.0.0.10:9000` to the server host's `127.0.0.1:8787`, enter `http://10.0.0.10:9000` when using an encrypted tunnel, or the corresponding `https://` URL for TLS ingress.
 
+Every participant must use a Cloud-compatible client before using the Project on Cloud. The current server consumes protocol package **5.1.0** (wire **15**, Cloud binding **10**); clients verify the deployed server's capabilities when connecting. See [hosting and recovery](https://github.com/YishenTu/claudian-cloud-server/blob/main/ARCHITECTURE.md#membership-and-authority-transfer) for movement between Cloud and LAN, and the distinction between invitations and recovery links.
+
 ## Configuration
 
 Defaults target a small self-hosted installation: **1.5 CPUs and 1 GiB memory** for the application container, with PostgreSQL running in a separate container included in the deployment. Event connection limits are **512 across the server and 64 per Project**. Each open Project on a device uses one connection; practical capacity depends on repository size and activity.
