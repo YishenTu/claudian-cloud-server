@@ -72,6 +72,54 @@ describe('ProductionAuthorityTransferCryptography', () => {
     await rm(fixtureRoot, { force: true, recursive: true });
   });
 
+  it('verifies committed physical Host succession before accepting a new return Host', async () => {
+    const keyPath = join(fixtureRoot, 'predecessor-key.pem');
+    const certPath = join(fixtureRoot, 'predecessor.pem');
+    await execFileAsync('/usr/bin/openssl', [
+      'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyPath,
+      '-out', certPath, '-subj', '/CN=Previous Host', '-days', '1',
+      '-addext', 'basicConstraints=critical,CA:TRUE',
+    ]);
+    const previousPem = await readFile(certPath, 'utf8');
+    const previousKey = await readFile(keyPath, 'utf8');
+    const currentFingerprint = new X509Certificate(caCertificatePem).fingerprint256.replaceAll(':', '').toLowerCase();
+    const previousFingerprint = new X509Certificate(previousPem).fingerprint256.replaceAll(':', '').toLowerCase();
+    const payload = {
+      checkpointManifestSha256: '1'.repeat(64), projectId: PROJECT_ID,
+      sourceAuthorityGeneration: 3, sourceHostMemberId: 'member-current',
+      sourcePrincipalId: 'principal-current', targetAuthorityGeneration: 4,
+      targetUrl: 'http://cloud.example.test:8787', transferId: TRANSFER_ID,
+    };
+    const receiptPublicKey = generateKeyPairSync('ed25519').publicKey.export({ format: 'jwk' }).x;
+    assert.ok(receiptPublicKey);
+    const source = { payload, receiptKeyId: 'receipt-key', receiptPublicKey, schemaVersion: 2 };
+    const proof = encoded({ ...source, caCertificatePem, certificate: rsaPss(JSON.stringify(source)) });
+    const activation = {
+      schemaVersion: 1 as const, projectId: PROJECT_ID, authorityGeneration: 3,
+      transferId: 'physical-handoff', targetHostMemberId: 'member-current',
+      targetCaFingerprint: currentFingerprint, manifestSha256: '2'.repeat(64),
+      cutoverAt: '2026-09-01T00:00:00.000Z', caCertificatePem: previousPem,
+      signatureAlgorithm: 'rsa-pss-sha256' as const,
+    };
+    const signature = sign('sha256', Buffer.from('claudian-collab-lan-host-activation-v1\n' + JSON.stringify([
+      1, PROJECT_ID, 3, 'physical-handoff', 'member-current', currentFingerprint,
+      '2'.repeat(64), '2026-09-01T00:00:00.000Z', previousPem,
+    ])), { key: previousKey, padding: constants.RSA_PKCS1_PSS_PADDING, saltLength: 32 }).toString('base64url');
+    const evidence = { ...activation, signature };
+    const trust = new ProductionAuthorityTransferTrust();
+    const verified = await trust.verifySourceProof({ principalId: 'principal-current', proof, hostActivationProofs: [evidence] });
+    assert.deepEqual(verified.committedPredecessorFingerprints, [previousFingerprint]);
+    for (const changed of [
+      { ...evidence, authorityGeneration: 2 }, { ...evidence, projectId: 'other-project' },
+      { ...evidence, targetHostMemberId: 'member-other' },
+      { ...evidence, targetCaFingerprint: previousFingerprint },
+      { ...evidence, manifestSha256: '3'.repeat(64) },
+    ]) {
+      await assert.rejects(trust.verifySourceProof({ principalId: 'principal-current', proof, hostActivationProofs: [changed] }));
+    }
+    await assert.rejects(trust.verifySourceProof({ principalId: 'principal-current', proof, hostActivationProofs: [evidence, evidence] }));
+  });
+
   it('verifies exact LAN source and target proof envelopes', async () => {
     const targetReceipt = generateKeyPairSync('ed25519');
     const targetPublicKey = targetReceipt.publicKey.export({ format: 'jwk' }).x;

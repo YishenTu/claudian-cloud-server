@@ -743,7 +743,7 @@ function checkpoint(includeOfflineMember: boolean): ValidatedProjectCheckpoint {
     operationId: TRANSFER_ID,
     profile: 'authority-transfer',
     projectId: PROJECT_ID,
-    protocolVersion: 14,
+    protocolVersion: 15,
     refs: Object.freeze([
       Object.freeze({ name: 'refs/heads/main', oid: MAIN_OID }),
       ...members.map(member => Object.freeze({
@@ -811,7 +811,7 @@ function beginInput(test: Fixture) {
   } as const;
 }
 
-function fixture(includeOfflineMember = true): Fixture {
+function fixture(includeOfflineMember = true, committedPredecessorFingerprints?: readonly string[]): Fixture {
   const validated = checkpoint(includeOfflineMember);
   const coordination = new MemoryCoordination([
     HOST_MEMBER_ID,
@@ -827,6 +827,7 @@ function fixture(includeOfflineMember = true): Fixture {
   let sourceProofBarrier: Promise<void> | undefined;
   let verifySourceProofCalls = 0;
   const sourceProof: VerifiedLanToCloudSourceProof = Object.freeze({
+    ...(committedPredecessorFingerprints ? { committedPredecessorFingerprints } : {}),
     authorityFingerprint: 'f'.repeat(64),
     checkpointManifestSha256: validated.manifest.manifestSha256,
     projectId: PROJECT_ID,
@@ -1943,6 +1944,24 @@ describe('LanToCloudTransferCoordinator', () => {
         await assertCode(begin, 'state-conflict');
         assert.equal(test.staging.prepareCalls, 0);
       }
+    }
+  });
+
+  it('admits the committed physical successor without depending on the original Host identity', async () => {
+    for (const generation of [1, 2]) {
+      const test = fixture(true, ['e'.repeat(64)]);
+      test.coordination.portability.handedOff = true;
+      test.coordination.portability.returnAuthority = {
+        authorityFingerprint: 'e'.repeat(64), authorityGeneration: generation,
+        hostMemberId: 'previous-host', principalId: 'previous:principal',
+      };
+      const result = test.coordinator.begin({ principalId: HOST_PRINCIPAL_ID, request: {
+        checkpointManifestSha256: test.checkpoint.manifest.manifestSha256,
+        expectedSourceAuthorityGeneration: 1, idempotencyKey: 'intent-begin', projectId: PROJECT_ID,
+        sourceHostMemberId: HOST_MEMBER_ID, sourceProof: 'source-proof', targetUrl: TARGET_URL, transferId: TRANSFER_ID,
+      } });
+      if (generation === 1) assert.equal((await result).phase, 'source-quiesced');
+      else await assertCode(result, 'state-conflict');
     }
   });
 

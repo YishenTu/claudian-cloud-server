@@ -150,7 +150,7 @@ it('issues independent recovery links and atomically binds the proven member wit
           const route = collabCloudProjectOperationRoute(PROJECT, operation);
           const reply = await fetch(`http://127.0.0.1:${String(address.port)}${route.target}`, {
             method: route.method, headers: { 'content-type': 'application/json', authorization: `Bearer ${credential}` },
-            body: JSON.stringify({ protocolVersion: 14, requestId: 'request_http_recovery', data }),
+            body: JSON.stringify({ protocolVersion: 15, requestId: 'request_http_recovery', data }),
           });
           return { status: reply.status, body: await reply.json() as unknown };
         };

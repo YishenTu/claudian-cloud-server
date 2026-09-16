@@ -7,6 +7,8 @@ import {
 } from 'node:crypto';
 
 import {
+  decodeCollabLanHostActivationProof,
+  encodeCollabLanHostActivationProofSigningInput,
   encodeCollabAuthorityRelinquishmentProofSigningInput,
   encodeCollabCloudToLanTargetCleanupProofSigningInput,
   encodeCollabTransferredMembershipRedemptionReceiptSigningInput,
@@ -328,15 +330,37 @@ implements CloudToLanTargetTrustPort, LanToCloudSourceTrustPort {
     readonly receiptPublicKey: string;
   }>>();
 
-  verifySourceProof(input: Readonly<{
-    readonly principalId: string;
-    readonly proof: string;
-  }>): Promise<VerifiedLanToCloudSourceProof> {
+  verifySourceProof(input: Parameters<LanToCloudSourceTrustPort['verifySourceProof']>[0]): Promise<VerifiedLanToCloudSourceProof> {
     return asynchronous(() => {
       if (!PRINCIPAL_PATTERN.test(input.principalId)) return fail();
       const envelope = sourceEnvelope(input.proof);
       if (envelope.payload.sourcePrincipalId !== input.principalId) return fail();
+      const predecessorFingerprints: string[] = [];
+      const proofs = input.hostActivationProofs ?? [];
+      if (proofs.length > 32) return fail();
+      const currentFingerprint = certificate(envelope.caCertificatePem).fingerprint256.replaceAll(':', '').toLowerCase();
+      const transferIds = new Set<string>();
+      let previousTarget: string | undefined;
+      for (const encodedProof of proofs) {
+        const proof = decodeCollabLanHostActivationProof(encodedProof);
+        const signerFingerprint = certificate(proof.caCertificatePem).fingerprint256.replaceAll(':', '').toLowerCase();
+        if (proof.projectId !== envelope.payload.projectId
+          || proof.authorityGeneration !== envelope.payload.sourceAuthorityGeneration
+          || transferIds.has(proof.transferId)
+          || proof.targetCaFingerprint === signerFingerprint
+          || (previousTarget !== undefined && signerFingerprint !== previousTarget)) return fail();
+        const { signature, ...payload } = proof;
+        verifyRsaPss(proof.caCertificatePem, signature,
+          encodeCollabLanHostActivationProofSigningInput(payload));
+        transferIds.add(proof.transferId);
+        predecessorFingerprints.push(signerFingerprint);
+        previousTarget = proof.targetCaFingerprint;
+      }
+      const last = proofs.at(-1);
+      if (last && (last.targetCaFingerprint !== currentFingerprint
+        || last.targetHostMemberId !== envelope.payload.sourceHostMemberId)) return fail();
       const verified: VerifiedLanToCloudSourceProof = Object.freeze({
+        ...(proofs.length ? { committedPredecessorFingerprints: Object.freeze(predecessorFingerprints) } : {}),
         authorityFingerprint: certificate(envelope.caCertificatePem).fingerprint256.replaceAll(':', '').toLowerCase(),
         checkpointManifestSha256: envelope.payload.checkpointManifestSha256,
         projectId: envelope.payload.projectId,

@@ -188,7 +188,7 @@ async function projectOperation(
   const response = await fetch(`${baseUrl}${route.target}`, {
     body: JSON.stringify({
       data,
-      protocolVersion: 14,
+      protocolVersion: 15,
       requestId: `request-${operation}`,
     }),
     headers: {
@@ -213,7 +213,7 @@ async function rejectedProjectOperation(
   const response = await fetch(`${baseUrl}${route.target}`, {
     body: JSON.stringify({
       data,
-      protocolVersion: 14,
+      protocolVersion: 15,
       requestId: `request-rejected-${operation}`,
     }),
     headers: {
@@ -1058,7 +1058,7 @@ while :; do sleep 1; done`,
         [{ authorization: `Bearer ${'d'.repeat(64)}`, 'x-claudian-ingress-principal': claimedPrincipal }, 404, 'project-not-found'],
       ] as const) {
         const snapshot = await fetch(`${origin}${snapshotRoute.target}`, {
-          body: JSON.stringify({ data: { projectId }, protocolVersion: 14, requestId: 'credential-isolation' }),
+          body: JSON.stringify({ data: { projectId }, protocolVersion: 15, requestId: 'credential-isolation' }),
           headers: { ...headers, 'content-type': 'application/json' },
           method: snapshotRoute.method,
         });
@@ -1401,7 +1401,7 @@ while :; do sleep 1; done`,
       const snapshotResponse = await fetch(`${baseUrl}${snapshotRoute.target}`, {
         body: JSON.stringify({
           data: { projectId },
-          protocolVersion: 14,
+          protocolVersion: 15,
           requestId: 'request-production-snapshot',
         }),
         headers: {

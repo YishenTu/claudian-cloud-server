@@ -24,6 +24,7 @@ import {
   type CollabCheckpointProjectRecord,
   type CollabControlOperationMap,
   type CollabIsoTimestamp,
+  type CollabLanHostActivationProof,
   type CollabMemberId,
   type CollabProjectId,
   type CollabTransferredMembershipClaimBatch,
@@ -110,6 +111,7 @@ export interface LanToCloudTransferCoordination {
 }
 
 export interface VerifiedLanToCloudSourceProof {
+  readonly committedPredecessorFingerprints?: readonly string[];
   readonly authorityFingerprint: string;
   readonly checkpointManifestSha256: string;
   readonly projectId: CollabProjectId;
@@ -124,6 +126,7 @@ export interface LanToCloudSourceTrustPort {
   verifySourceProof(input: Readonly<{
     readonly principalId: string;
     readonly proof: string;
+    readonly hostActivationProofs?: readonly CollabLanHostActivationProof[];
   }>): Promise<VerifiedLanToCloudSourceProof>;
   verifyRelinquishmentProof(input: Readonly<{
     readonly proof: CollabAuthorityRelinquishmentProof;
@@ -858,6 +861,7 @@ implements ProjectLifecycleRecoveryOwner {
       const verified = await this.#relinquishmentTrust.verifySourceProof({
         principalId: input.principalId,
         proof: request.sourceProof,
+        ...(request.hostActivationProofs ? { hostActivationProofs: request.hostActivationProofs } : {}),
       });
       if (!exactSourceProof(verified, {
         checkpointManifestSha256: request.checkpointManifestSha256,
@@ -897,9 +901,10 @@ implements ProjectLifecycleRecoveryOwner {
               if (
                 authority === undefined
                 || authority.authorityGeneration !== request.expectedSourceAuthorityGeneration
-                || authority.hostMemberId !== request.sourceHostMemberId
-                || authority.principalId !== input.principalId
-                || authority.authorityFingerprint !== verified.authorityFingerprint
+                || !((authority.hostMemberId === request.sourceHostMemberId
+                  && authority.principalId === input.principalId
+                  && authority.authorityFingerprint === verified.authorityFingerprint)
+                  || verified.committedPredecessorFingerprints?.includes(authority.authorityFingerprint))
               ) return fail('state-conflict');
             }
             await scope.portability.putLifecycleJournal({

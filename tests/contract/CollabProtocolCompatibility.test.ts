@@ -87,8 +87,8 @@ const expectedOperations = [
 const repositoryRoot = resolve(import.meta.dirname, '../..');
 
 describe('canonical Collab protocol consumer contract', () => {
-  it('loads wire version 14, Cloud binding 10, and one operation inventory from the package root', () => {
-    assert.equal(COLLAB_PROTOCOL_VERSION, 14);
+  it('loads wire version 15, Cloud binding 10, and one operation inventory from the package root', () => {
+    assert.equal(COLLAB_PROTOCOL_VERSION, 15);
     assert.equal(COLLAB_CLOUD_BINDING_VERSION, 10);
     assert.deepEqual(
       Object.keys(COLLAB_CONTROL_OPERATION_CODECS).sort(),
@@ -150,7 +150,7 @@ describe('canonical Collab protocol consumer contract', () => {
       bindingVersions: [10],
       capabilities: [...COLLAB_CLOUD_CAPABILITIES],
       limits,
-      protocolVersions: [14],
+      protocolVersions: [15],
       schemaVersion: 2,
     });
     assert.throws(
@@ -178,7 +178,7 @@ describe('canonical Collab protocol consumer contract', () => {
   it('decodes the accepted envelope and rejects unknown envelope fields', () => {
     const accepted = {
       data: { projectId: 'project-a' },
-      protocolVersion: 14,
+      protocolVersion: 15,
       requestId: 'request-a',
     };
 

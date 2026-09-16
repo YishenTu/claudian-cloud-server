@@ -241,7 +241,7 @@ async function importTransfer(
     operationId: transferId,
     profile: 'authority-transfer',
     projectId,
-    protocolVersion: 14,
+    protocolVersion: 15,
     refs,
     sourceAuthority: Object.freeze({ generation: 1, kind: 'lan' }),
     targetAuthority: Object.freeze({ generation: 2, kind: 'cloud' }),
